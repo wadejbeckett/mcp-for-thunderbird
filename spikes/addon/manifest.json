@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "MFT spike (throwaway)",
+  "version": "0.0.1",
+  "description": "Task 2 spike add-on for MCP for Thunderbird. Never shipped.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mft-spike@wadejbeckett.github.io",
+      "strict_min_version": "153.0"
+    }
+  },
+  "background": { "scripts": ["background.js"] },
+  "permissions": [
+    "nativeMessaging",
+    "accountsRead",
+    "messagesRead",
+    "messagesImport",
+    "messages.save",
+    "compose",
+    "compose.save",
+    "storage"
+  ],
+  "optional_permissions": ["messages.send"],
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}
