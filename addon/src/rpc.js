@@ -61,10 +61,17 @@ async function resolveAccountName(args, s) {
   return hit.length === 1 ? { ...args, account: hit[0].id } : args;
 }
 
+// withoutNulls drops top-level arguments sent as null: some MCP clients
+// send null for every optional argument they leave out, and null means
+// "not given" for every tool.
+function withoutNulls(args) {
+  return Object.fromEntries(Object.entries(args).filter(([, v]) => v !== null));
+}
+
 export async function dispatch(call) {
   const client = typeof call.client === "string" && call.client ? call.client : "unknown";
   const argsOk = call.args == null || (typeof call.args === "object" && !Array.isArray(call.args));
-  let args = argsOk && call.args ? call.args : {};
+  let args = argsOk && call.args ? withoutNulls(call.args) : {};
   const targets = targetsOf(args);
   let msg;
   try {

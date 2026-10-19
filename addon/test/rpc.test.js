@@ -168,3 +168,18 @@ test("log targets keep only decodable ids, at most 20 of at most 200 characters"
   await dispatch(call("mail_folders", { account: "a1", folder: "F".repeat(500) }));
   assert.equal((await list())[0].targets[0].length, 200);
 });
+
+test("an argument sent as null counts as absent", async () => {
+  // Some MCP clients send null for every optional argument they omit.
+  let seen;
+  HANDLERS.mail_search = async (args) => {
+    seen = args;
+    return { messages: [] };
+  };
+  const r = await dispatch(call("mail_search", { text: "invoice", account: null, folder: null, id: null, ids: null, limit: null }));
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(seen, { text: "invoice" });
+  // A null inside a value is the handler's to judge; only top-level nulls go.
+  await dispatch(call("mail_search", { tags: ["a", null] }));
+  assert.deepEqual(seen, { tags: ["a", null] });
+});
