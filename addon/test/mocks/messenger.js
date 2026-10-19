@@ -6,7 +6,10 @@
 // Derived from the vitalio-sh "thunderbird-cli" extension test mocks
 // (test/extension.test.mjs, seed commit 465613d), MIT licence, see NOTICE.
 // Extended with native ports, storage.local and onChanged, accounts,
-// folders, paged messages.query, action and permissions.
+// folders, paged messages.query, action and permissions. Task 11 added
+// identities, folder info, date windows and the other query filters,
+// oldest-first ordering, never-settling queries, raw sources, attachments
+// and address books.
 
 export function event() {
   const listeners = [];
@@ -36,6 +39,9 @@ export function header(id, folder, extra = {}) {
     junk: false,
     size: 10,
     tags: [],
+    recipients: [],
+    ccList: [],
+    bccList: [],
     folder,
     headerMessageId: `m${id}@example.org`,
     ...extra,
@@ -73,8 +79,9 @@ export class MockPort {
 }
 
 // createMessenger returns a fresh mock. `accounts` is a list of
-// {id, name, type, folders: [path, ...]}.
-export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [] } = {}) {
+// {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]}}.
+// `books` is a list of {id, name, contacts: [vCard string, ...]}.
+export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [] } = {}) {
   const local = new Map();
   const onChanged = event();
   const ports = [];
@@ -85,14 +92,28 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const folderList = [];
   for (const a of accounts) {
     for (const path of a.folders || []) {
-      folderList.push({ id: `${a.id}:/${path}`, accountId: a.id, path, name: path.split("/").pop() });
+      folderList.push({
+        id: `${a.id}:/${path}`,
+        accountId: a.id,
+        path,
+        name: path.split("/").pop(),
+        isRoot: false,
+        specialUse: (a.specialUse && a.specialUse[path]) || [],
+      });
     }
   }
 
   // messages: numeric id -> header
   const store = new Map();
   let nextId = 1;
-  const calls = { query: [], abortList: [], continueList: [], get: [] };
+  // side data a real MessageHeader does not carry
+  const bodies = new Map();
+  const attachments = new Map();
+  const refs = new Map();
+  const calls = { query: [], abortList: [], continueList: [], get: [], getRaw: [], listAttachments: [], getFolderInfo: [], contactsQuery: [] };
+  // hang: queries matching this predicate never settle (as some
+  // Thunderbird searches do, docs/SPIKES.md §3)
+  const behaviour = { hang: null, inFlight: 0, maxInFlight: 0 };
   const lists = new Map();
   let nextList = 1;
 
@@ -140,10 +161,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       onChanged,
     },
     accounts: {
-      list: async () => accounts.map(({ id, name, type }) => ({ id, name, type })),
+      list: async () => accounts.map(({ id, name, type, identities = [] }) => ({ id, name, type, identities: clone(identities) })),
       get: async (id) => {
         const a = accounts.find((x) => x.id === id);
-        return a ? { id: a.id, name: a.name, type: a.type } : null;
+        return a ? { id: a.id, name: a.name, type: a.type, identities: clone(a.identities || []) } : null;
       },
     },
     folders: {
@@ -154,6 +175,13 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (!f) throw new Error(`Folder not found: ${id}`);
         return clone(f);
       },
+      getFolderInfo: async (id) => {
+        calls.getFolderInfo.push(id);
+        const f = folderList.find((x) => x.id === id);
+        if (!f) throw new Error(`Folder not found: ${id}`);
+        const hs = [...store.values()].filter((h) => h.folder.id === id);
+        return { totalMessageCount: hs.length, unreadMessageCount: hs.filter((h) => !h.read).length };
+      },
     },
     messages: {
       get: async (id) => {
@@ -161,16 +189,49 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (!store.has(id)) throw new Error(`Message not found: ${id}.`);
         return clone(store.get(id));
       },
-      // query honours accountId, folderId and headerMessageId. With
-      // messagesPerPage it pages the results through continueList.
+      // query honours the filters MCP for Thunderbird uses, returns
+      // results oldest first (folder storage order) and pages them through
+      // continueList. A string fromDate/toDate never settles, as in
+      // Thunderbird 153. Text matches are case-sensitive.
       query: async (q = {}) => {
         calls.query.push(q);
-        const all = [...store.values()].filter(
-          (h) =>
-            (q.accountId == null || h.folder.accountId === q.accountId) &&
-            (q.folderId == null || h.folder.id === q.folderId) &&
-            (q.headerMessageId == null || h.headerMessageId === q.headerMessageId),
-        );
+        const never = () => new Promise(() => {});
+        if (typeof q.fromDate === "string" || typeof q.toDate === "string") return never();
+        if (behaviour.hang && behaviour.hang(q)) return never();
+        behaviour.inFlight++;
+        behaviour.maxInFlight = Math.max(behaviour.maxInFlight, behaviour.inFlight);
+        await new Promise((r) => setImmediate(r));
+        behaviour.inFlight--;
+        const list = (v) => (v == null ? null : [].concat(v));
+        const accs = list(q.accountId);
+        const fids = list(q.folderId);
+        const inFolder = (h) => {
+          if (!fids) return true;
+          return fids.some((fid) => {
+            if (h.folder.id === fid) return true;
+            const f = folderList.find((x) => x.id === fid);
+            return Boolean(q.includeSubFolders && f && h.folder.accountId === f.accountId && h.folder.path.startsWith(f.path + "/"));
+          });
+        };
+        const has = (s, sub) => String(s ?? "").includes(sub);
+        const all = [...store.values()]
+          .filter(
+            (h) =>
+              (!accs || accs.includes(h.folder.accountId)) &&
+              inFolder(h) &&
+              (q.headerMessageId == null || h.headerMessageId === q.headerMessageId) &&
+              (q.fromDate == null || h.date.getTime() >= q.fromDate.getTime()) &&
+              (q.toDate == null || h.date.getTime() <= q.toDate.getTime()) &&
+              (q.author == null || has(h.author, q.author)) &&
+              (q.recipients == null || [...h.recipients, ...h.ccList, ...h.bccList].some((r) => has(r, q.recipients))) &&
+              (q.subject == null || has(h.subject, q.subject)) &&
+              (q.fullText == null || has(h.subject, q.fullText) || has(h.author, q.fullText) || has(bodies.get(h.id), q.fullText)) &&
+              (q.read == null || h.read === q.read) &&
+              (q.flagged == null || h.flagged === q.flagged) &&
+              (q.tags == null || Object.keys(q.tags.tags || {}).every((t) => h.tags.includes(t))) &&
+              (q.attachment == null || (attachments.get(h.id) || []).length > 0 === q.attachment),
+          )
+          .sort((a, b) => a.date - b.date);
         return page(all, q.messagesPerPage || 100, q.emptyFirstPage);
       },
       continueList: async (listId) => {
@@ -183,6 +244,49 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       abortList: async (listId) => {
         calls.abortList.push(listId);
         lists.delete(listId);
+      },
+      listAttachments: async (id) => {
+        calls.listAttachments.push(id);
+        if (!store.has(id)) throw new Error(`Message not found: ${id}.`);
+        return clone(attachments.get(id) || []);
+      },
+      // getRaw builds a small RFC 5322 source from the header and side data;
+      // a File (Blob) unless data_format is "BinaryString".
+      getRaw: async (id, opts = {}) => {
+        calls.getRaw.push(id);
+        const h = store.get(id);
+        if (!h) throw new Error(`Message not found: ${id}.`);
+        const r = refs.get(id) || {};
+        const lines = [`Message-ID: <${h.headerMessageId}>`, `From: ${h.author}`, `Subject: ${h.subject}`];
+        if (r.inReplyTo) lines.push(`In-Reply-To: <${r.inReplyTo}>`);
+        if (r.references && r.references.length) lines.push(`References: ${r.references.map((x) => `<${x}>`).join("\r\n ")}`);
+        const raw = lines.join("\r\n") + "\r\n\r\n" + (bodies.get(id) || "");
+        return opts.data_format === "BinaryString" ? raw : new Blob([raw]);
+      },
+    },
+    addressBooks: {
+      list: async () => books.map(({ id, name, remote = false }) => ({ id, name, type: "addressBook", remote })),
+      contacts: {
+        list: async (parentId) => {
+          const b = books.find((x) => x.id === parentId);
+          if (!b) throw new Error(`Address book not found: ${parentId}`);
+          return b.contacts.map((vCard, i) => ({ id: `${b.id}-${i}`, parentId: b.id, type: "contact", vCard }));
+        },
+        // query matches every space-separated term, case-insensitively,
+        // against the whole vCard (Thunderbird matches name and email fields).
+        query: async (q = {}) => {
+          calls.contactsQuery.push(q);
+          const terms = String(q.searchString || "").toLowerCase().split(/\s+/).filter(Boolean);
+          const out = [];
+          for (const b of books) {
+            if (q.parentId && b.id !== q.parentId) continue;
+            if (q.includeRemote === false && b.remote) continue;
+            b.contacts.forEach((vCard, i) => {
+              if (terms.every((t) => vCard.toLowerCase().includes(t))) out.push({ id: `${b.id}-${i}`, parentId: b.id, type: "contact", vCard });
+            });
+          }
+          return out;
+        },
       },
     },
     action: {
@@ -228,6 +332,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     tabs,
     actionState,
     calls,
+    behaviour,
     store,
     local,
     lastPort: () => ports.at(-1),
@@ -236,8 +341,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       const f = folderList.find((x) => x.accountId === accountId && x.path === path);
       if (!f) throw new Error(`no folder ${accountId} ${path}`);
       const id = nextId++;
-      const h = header(id, { ...f }, extra);
+      const { body, attachments: atts, references, inReplyTo, ...rest } = extra;
+      const h = header(id, { ...f }, rest);
       store.set(id, h);
+      if (body !== undefined) bodies.set(id, body);
+      if (atts !== undefined) attachments.set(id, atts);
+      if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
       return clone(h);
     },
     removeMessage(id) {
