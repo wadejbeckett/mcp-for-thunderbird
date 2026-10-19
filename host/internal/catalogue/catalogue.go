@@ -69,7 +69,7 @@ var tools = []Tool{
 		Description: "Lists folders of an account with unread and total counts, leaving out folders the user has excluded.",
 		Input:       schema(nil, m{"account": account()})},
 	{Name: "mail_search", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search.",
+		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search. hasAttachments is null when it could not be checked in time.",
 		Input: schema(nil, m{
 			"account": account(), "text": str("Text to find in the message."), "from": str("Sender contains."),
 			"to": str("Recipient contains."), "subject": str("Subject contains."),
@@ -86,7 +86,7 @@ var tools = []Tool{
 			"max_chars": m{"type": "integer", "minimum": 1, "maximum": 50000, "default": 8000, "description": "Maximum body characters."},
 		})},
 	{Name: "mail_thread", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Returns the messages in the conversation of one message, headers and short excerpts only.",
+		Description: "Returns the messages in the conversation of one message as pointers (id, from, subject, date, flags, tags) only, never message text; use mail_read for text. It may be marked truncated if Thunderbird was slow.",
 		Input:       schema([]string{"id"}, m{"account": account(), "id": str("Message id from mail_search.")})},
 	{Name: "mail_attachment", Group: "read",
 		Description: "Saves one attachment to the user's attachment folder and returns its path and, for text types, extracted text.",
@@ -112,7 +112,7 @@ var tools = []Tool{
 		Description: "Searches the user's address books and returns names and email addresses.",
 		Input: schema([]string{"query"}, m{
 			"account": account(), "query": str("Name or address fragment."),
-			"limit": m{"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum results."},
+			"limit": m{"type": "integer", "minimum": 1, "maximum": 200, "default": 25, "description": "Maximum results."},
 		})},
 	{Name: "mail_mark", Group: "organise", Idempotent: true,
 		Description: "Sets read and flagged state on messages and returns how many changed.",

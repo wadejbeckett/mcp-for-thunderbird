@@ -117,6 +117,7 @@ test("search maps its arguments to messages.query with Date objects", async () =
   assert.equal(q.attachment, true);
   assert.equal(q.messagesPerPage, 7);
   assert.equal(q.autoPaginationTimeout, 0);
+  assert.equal(q.returnMessageListId, true);
   assert.ok(q.fromDate instanceof Date && q.toDate instanceof Date);
   // The first window ends at the end of `until` and the last starts at `since`.
   assert.ok(q.toDate.getTime() >= new Date(2026, 2, 4, 23, 59).getTime());
@@ -192,10 +193,9 @@ test("TestSearchStopsAtLimitOn100k", async () => {
   // reading on, so the total stays logarithmic in the window size.
   const pageSize = mock.calls.query[0].messagesPerPage;
   assert.equal(pageSize, limit);
-  const perList = new Map();
-  for (const id of mock.calls.continueList) perList.set(id, (perList.get(id) || 1) + 1);
-  for (const n of perList.values()) assert.ok(n <= Math.ceil(limit / pageSize) + 1, `a list read for ${n} pages`);
-  const pages = mock.calls.query.length + mock.calls.continueList.length;
+  const perQuery = mock.pagesPerQuery();
+  for (const n of perQuery) assert.ok(n <= Math.ceil(limit / pageSize) + 1, `a list read for ${n} pages`);
+  const pages = perQuery.reduce((a, b) => a + b, 0);
   assert.ok(pages <= 64, `fetched ${pages} pages`);
   assert.equal(out.messages.length, limit);
   assert.equal(out.truncated, true);
@@ -256,6 +256,49 @@ test("a query that never settles returns what was found with truncated true", as
     ["recent"],
   );
   assert.equal(out.truncated, true);
+  assert.deepEqual(mock.openLists(), [], "the hung list is aborted");
+});
+
+test("a query that answers after the budget has its list aborted", async () => {
+  SEARCH.budgetMs = 150;
+  mock.addMessage("a3", "INBOX", { subject: "late", date: ago(1) });
+  mock.behaviour.delay = () => 400;
+  const out = await ok("mail_search", { account: "a3" });
+  assert.deepEqual(out, { messages: [], truncated: true });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(mock.calls.query.length, 1);
+  assert.equal(mock.calls.abortList.length, 1, "the late list id is aborted");
+  assert.deepEqual(mock.openLists(), []);
+});
+
+test("a rejected query aborts every open list before the error", async () => {
+  // a3's list opens and hangs; a1's query fails a little later
+  mock.behaviour.hang = (q) => q.accountId === "a3";
+  const real = mock.messenger.messages.query;
+  mock.messenger.messages.query = async (q) => {
+    if (q.accountId === "a1") {
+      await new Promise((r) => setTimeout(r, 30));
+      throw new Error("Thunderbird failed");
+    }
+    return real(q);
+  };
+  const r = await call("mail_search", {});
+  assert.equal(r.error.code, "thunderbird_error");
+  assert.ok(mock.calls.abortList.length >= 1);
+  assert.deepEqual(mock.openLists(), []);
+});
+
+test("hasAttachments is null when the check does not finish within the budget", async () => {
+  SEARCH.budgetMs = 200;
+  mock.addMessage("a3", "INBOX", { subject: "x", date: ago(1) });
+  mock.messenger.messages.listAttachments = () => new Promise(() => {});
+  const t0 = Date.now();
+  const out = await ok("mail_search", { account: "a3" });
+  assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0} ms`);
+  assert.equal(out.messages.length, 1);
+  assert.equal(out.messages[0].hasAttachments, null);
+  const known = await ok("mail_search", { account: "a3", has_attachment: false });
+  assert.equal(known.messages[0].hasAttachments, false);
 });
 
 test("a never-settling continueList is aborted", async () => {
@@ -265,7 +308,13 @@ test("a never-settling continueList is aborted", async () => {
   for (let i = 0; i < 5; i++) mock.addMessage("a3", "INBOX", { date: when });
   mock.messenger.messages.query = ((real) => (q) => real({ ...q, messagesPerPage: 2 }))(mock.messenger.messages.query);
   const hung = [];
+  const realNext = mock.messenger.messages.continueList;
+  let first = true;
   mock.messenger.messages.continueList = async (id) => {
+    if (first) {
+      first = false;
+      return realNext(id);
+    }
     hung.push(id);
     return new Promise(() => {});
   };
@@ -343,6 +392,8 @@ function threadFixture() {
     references: ["root@x", "hidden@x", "reply@x"],
   });
   mock.addMessage("a1", "INBOX", { subject: "Plan", date: ago(1), headerMessageId: "unrelated@x" });
+  // same subject, replies to the root, but in an excluded folder
+  mock.addMessage("a1", "Secret", { subject: "Re: Plan", date: ago(2), headerMessageId: "hidden2@x", references: ["root@x"] });
   mock.addMessage("a3", "INBOX", { subject: "Re: Plan", date: ago(1), headerMessageId: "other-account@x", references: ["root@x"] });
   return { root, hidden, reply, later };
 }
@@ -366,6 +417,28 @@ test("TestThreadExcludesExcluded", async () => {
     [root.headerMessageId, reply.headerMessageId, later.headerMessageId],
   );
   assert.equal((await call("mail_thread", { id: encodeId("a1", "Secret", "hidden@x") })).error.code, "excluded");
+  const secretIds = [...mock.store.values()].filter((h) => h.folder.path === "Secret").map((h) => h.id);
+  for (const id of mock.calls.getRaw) assert.ok(!secretIds.includes(id), "no raw source read from an excluded folder");
+  assert.equal("truncated" in fromRoot, false);
+});
+
+test("thread is marked truncated when its budget runs out", async () => {
+  SEARCH.budgetMs = 200;
+  const { reply } = threadFixture();
+  mock.behaviour.hang = (q) => q.headerMessageId === "root@x";
+  const out = await ok("mail_thread", { id: encodeId("a1", "INBOX", reply.headerMessageId) });
+  assert.equal(out.truncated, true);
+  assert.ok(out.messages.some((p) => decodeId(p.id).headerMessageId === "reply@x"));
+  assert.deepEqual(mock.openLists(), []);
+});
+
+test("mail_folders gives up when Thunderbird does not answer", async () => {
+  SEARCH.budgetMs = 150;
+  mock.messenger.folders.query = () => new Promise(() => {});
+  const t0 = Date.now();
+  const r = await call("mail_folders", {});
+  assert.equal(r.error.code, "thunderbird_error");
+  assert.ok(Date.now() - t0 < 1000);
 });
 
 test("thread of a vanished message is not_found", async () => {

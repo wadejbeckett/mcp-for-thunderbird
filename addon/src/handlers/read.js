@@ -14,11 +14,17 @@
 //
 // Search (ruling R9, docs/SPIKES.md §3): Thunderbird returns matches
 // oldest first, and some queries never settle. So the search walks date
-// windows newest first (30 days, then 60, 120 … back to `since`), with
-// Date objects, a page size of what is still wanted, and one time budget
-// per call. A window whose first page is full with more behind it is split
-// in two and the newer half searched first, so the newest matches are
-// found without draining a large window.
+// windows newest first, with Date objects, a page size of what is still
+// wanted, and one time budget per call. The lookback doubles each step
+// (30, 60, 120 … days back, so the windows span 30, 30, 60, 120 … days)
+// until `since`. A window whose first page is full with more behind it is
+// split in two and the newer half searched first, so the newest matches
+// are found without draining a large window (ruling R19).
+//
+// Every query asks for its list id (returnMessageListId) and reads pages
+// with continueList, so every list can be aborted: on a split, when
+// enough is found, on timeout, on error, and when an answer arrives after
+// its timeout.
 
 import { HANDLERS } from "../rpc.js";
 import { encodeId, resolveId } from "../ids.js";
@@ -54,17 +60,46 @@ const TIMEOUT = Symbol("timeout");
 
 const tb = () => globalThis.messenger;
 
-// call runs fn through the limiter and gives up at the deadline, freeing
-// its slot even when Thunderbird never answers.
-function call(fn, deadline) {
+// A run is one handler call: its deadline, the message lists it has open,
+// and whether it ran out of time or failed.
+function newRun() {
+  return { deadline: Date.now() + SEARCH.budgetMs, open: new Set(), timedOut: false, failed: false };
+}
+
+const listIdOf = (v) => (typeof v === "string" ? v : v && typeof v.id === "string" ? v.id : null);
+
+// call runs fn through the limiter and gives up at the run's deadline,
+// freeing its slot even when Thunderbird never answers. With list: true, a
+// message list that arrives after the timeout is aborted.
+function call(run, fn, { list = false } = {}) {
   return limiter.run(() => {
-    const left = deadline - Date.now();
-    if (left <= 0) return TIMEOUT;
+    const left = run.deadline - Date.now();
+    if (left <= 0) {
+      run.timedOut = true;
+      return TIMEOUT;
+    }
     let timer;
+    const work = Promise.resolve().then(fn);
     const expire = new Promise((resolve) => {
       timer = setTimeout(() => resolve(TIMEOUT), left);
     });
-    return Promise.race([Promise.resolve().then(fn), expire]).finally(() => clearTimeout(timer));
+    return Promise.race([work, expire])
+      .then((v) => {
+        if (v === TIMEOUT) {
+          run.timedOut = true;
+          if (list) {
+            work.then(
+              (late) => {
+                const id = listIdOf(late);
+                if (id) abort(id);
+              },
+              () => {},
+            );
+          }
+        }
+        return v;
+      })
+      .finally(() => clearTimeout(timer));
   });
 }
 
@@ -82,6 +117,51 @@ async function abort(listId) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function closeList(run, listId) {
+  run.open.delete(listId);
+  await abort(listId);
+}
+
+async function closeAll(run) {
+  await Promise.all([...run.open].map((id) => closeList(run, id)));
+}
+
+// nextPage reads the next page of an open list. On timeout the list is
+// aborted; a list the run no longer wants (it failed) is closed.
+async function nextPage(run, listId) {
+  const page = await call(run, () => tb().messages.continueList(listId), { list: true });
+  if (page === TIMEOUT) {
+    await closeList(run, listId);
+    return TIMEOUT;
+  }
+  const p = page && typeof page === "object" ? page : { id: null, messages: [] };
+  if (p.id !== listId) run.open.delete(listId);
+  if (p.id) run.open.add(p.id);
+  if (run.failed && p.id) {
+    await closeList(run, p.id);
+    return TIMEOUT;
+  }
+  return p;
+}
+
+// openList starts a query and returns its first page, or TIMEOUT.
+async function openList(run, query) {
+  const listId = await call(run, () => tb().messages.query({ ...query, returnMessageListId: true }), { list: true });
+  if (listId === TIMEOUT) return TIMEOUT;
+  if (typeof listId !== "string") {
+    // an older Thunderbird answered with the first page itself
+    const p = listId && typeof listId === "object" ? listId : { id: null, messages: [] };
+    if (p.id) run.open.add(p.id);
+    return p;
+  }
+  run.open.add(listId);
+  if (run.failed) {
+    await closeList(run, listId);
+    return TIMEOUT;
+  }
+  return nextPage(run, listId);
 }
 
 // ---- arguments ----
@@ -162,25 +242,30 @@ function pointer(h, hasAttachments) {
     read: Boolean(h.read),
     flagged: Boolean(h.flagged),
     tags: Array.isArray(h.tags) ? h.tags.map(String) : [],
-    hasAttachments: Boolean(hasAttachments),
+    hasAttachments,
   };
 }
 
 // pointers adds hasAttachments: known from the query when it filtered on
-// attachments, else from messages.listAttachments (false if Thunderbird
-// does not answer in time).
-async function pointers(headers, known, deadline) {
+// attachments, else from messages.listAttachments within the run's budget;
+// null when the check did not finish in time or failed (ruling R20).
+async function pointers(headers, known, run) {
   if (typeof known === "boolean") return headers.map((h) => pointer(h, known));
-  const until = Math.max(deadline, Date.now() + 2000);
   const flags = await Promise.all(
     headers.map((h) =>
-      call(() => tb().messages.listAttachments(h.id), until).then(
-        (list) => Array.isArray(list) && list.length > 0,
-        () => false,
+      call(run, () => tb().messages.listAttachments(h.id)).then(
+        (list) => (Array.isArray(list) ? list.length > 0 : null),
+        () => null,
       ),
     ),
   );
   return headers.map((h, i) => pointer(h, flags[i]));
+}
+
+// answered fails the call when Thunderbird did not answer in time.
+function answered(v) {
+  if (v === TIMEOUT) fail("thunderbird_error", "Thunderbird did not answer in time.");
+  return v;
 }
 
 const newestFirst = (a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id;
@@ -212,14 +297,14 @@ const countOf = (v) => (Number.isInteger(v) ? v : null);
 async function mailFolders(args, ctx) {
   const s = ctx.settings;
   const accounts = args.account ? [args.account] : enabledAccountIds(s);
-  const deadline = Date.now() + SEARCH.budgetMs;
+  const run = newRun();
   const out = [];
   for (const accountId of accounts) {
-    const all = (await tb().folders.query({ accountId })) || [];
+    const all = answered(await call(run, () => tb().folders.query({ accountId }))) || [];
     const keep = all.filter((f) => realFolder(f, accountId) && !isExcluded(accountId, f.path, s));
     const infos = await Promise.all(
       keep.map((f) =>
-        call(() => tb().folders.getFolderInfo(f.id), deadline).then(
+        call(run, () => tb().folders.getFolderInfo(f.id)).then(
           (i) => (i && i !== TIMEOUT ? i : {}),
           () => ({}),
         ),
@@ -244,7 +329,7 @@ async function mailFolders(args, ctx) {
 // searchScope finds up to `limit` visible messages for one query scope
 // (an account, or a folder with its subfolders), newest windows first.
 // truncated is true unless every window was searched to its end.
-async function searchScope(base, { limit, untilMs, sinceMs, deadline, s }) {
+async function searchScope(base, { limit, untilMs, sinceMs, run, s }) {
   const found = new Map();
   const full = () => found.size >= limit;
   const anchor = Math.min(untilMs, Date.now());
@@ -262,20 +347,19 @@ async function searchScope(base, { limit, untilMs, sinceMs, deadline, s }) {
     }
     const stack = [[from, to]];
     while (stack.length > 0) {
-      if (full()) return { headers: [...found.values()], truncated: true };
+      if (full() || run.failed) return { headers: [...found.values()], truncated: true };
       const [f, t] = stack.pop();
       const per = limit - found.size;
       const q = { ...base, toDate: new Date(t), messagesPerPage: per, autoPaginationTimeout: 0 };
       if (f != null) q.fromDate = new Date(f);
-      let page = await call(() => tb().messages.query(q), deadline);
+      let page = await openList(run, q);
       if (page === TIMEOUT) return { headers: [...found.values()], truncated: true };
-      if (!page) page = { id: null, messages: [] };
       let msgs = page.messages || [];
       const low = f == null ? FLOOR : f;
       if (page.id && msgs.length >= per && t - low > MIN_SPAN) {
         // Full first page with more behind it: these are the window's
         // oldest. Search the newer half first instead.
-        await abort(page.id);
+        await closeList(run, page.id);
         const mid = Math.floor((low + t) / 2);
         stack.push([f, mid + OVERLAP]);
         stack.push([mid, t]);
@@ -288,16 +372,12 @@ async function searchScope(base, { limit, untilMs, sinceMs, deadline, s }) {
         }
         if (!page.id) break;
         const listId = page.id;
-        if (full()) {
-          await abort(listId);
+        if (full() || run.failed) {
+          await closeList(run, listId);
           return { headers: [...found.values()], truncated: true };
         }
-        page = await call(() => tb().messages.continueList(listId), deadline);
-        if (page === TIMEOUT) {
-          await abort(listId);
-          return { headers: [...found.values()], truncated: true };
-        }
-        if (!page) page = { id: null, messages: [] };
+        page = await nextPage(run, listId);
+        if (page === TIMEOUT) return { headers: [...found.values()], truncated: true };
         msgs = page.messages || [];
       }
     }
@@ -306,8 +386,8 @@ async function searchScope(base, { limit, untilMs, sinceMs, deadline, s }) {
   }
 }
 
-async function folderByPath(accountId, path) {
-  const list = (await tb().folders.query({ accountId, path })) || [];
+async function folderByPath(run, accountId, path) {
+  const list = answered(await call(run, () => tb().folders.query({ accountId, path }))) || [];
   const f = list.find((x) => realFolder(x, accountId) && x.path === path);
   if (!f) fail("not_found", `Folder not found: ${path}`);
   return f;
@@ -341,33 +421,40 @@ async function mailSearch(args, ctx) {
   const untilMs = untilArg ?? Date.now() + DAY;
   if (sinceMs != null && sinceMs >= untilMs) return { messages: [], truncated: false };
 
-  const deadline = Date.now() + SEARCH.budgetMs;
+  const run = newRun();
   let scopes;
   const folder = optString(args, "folder");
   if (folder !== undefined) {
     // policy has checked the folder and that the account is known
     const accountId = args.account || enabledAccountIds(s)[0];
     assertFolderAllowed(accountId, folder, s);
-    const f = await folderByPath(accountId, folder);
+    const f = await folderByPath(run, accountId, folder);
     scopes = [{ accountId, folderId: f.id, includeSubFolders: true }];
   } else {
     scopes = (args.account ? [args.account] : enabledAccountIds(s)).map((accountId) => ({ accountId }));
   }
 
-  const results = await Promise.all(scopes.map((scope) => searchScope({ ...base, ...scope }, { limit, untilMs, sinceMs, deadline, s })));
+  let results;
+  try {
+    results = await Promise.all(scopes.map((scope) => searchScope({ ...base, ...scope }, { limit, untilMs, sinceMs, run, s })));
+  } catch (e) {
+    run.failed = true;
+    await closeAll(run);
+    throw e;
+  }
   const all = results.flatMap((r) => r.headers).sort(newestFirst);
   const truncated = results.some((r) => r.truncated) || all.length > limit;
   const top = all.slice(0, limit);
-  return { messages: await pointers(top, attachment, deadline), truncated };
+  return { messages: await pointers(top, attachment, run), truncated };
 }
 
 // ---- mail_thread ----
 
 // headOf reads the first 64 KiB of a message's raw source: enough for the
 // headers, never the whole of a large message.
-async function headOf(id, deadline) {
+async function headOf(run, id) {
   try {
-    const raw = await call(() => tb().messages.getRaw(id, { data_format: "File" }), deadline);
+    const raw = await call(run, () => tb().messages.getRaw(id, { data_format: "File" }));
     if (raw === TIMEOUT || raw == null) return "";
     if (typeof raw === "string") return raw.slice(0, HEAD_BYTES);
     return await raw.slice(0, HEAD_BYTES).text();
@@ -376,11 +463,13 @@ async function headOf(id, deadline) {
   }
 }
 
-async function firstPage(query, deadline) {
+// firstPage returns a query's first page and closes its list. A thread is
+// best effort: a failed query adds nothing.
+async function firstPage(run, query) {
   try {
-    const page = await call(() => tb().messages.query(query), deadline);
-    if (page === TIMEOUT || !page) return [];
-    if (page.id) await abort(page.id);
+    const page = await openList(run, { ...query, autoPaginationTimeout: 0 });
+    if (page === TIMEOUT) return [];
+    if (page.id) await closeList(run, page.id);
     return page.messages || [];
   } catch {
     return [];
@@ -389,33 +478,32 @@ async function firstPage(query, deadline) {
 
 async function mailThread(args, ctx) {
   const s = ctx.settings;
-  const deadline = Date.now() + SEARCH.budgetMs;
+  const run = newRun();
   const msg = await resolveId(args.id);
   const accountId = msg.folder.accountId;
   assertFolderAllowed(accountId, msg.folder.path, s);
   const own = stripAngleBrackets(msg.headerMessageId);
-  const ids = buildThreadIds(await headOf(msg.id, deadline));
+  const ids = buildThreadIds(await headOf(run, msg.id));
   ids.delete(own);
   const upstream = [...ids].slice(0, THREAD_IDS_MAX);
   const inAccount = (h) => h && h.folder && h.folder.accountId === accountId;
 
   const found = new Map([[msg.id, msg]]);
-  const pages = await Promise.all(
-    upstream.map((headerMessageId) => firstPage({ accountId, headerMessageId, messagesPerPage: 20, autoPaginationTimeout: 0 }, deadline)),
-  );
+  const pages = await Promise.all(upstream.map((headerMessageId) => firstPage(run, { accountId, headerMessageId, messagesPerPage: 20 })));
   for (const h of pages.flat()) if (inAccount(h)) found.set(h.id, h);
 
   // Replies: later messages of the same subject whose References or
-  // In-Reply-To name a message of the thread.
+  // In-Reply-To name a message of the thread. Only visible candidates are
+  // read, so no raw source is opened in an excluded folder.
   const norm = normalizeSubject(msg.subject || "");
   if (norm) {
-    const query = { accountId, subject: norm, messagesPerPage: THREAD_CANDIDATES, autoPaginationTimeout: 0 };
+    const query = { accountId, subject: norm, messagesPerPage: THREAD_CANDIDATES };
     const since = new Date(msg.date);
     if (!Number.isNaN(since.getTime())) query.fromDate = since;
-    const candidates = (await firstPage(query, deadline)).filter(
-      (h) => inAccount(h) && !found.has(h.id) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
+    const candidates = (await firstPage(run, query)).filter(
+      (h) => inAccount(h) && visible(h, s) && !found.has(h.id) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
     );
-    const heads = await Promise.all(candidates.map(async (h) => [h, buildThreadIds(await headOf(h.id, deadline))]));
+    const heads = await Promise.all(candidates.map(async (h) => [h, buildThreadIds(await headOf(run, h.id))]));
     const known = new Set([own, ...upstream, ...[...found.values()].map((h) => stripAngleBrackets(h.headerMessageId))]);
     for (let changed = true; changed; ) {
       changed = false;
@@ -430,12 +518,16 @@ async function mailThread(args, ctx) {
       }
     }
   }
+  await closeAll(run);
 
+  const truncated = run.timedOut;
   const thread = [...found.values()]
     .filter((h) => inAccount(h) && visible(h, s))
     .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id)
     .slice(0, THREAD_MAX);
-  return { messages: await pointers(thread, undefined, deadline) };
+  const out = { messages: await pointers(thread, undefined, run) };
+  if (truncated) out.truncated = true;
+  return out;
 }
 
 HANDLERS.mail_accounts = mailAccounts;

@@ -112,8 +112,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const refs = new Map();
   const calls = { query: [], abortList: [], continueList: [], get: [], getRaw: [], listAttachments: [], getFolderInfo: [], contactsQuery: [] };
   // hang: queries matching this predicate never settle (as some
-  // Thunderbird searches do, docs/SPIKES.md §3)
-  const behaviour = { hang: null, inFlight: 0, maxInFlight: 0 };
+  // Thunderbird searches do, docs/SPIKES.md §3); with returnMessageListId
+  // the id comes back but the list's pages never do. delay(q) gives a
+  // query's answer time in ms.
+  const behaviour = { hang: null, delay: null, inFlight: 0, maxInFlight: 0 };
+  // pages read per query (index into calls.query), first page included
+  const pagesByQuery = new Map();
   const lists = new Map();
   let nextList = 1;
 
@@ -197,7 +201,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.query.push(q);
         const never = () => new Promise(() => {});
         if (typeof q.fromDate === "string" || typeof q.toDate === "string") return never();
-        if (behaviour.hang && behaviour.hang(q)) return never();
+        const hang = Boolean(behaviour.hang && behaviour.hang(q));
+        if (hang && !q.returnMessageListId) return never();
+        const root = calls.query.length - 1;
+        const delay = behaviour.delay ? behaviour.delay(q) : 0;
+        if (delay) await new Promise((r) => setTimeout(r, delay));
         behaviour.inFlight++;
         behaviour.maxInFlight = Math.max(behaviour.maxInFlight, behaviour.inFlight);
         await new Promise((r) => setImmediate(r));
@@ -232,14 +240,22 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
               (q.attachment == null || (attachments.get(h.id) || []).length > 0 === q.attachment),
           )
           .sort((a, b) => a.date - b.date);
-        return page(all, q.messagesPerPage || 100, q.emptyFirstPage);
+        if (q.returnMessageListId) {
+          const listId = `list-${nextList++}`;
+          lists.set(listId, { items: all, per: q.messagesPerPage || 100, root, hang });
+          return listId;
+        }
+        pagesByQuery.set(root, 1);
+        return page(all, q.messagesPerPage || 100, q.emptyFirstPage, root);
       },
       continueList: async (listId) => {
         calls.continueList.push(listId);
         const rest = lists.get(listId);
         if (!rest) throw new Error(`No message list for id ${listId}`);
+        pagesByQuery.set(rest.root, (pagesByQuery.get(rest.root) || 0) + 1);
+        if (rest.hang) return new Promise(() => {});
         lists.delete(listId);
-        return page(rest.items, rest.per);
+        return page(rest.items, rest.per, false, rest.root);
       },
       abortList: async (listId) => {
         calls.abortList.push(listId);
@@ -314,13 +330,13 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     },
   };
 
-  function page(items, per, emptyFirst = false) {
+  function page(items, per, emptyFirst = false, root = -1) {
     const take = emptyFirst ? [] : items.slice(0, per);
     const rest = emptyFirst ? items : items.slice(per);
     const out = { id: null, messages: take.map(clone) };
     if (rest.length > 0 || emptyFirst) {
       const listId = `list-${nextList++}`;
-      lists.set(listId, { items: rest, per });
+      lists.set(listId, { items: rest, per, root });
       out.id = listId;
     }
     return out;
@@ -372,6 +388,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       messenger.permissions.onRemoved.fire({ permissions: [p], origins: [] });
     },
     openLists: () => [...lists.keys()],
+    pagesPerQuery: () => [...pagesByQuery.values()],
   };
   return mock;
 }

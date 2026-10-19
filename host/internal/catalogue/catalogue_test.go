@@ -95,6 +95,13 @@ func TestSearchSchemaHasNoBodyOutput(t *testing.T) {
 			t.Errorf("mail_search description lacks %q: %s", s, d)
 		}
 	}
+	if !strings.Contains(d, "hasAttachments") || !strings.Contains(d, "null") {
+		t.Errorf("mail_search description must say hasAttachments may be null: %s", d)
+	}
+	td := byName(t, "mail_thread").Description
+	if !strings.Contains(td, "pointers") || strings.Contains(td, "excerpt") {
+		t.Errorf("mail_thread description must say it returns pointers only: %s", td)
+	}
 	if !strings.Contains(byName(t, "mail_send").Description, "allowed list") {
 		t.Error("mail_send description must mention the allowed list")
 	}
@@ -122,6 +129,12 @@ func TestLimits(t *testing.T) {
 	}
 	if m := props(t, "mail_search")["limit"]["default"]; m != 25 {
 		t.Errorf("limit default = %v", m)
+	}
+	if m := props(t, "mail_contacts")["limit"]["maximum"]; m != 200 {
+		t.Errorf("contacts limit maximum = %v", m)
+	}
+	if m := props(t, "mail_contacts")["limit"]["default"]; m != 25 {
+		t.Errorf("contacts limit default = %v", m)
 	}
 	if m := props(t, "mail_read")["max_chars"]["maximum"]; m != 50000 {
 		t.Errorf("max_chars maximum = %v", m)
