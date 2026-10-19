@@ -101,9 +101,10 @@ for f in "$here"/fixtures/seed/*.eml; do
   curl -s --fail -u test:test --upload-file "$MFT_E2E_DIR/seed.eml" "imap://127.0.0.1:3143/INBOX"
 done
 rm -f "$MFT_E2E_DIR/seed.eml"
-# Folders for TestE2EOrganise: Thunderbird finds Trash by name, and
+# Folders for TestE2EOrganise and TestE2EDraftAndSend: Thunderbird finds
+# Trash by name, the identity names Drafts and Sent (make-profile.sh), and
 # GreenMail starts with INBOX only.
-for folder in Trash Sorted; do
+for folder in Trash Sorted Drafts Sent; do
   curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "CREATE $folder" >/dev/null
   curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "SUBSCRIBE $folder" >/dev/null
 done
@@ -115,7 +116,8 @@ log "building the host and the add-on"
 cat >"$MFT_E2E_DIR/e2e-settings.json" <<EOF
 {
   "accounts": {"account1": true},
-  "groups": {"read": true, "organise": true, "compose": false, "contacts": false},
+  "groups": {"read": true, "organise": true, "compose": true, "contacts": false},
+  "send": {"enabled": true, "allow": ["@localhost"]},
   "attachmentDir": "$MFT_E2E_DIR/attachments",
   "setupDone": true
 }

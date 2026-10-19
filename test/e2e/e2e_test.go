@@ -11,6 +11,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,7 @@ const (
 var (
 	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"}
 	organiseTools = []string{"mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"}
+	composeTools  = []string{"mail_draft", "mail_compose"}
 )
 
 func TestMain(m *testing.M) {
@@ -289,7 +291,9 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) []string {
 func TestE2ERead(t *testing.T) {
 	cs := httpSession(t)
 
-	want := append(append([]string{}, readTools...), organiseTools...)
+	// Direct send is on in the e2e settings, but mail_send stays hidden
+	// until the messages.send permission is granted (TestE2EDraftAndSend).
+	want := append(append(append([]string{}, readTools...), organiseTools...), composeTools...)
 	sort.Strings(want)
 	if got := toolNames(t, cs); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tools/list = %v, want %v", got, want)
@@ -517,38 +521,8 @@ func accountsOK(t *testing.T, cs *mcp.ClientSession, what string) {
 // minimal client over net/textproto.
 func imapLookup(t *testing.T, mailbox, msgID string) (found bool, flags string) {
 	t.Helper()
-	conn, err := textproto.Dial("tcp", "127.0.0.1:3143")
-	if err != nil {
-		t.Fatalf("imap: %v", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ReadLine(); err != nil { // greeting
-		t.Fatalf("imap greeting: %v", err)
-	}
-	// run sends one tagged command and returns its untagged lines and
-	// whether it completed OK.
-	n := 0
-	run := func(format string, a ...any) ([]string, bool) {
-		n++
-		tag := fmt.Sprintf("a%d", n)
-		if err := conn.PrintfLine(tag+" "+format, a...); err != nil {
-			t.Fatalf("imap: %v", err)
-		}
-		var lines []string
-		for {
-			line, err := conn.ReadLine()
-			if err != nil {
-				t.Fatalf("imap: %v", err)
-			}
-			if strings.HasPrefix(line, tag+" ") {
-				return lines, strings.HasPrefix(line, tag+" OK")
-			}
-			lines = append(lines, line)
-		}
-	}
-	if _, ok := run("LOGIN test test"); !ok {
-		t.Fatal("imap login failed")
-	}
+	run, done := imapSession(t)
+	defer done()
 	if _, ok := run("EXAMINE %q", mailbox); !ok {
 		return false, "" // no such mailbox
 	}
@@ -574,6 +548,47 @@ func imapLookup(t *testing.T, mailbox, msgID string) (found bool, flags string) 
 		t.Fatalf("imap: no flags in %v", lines)
 	}
 	return true, m[1]
+}
+
+// imapRun sends one tagged IMAP command and returns its untagged lines and
+// whether it completed OK.
+type imapRun func(format string, a ...any) ([]string, bool)
+
+// imapSession logs in to GreenMail as test; done closes the connection.
+func imapSession(t *testing.T) (run imapRun, done func()) {
+	t.Helper()
+	conn, err := textproto.Dial("tcp", "127.0.0.1:3143")
+	if err != nil {
+		t.Fatalf("imap: %v", err)
+	}
+	if _, err := conn.ReadLine(); err != nil { // greeting
+		conn.Close()
+		t.Fatalf("imap greeting: %v", err)
+	}
+	n := 0
+	run = func(format string, a ...any) ([]string, bool) {
+		n++
+		tag := fmt.Sprintf("a%d", n)
+		if err := conn.PrintfLine(tag+" "+format, a...); err != nil {
+			t.Fatalf("imap: %v", err)
+		}
+		var lines []string
+		for {
+			line, err := conn.ReadLine()
+			if err != nil {
+				t.Fatalf("imap: %v", err)
+			}
+			if strings.HasPrefix(line, tag+" ") {
+				return lines, strings.HasPrefix(line, tag+" OK")
+			}
+			lines = append(lines, line)
+		}
+	}
+	if _, ok := run("LOGIN test test"); !ok {
+		conn.Close()
+		t.Fatal("imap login failed")
+	}
+	return run, func() { conn.Close() }
 }
 
 // imapWait polls imapLookup until check accepts the state, as Thunderbird
@@ -672,6 +687,226 @@ func TestE2EOrganise(t *testing.T) {
 	trashed, _ := searchUntil(t, cs, map[string]any{"folder": "/Trash"}, subj1)
 	if p := find(trashed, subj1); p.Folder != "Trash" && p.Folder != "/Trash" {
 		t.Fatalf("trashed message is in %q", p.Folder)
+	}
+}
+
+// imapUIDs returns the UIDs in mailbox matching an IMAP SEARCH criterion.
+func imapUIDs(t *testing.T, mailbox, criteria string) []string {
+	t.Helper()
+	run, done := imapSession(t)
+	defer done()
+	if _, ok := run("EXAMINE %q", mailbox); !ok {
+		return nil
+	}
+	lines, ok := run("UID SEARCH %s", criteria)
+	if !ok {
+		t.Fatalf("imap search failed: %v", lines)
+	}
+	var uids []string
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) >= 2 && f[0] == "*" && f[1] == "SEARCH" {
+			uids = append(uids, f[2:]...)
+		}
+	}
+	return uids
+}
+
+// imapHeader returns the header block of the message with this Message-ID.
+func imapHeader(t *testing.T, mailbox, msgID string) string {
+	t.Helper()
+	uids := imapUIDs(t, mailbox, fmt.Sprintf("HEADER Message-ID %q", msgID))
+	if len(uids) != 1 {
+		t.Fatalf("imap: %d messages with Message-ID %s in %s", len(uids), msgID, mailbox)
+	}
+	run, done := imapSession(t)
+	defer done()
+	run("EXAMINE %q", mailbox)
+	lines, ok := run("UID FETCH %s (BODY.PEEK[HEADER])", uids[0])
+	if !ok {
+		t.Fatalf("imap fetch failed: %v", lines)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// draftMessageID reads the Message-ID out of an opaque id ("m1." +
+// base64url of [account, folder, Message-ID]).
+func draftMessageID(t *testing.T, id string) (folder, msgID string) {
+	t.Helper()
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(id, "m1."))
+	var v []string
+	if err != nil || json.Unmarshal(b, &v) != nil || len(v) != 3 {
+		t.Fatalf("not an opaque id: %q", id)
+	}
+	return v[1], v[2]
+}
+
+// marionette runs one chrome script in the e2e Thunderbird (tb.sh checks
+// that the Marionette listener is ours) and decodes its JSON result.
+func marionette(t *testing.T, script string, out any) {
+	t.Helper()
+	tbScript := os.Getenv("MFT_E2E_TB")
+	if tbScript == "" {
+		t.Skip("MFT_E2E_TB not set")
+	}
+	cmd := exec.Command(tbScript, "marionette", "-")
+	cmd.Stdin = strings.NewReader(script)
+	b, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("marionette: %v: %s", err, b)
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		t.Fatalf("marionette result %q: %v", b, err)
+	}
+}
+
+// grantSendScript grants the optional messages.send permission as the
+// options-page click does (permissions.request needs a real user click):
+// through ExtensionPermissions with the running extension as the emitter,
+// so permissions.onAdded fires in the background page.
+const grantSendScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { ExtensionPermissions } = ChromeUtils.importESModule("resource://gre/modules/ExtensionPermissions.sys.mjs");
+  const id = "mcp-for-thunderbird@wadejbeckett.github.io";
+  const ext = WebExtensionPolicy.getByID(id).extension;
+  await ExtensionPermissions.add(id, { permissions: ["messages.send"], origins: [] }, ext);
+  return (await ExtensionPermissions.get(id)).permissions;
+})().then(resolve, (e) => resolve(["error: " + e]));
+`
+
+const composeWindowsScript = `return [...Services.wm.getEnumerator("msgcompose")].length;`
+
+// TestE2EDraftAndSend saves a new draft, a threaded reply and a forward
+// with the original's attachment to Drafts, opens a compose window, then
+// grants messages.send and sends to GreenMail; a recipient outside the
+// allowlist (@localhost) is refused and nothing is sent.
+func TestE2EDraftAndSend(t *testing.T) {
+	cs := httpSession(t)
+	names := toolNames(t, cs)
+	if !contains(names, "mail_draft") || !contains(names, "mail_compose") || contains(names, "mail_send") {
+		t.Fatalf("tools before the send permission = %v", names)
+	}
+	type drafted struct {
+		DraftID *string `json:"draftId"`
+	}
+	draftIn := func(args map[string]any) (string, string) {
+		t.Helper()
+		var d drafted
+		callOK(t, cs, "mail_draft", args, &d)
+		if d.DraftID == nil {
+			t.Fatalf("mail_draft %v: no draft id", args["kind"])
+		}
+		folder, mid := draftMessageID(t, *d.DraftID)
+		if folder != "Drafts" && folder != "/Drafts" {
+			t.Fatalf("draft saved in %q", folder)
+		}
+		imapWait(t, "draft", "Drafts", mid, func(found bool, _ string) bool { return found })
+		return *d.DraftID, mid
+	}
+
+	// A new draft (messages.saveMessage, found again by its X-MFT-Draft header).
+	_, mid := draftIn(map[string]any{"kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
+	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") {
+		t.Fatalf("new draft header:\n%s", h)
+	}
+
+	// A reply (messages.import): threaded, and readable through its id.
+	res, _ := searchUntil(t, cs, map[string]any{"text": "invoice"}, invoiceSubj)
+	inv := find(res, invoiceSubj)
+	replyID, mid := draftIn(map[string]any{"kind": "reply", "id": inv.ID, "body": "Thanks, paid today."})
+	h := imapHeader(t, "Drafts", mid)
+	for _, want := range []string{"In-Reply-To: <invoice-1042@seed.test>", "References: <invoice-1042@seed.test>", "Subject: Re: " + invoiceSubj, "X-Identity-Key: id1"} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("reply draft lacks %q:\n%s", want, h)
+		}
+	}
+	if !regexp.MustCompile(`(?m)^To: .*<billing@acme\.test>`).MatchString(h) {
+		t.Fatalf("reply draft is not addressed to the sender:\n%s", h)
+	}
+	var read struct {
+		Text string `json:"text"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": replyID}, &read)
+	if !strings.Contains(read.Text, "Thanks, paid today.") || !strings.Contains(read.Text, "Please find attached invoice 1042") {
+		t.Fatalf("reply draft text = %q", read.Text)
+	}
+
+	// A forward carries the original's attachment.
+	fwdID, _ := draftIn(map[string]any{"kind": "forward", "id": inv.ID, "to": []string{"accounts@example.org"}, "body": "For the books."})
+	var fwd struct {
+		Attachments []struct{ Name string } `json:"attachments"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": fwdID}, &fwd)
+	if len(fwd.Attachments) != 1 || fwd.Attachments[0].Name != invoicePDF {
+		t.Fatalf("forward draft attachments = %+v", fwd.Attachments)
+	}
+
+	// mail_compose opens a window and sends nothing.
+	var before, after int
+	marionette(t, composeWindowsScript, &before)
+	var opened struct{ Opened bool }
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "new", "to": []string{"test@localhost"}, "subject": "E2E compose window", "body": "Not sent."}, &opened)
+	marionette(t, composeWindowsScript, &after)
+	if !opened.Opened || after != before+1 {
+		t.Fatalf("mail_compose: opened %v, compose windows %d -> %d", opened.Opened, before, after)
+	}
+
+	// Grant messages.send; mail_send appears.
+	var perms []string
+	marionette(t, grantSendScript, &perms)
+	if !contains(perms, "messages.send") {
+		t.Fatalf("granting messages.send: %v", perms)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for !contains(toolNames(t, cs), "mail_send") {
+		if time.Now().After(deadline) {
+			t.Fatalf("mail_send not listed after the grant: %v", toolNames(t, cs))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// A send to an allowed address reaches GreenMail exactly once.
+	stamp := time.Now().Format("150405.000")
+	sentSubj := "E2E send " + stamp
+	var sent struct{ Sent bool }
+	callOK(t, cs, "mail_send", map[string]any{"to": []string{"Test User <test@localhost>"}, "subject": sentSubj, "body": "Sent by the e2e test."}, &sent)
+	if !sent.Sent {
+		t.Fatal("mail_send did not report sent")
+	}
+	inbox := fmt.Sprintf("SUBJECT %q", sentSubj)
+	deadline = time.Now().Add(60 * time.Second)
+	for len(imapUIDs(t, "INBOX", inbox)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the sent message did not reach GreenMail")
+		}
+		time.Sleep(time.Second)
+	}
+	// Its copy in Sent shows that a send leaves a copy there.
+	deadline = time.Now().Add(60 * time.Second)
+	for len(imapUIDs(t, "Sent", inbox)) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no copy of the sent message in Sent")
+		}
+		time.Sleep(time.Second)
+	}
+
+	// A recipient outside the allowlist refuses the whole message.
+	refusedSubj := "E2E refused " + stamp
+	text, isErr := call(t, cs, "mail_send", map[string]any{"to": []string{"test@localhost"}, "bcc": []string{"x@example.org"}, "subject": refusedSubj, "body": "Must not be sent."})
+	if !isErr || text != "refused: Recipient not in the allowed list: x@example.org" {
+		t.Fatalf("send to x@example.org: %v %q", isErr, text)
+	}
+	text, isErr = call(t, cs, "mail_send", map[string]any{"to": []string{"x@example.org"}, "subject": refusedSubj, "body": "Must not be sent."})
+	if !isErr || text != "refused: Recipient not in the allowed list: x@example.org" {
+		t.Fatalf("send to x@example.org: %v %q", isErr, text)
+	}
+	time.Sleep(3 * time.Second)
+	refused := fmt.Sprintf("SUBJECT %q", refusedSubj)
+	if n := len(imapUIDs(t, "INBOX", refused)) + len(imapUIDs(t, "Sent", refused)); n != 0 {
+		t.Fatalf("a refused message was sent (%d copies)", n)
+	}
+	if n := len(imapUIDs(t, "INBOX", inbox)); n != 1 {
+		t.Fatalf("GreenMail received %d copies of the sent message, want 1", n)
 	}
 }
 

@@ -17,6 +17,7 @@ import { dispatch } from "./rpc.js";
 import "./handlers/read.js";
 import "./handlers/contacts.js";
 import "./handlers/organise.js";
+import "./handlers/compose.js";
 
 export const HOST_NAME = "mcp_for_thunderbird";
 export const PROTOCOL = 1;

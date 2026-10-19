@@ -10,7 +10,8 @@
 // identities, folder info, date windows and the other query filters,
 // oldest-first ordering, never-settling queries, raw sources, attachments
 // and address books. Task 12 added getFull (plain and HTML parts, extra
-// headers), Task 13 getAttachmentFile and messages.tags.list.
+// headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
+// saveMessage, import, sendMessage, compose and messengerUtilities.
 
 export function event() {
   const listeners = [];
@@ -129,6 +130,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     copy: [],
     archive: [],
     delete: [],
+    saveMessage: [],
+    import: [],
+    sendMessage: [],
+    compose: [],
+    parseMailboxString: [],
   };
   // hang: queries matching this predicate never settle (as some
   // Thunderbird searches do, docs/SPIKES.md §3); with returnMessageListId
@@ -136,7 +142,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // query's answer time in ms.
   // fail(op, id) true makes that organise call reject; stall(op) true makes
   // it never settle.
-  const behaviour = { hang: null, delay: null, fail: null, stall: null, inFlight: 0, maxInFlight: 0 };
+  // saveReturns: saveMessage returns the saved header (Local Folders);
+  // by default it returns none, as on IMAP (docs/SPIKES.md §2).
+  // importReturns false: messages.import returns no header.
+  const behaviour = { hang: null, delay: null, fail: null, stall: null, inFlight: 0, maxInFlight: 0, saveReturns: false, importReturns: true };
   // pages read per query (index into calls.query), first page included
   const pagesByQuery = new Map();
   const lists = new Map();
@@ -323,6 +332,34 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.delete.push([...ids]);
         for (const id of ids) store.delete(id);
       },
+      // saveMessage stores the draft in the identity's account's Drafts
+      // folder with a Message-ID of its own; X- custom headers are kept.
+      saveMessage: async (details, options) => {
+        calls.saveMessage.push([details, options]);
+        const a = accounts.find((x) => (x.identities || []).some((i) => i.id === details.identityId));
+        const f = a && folderList.find((x) => x.accountId === a.id && x.specialUse.includes("drafts"));
+        if (!f) throw new Error("No drafts folder");
+        const headers = {};
+        for (const c of details.customHeaders || []) if (/^X-/i.test(c.name)) headers[c.name.toLowerCase()] = [c.value];
+        const h = addMessageTo(a.id, f.path, { headerMessageId: `saved-${nextId}@example.org`, subject: details.subject, date: new Date(), headers });
+        return { mode: "draft", messages: behaviour.saveReturns ? [h] : [] };
+      },
+      // import adds the RFC 5322 file to the folder under its Message-ID.
+      import: async (file, folderId, props) => {
+        const raw = await file.text();
+        calls.import.push({ raw, folderId, props, name: file.name, type: file.type });
+        const f = folderList.find((x) => x.id === folderId);
+        if (!f) throw new Error("Folder not found");
+        const head = raw.slice(0, raw.indexOf("\r\n\r\n")).replace(/\r\n[ \t]/g, " ");
+        const get = (n) => (new RegExp(`^${n}: (.*)$`, "mi").exec(head) || [])[1];
+        const mid = (get("Message-ID") || "").replace(/^<|>$/g, "");
+        const h = addMessageTo(f.accountId, f.path, { headerMessageId: mid, subject: get("Subject") || "", date: new Date() });
+        return behaviour.importReturns ? h : null;
+      },
+      sendMessage: async (details, options) => {
+        calls.sendMessage.push([details, options]);
+        return { mode: "sendNow", headerMessageId: "sent-1@example.org", messages: [] };
+      },
       tags: {
         list: async () => [
           { key: "$label1", tag: "Important", color: "#FF0000", ordinal: "" },
@@ -424,12 +461,53 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         return { id: tabs.length, ...props };
       },
     },
+    compose: {
+      beginNew: async (...args) => composeCall("beginNew", args),
+      beginReply: async (...args) => composeCall("beginReply", args),
+      beginForward: async (...args) => composeCall("beginForward", args),
+      getComposeDetails: async (tabId) => {
+        calls.compose.push(["getComposeDetails", [tabId]]);
+        return { isPlainText: false, body: '<html><head></head><body><div class="moz-cite-prefix">On a day, A wrote:<br></div><blockquote type="cite">old</blockquote></body></html>' };
+      },
+      setComposeDetails: async (...args) => {
+        calls.compose.push(["setComposeDetails", args]);
+      },
+    },
+    messengerUtilities: {
+      parseMailboxString: async (text) => {
+        calls.parseMailboxString.push(text);
+        return parseMailboxes(text);
+      },
+      encodeMimeHeader: async (name, value) => [].concat(value).map((v) => encodeHeader(name, v)),
+      decodeMimeHeader: async (name, value) => [].concat(value),
+    },
     permissions: {
       contains: async ({ permissions = [] }) => permissions.every((p) => perms.has(p)),
       onAdded: event(),
       onRemoved: event(),
     },
   };
+
+  function composeCall(fn, args) {
+    calls.compose.push([fn, args]);
+    tabs.push({ fn });
+    return { id: 100 + tabs.length, windowId: 200 + tabs.length };
+  }
+
+  function addMessageTo(accountId, path, extra = {}) {
+    const f = folderList.find((x) => x.accountId === accountId && x.path === path);
+    if (!f) throw new Error(`no folder ${accountId} ${path}`);
+    const id = nextId++;
+    const { body, html, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
+    const h = header(id, { ...f }, rest);
+    store.set(id, h);
+    if (body !== undefined) bodies.set(id, body);
+    if (html !== undefined) htmlBodies.set(id, html);
+    if (headers !== undefined) extraHeaders.set(id, headers);
+    if (atts !== undefined) attachments.set(id, atts);
+    if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
+    return clone(h);
+  }
 
   async function organiseGate(op, id) {
     if (behaviour.stall && behaviour.stall(op, id)) await new Promise(() => {});
@@ -459,20 +537,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     local,
     lastPort: () => ports.at(-1),
     folder: (accountId, path) => clone(folderList.find((f) => f.accountId === accountId && f.path === path)),
-    addMessage(accountId, path, extra = {}) {
-      const f = folderList.find((x) => x.accountId === accountId && x.path === path);
-      if (!f) throw new Error(`no folder ${accountId} ${path}`);
-      const id = nextId++;
-      const { body, html, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
-      const h = header(id, { ...f }, rest);
-      store.set(id, h);
-      if (body !== undefined) bodies.set(id, body);
-      if (html !== undefined) htmlBodies.set(id, html);
-      if (headers !== undefined) extraHeaders.set(id, headers);
-      if (atts !== undefined) attachments.set(id, atts);
-      if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
-      return clone(h);
-    },
+    addMessage: addMessageTo,
     removeMessage(id) {
       store.delete(id);
     },
@@ -499,6 +564,50 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     pagesPerQuery: () => [...pagesByQuery.values()],
   };
   return mock;
+}
+
+// parseMailboxes splits a mailbox list as Thunderbird's header parser does
+// for these tests: commas outside quotes and angle brackets separate
+// mailboxes, and only the part in angle brackets is the address.
+export function parseMailboxes(text) {
+  const parts = [];
+  let cur = "";
+  let quoted = false;
+  let angle = false;
+  for (const ch of String(text)) {
+    if (ch === '"') quoted = !quoted;
+    else if (!quoted && ch === "<") angle = true;
+    else if (!quoted && ch === ">") angle = false;
+    if (ch === "," && !quoted && !angle) {
+      parts.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  parts.push(cur);
+  return parts
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const m = /^([^]*?)<([^<>]*)>\s*$/.exec(p);
+      if (!m) return { name: undefined, group: undefined, email: p };
+      const name = m[1].trim().replace(/^"([^]*)"$/, "$1");
+      return { name: name || undefined, group: undefined, email: m[2].trim() || undefined };
+    });
+}
+
+const MAILBOX_HEADERS = ["from", "to", "cc", "bcc", "reply-to", "sender"];
+const word = (s) => `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
+
+// encodeHeader is a small stand-in for messengerUtilities.encodeMimeHeader:
+// non-ASCII text becomes RFC 2047 encoded words; in address headers only
+// the display names are encoded.
+function encodeHeader(name, value) {
+  const ascii = (s) => /^[\x00-\x7f]*$/.test(s);
+  if (ascii(value)) return value;
+  if (!MAILBOX_HEADERS.includes(name.toLowerCase())) return word(value);
+  return parseMailboxes(value)
+    .map(({ name: n, email }) => (n ? `${ascii(n) ? `"${n}"` : word(n)} <${email}>` : email))
+    .join(", ");
 }
 
 // install sets the global `messenger` (and `browser`) to a fresh mock.

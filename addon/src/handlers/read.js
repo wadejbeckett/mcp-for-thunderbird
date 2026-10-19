@@ -65,8 +65,8 @@ const tb = () => globalThis.messenger;
 
 // A run is one handler call: its deadline, the message lists it has open,
 // and whether it ran out of time or failed.
-export function newRun() {
-  return { deadline: Date.now() + SEARCH.budgetMs, open: new Set(), timedOut: false, failed: false };
+export function newRun(budgetMs = SEARCH.budgetMs) {
+  return { deadline: Date.now() + budgetMs, open: new Set(), timedOut: false, failed: false };
 }
 
 const listIdOf = (v) => (typeof v === "string" ? v : v && typeof v.id === "string" ? v.id : null);
@@ -558,7 +558,7 @@ function isAttachmentPart(p) {
 // its attachments), each capped at BODY_CAP; plainOver/htmlOver say a cap
 // was hit. Iterative, so a deeply nested message cannot overflow the stack.
 // After vitalio-sh extractParts (MIT, see NOTICE).
-function bodyParts(root) {
+export function bodyParts(root) {
   const out = { plain: "", html: "", plainOver: false, htmlOver: false };
   const add = (key, body) => {
     const room = BODY_CAP - out[key].length;
@@ -602,7 +602,7 @@ function firstHeader(full, name) {
 }
 
 // message resolves an id to a visible message within the run's budget.
-async function message(run, id, s) {
+export async function message(run, id, s) {
   const msg = answered(await call(run, () => resolveId(id)));
   assertFolderAllowed(msg.folder.accountId, msg.folder.path, s);
   if (!visible(msg, s)) fail("not_found", `Message not found in ${msg.folder.path}`);
@@ -657,7 +657,7 @@ const TOO_LARGE = "The attachment is larger than 50 MiB.";
 // base64 is built in pieces of whole 3-byte groups.
 const B64_PIECE = 3 * 16_384;
 
-function base64(buf) {
+export function base64(buf) {
   const bytes = new Uint8Array(buf);
   const out = [];
   for (let i = 0; i < bytes.length; i += B64_PIECE) {
