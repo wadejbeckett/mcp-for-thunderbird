@@ -683,25 +683,35 @@ async function mailAttachment(args, ctx) {
   const run = newRun();
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
-  const att = (Array.isArray(list) ? list : []).find((a) => a && a.name === name);
+  // Match the name as mail_read lists it (invisible characters stripped,
+  // at most 2000 characters), else the name exactly as Thunderbird has it.
+  const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
+  const att = atts.find((a) => clip(a.name) === name) || atts.find((a) => a.name === name);
   if (!att) fail("not_found", "No attachment of that name in this message.");
   const contentType = String(att.contentType || "application/octet-stream");
   const isText = /^\s*text\//i.test(contentType);
+  const isHtml = /^\s*text\/html\b/i.test(contentType);
+  // The listed size refuses a large attachment before any byte is read.
+  // When Thunderbird lists no size, the File's own size below enforces the
+  // 50 MiB limit, still before its bytes are read.
   if (typeof att.size === "number" && att.size > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
   if (!isText && !s.attachmentDir) fail("refused", NO_DIR);
 
   const file = answered(await call(run, () => tb().messages.getAttachmentFile(msg.id, att.partName)));
   if (!file || typeof file.size !== "number") fail("thunderbird_error", "Thunderbird did not return the attachment.");
   if (file.size > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
-  const shownName = stripInvisible(name);
+  const shownName = clip(att.name);
 
   if (isText) {
-    // at most 4 bytes a character, so this slice holds the first 20000
-    const sliceBytes = ATTACHMENT_TEXT * 4;
+    // Plain text: at most 4 bytes a character, so this slice holds the
+    // first 20000. HTML is cleaned like a body (ruling R23), from at most
+    // BODY_CAP bytes.
+    const sliceBytes = isHtml ? BODY_CAP : ATTACHMENT_TEXT * 4;
     const buf = answered(await call(run, () => file.slice(0, sliceBytes).arrayBuffer()));
     let text = decoderFor(contentType).decode(buf);
     const partial = file.size > sliceBytes;
-    if (partial) text = text.replace(/�$/, "");
+    if (partial) text = text.replace(/\uFFFD$/, "");
+    if (isHtml) text = htmlToText(text);
     const { text: shown, cut } = truncate(stripInvisible(text), ATTACHMENT_TEXT);
     return { name: shownName, contentType, text: wrapUntrusted(shown), truncated: cut || partial };
   }

@@ -89,12 +89,12 @@ var tools = []Tool{
 		Description: "Returns the messages in the conversation of one message as pointers (id, from, subject, date, flags, tags) only, never message text; use mail_read for text. It may be marked truncated if Thunderbird was slow.",
 		Input:       schema([]string{"id"}, m{"account": account(), "id": str("Message id from mail_search.")})},
 	{Name: "mail_attachment", Group: "read",
-		Description: "Saves one attachment to the user's attachment folder and returns its path and, for text types, extracted text.",
+		Description: "Returns a text attachment's text inline (wrapped as untrusted content; nothing is saved), or saves any other attachment to the user's attachment folder and returns its path. Attachments over 50 MiB are refused.",
 		Input: schema([]string{"id", "name"}, m{
 			"account": account(), "id": str("Message id."), "name": str("Attachment file name."),
 		})},
 	{Name: "mail_filter_suggest", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Turns conditions and actions into a Thunderbird message-filter rule the user can paste in; it changes nothing.",
+		Description: "Returns step-by-step instructions for making a message filter with these conditions and actions in Thunderbird's Message Filters window; it changes nothing.",
 		Input: schema([]string{"account"}, m{
 			"account": account(),
 			"conditions": m{"type": "array", "items": schema([]string{"field", "op", "value"}, m{
@@ -103,7 +103,7 @@ var tools = []Tool{
 				"value": str("Value to compare."),
 			})},
 			"match": enum("all or any condition.", "all", "any"),
-			"actions": m{"type": "array", "items": schema([]string{"type"}, m{
+			"actions": m{"type": "array", "minItems": 1, "items": schema([]string{"type"}, m{
 				"type":  enum("Action.", "move", "copy", "tag", "mark_read", "flag"),
 				"value": str("Folder path or tag, where the action needs one."),
 			})},

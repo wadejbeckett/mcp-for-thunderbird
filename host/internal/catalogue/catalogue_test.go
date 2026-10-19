@@ -178,3 +178,18 @@ func TestAttachmentsMaxItems(t *testing.T) {
 		}
 	}
 }
+
+func TestAttachmentAndFilterSuggestDescriptions(t *testing.T) {
+	a := byName(t, "mail_attachment").Description
+	if !strings.Contains(a, "inline") || strings.Contains(a, "for text types, extracted text") {
+		t.Errorf("mail_attachment description must say text types are returned inline, not saved: %q", a)
+	}
+	f := byName(t, "mail_filter_suggest").Description
+	if !strings.Contains(f, "step-by-step instructions") {
+		t.Errorf("mail_filter_suggest description must say it returns step-by-step instructions: %q", f)
+	}
+	acts := props(t, "mail_filter_suggest")["actions"]
+	if acts["minItems"] != 1 {
+		t.Errorf("mail_filter_suggest actions minItems = %v, want 1", acts["minItems"])
+	}
+}
