@@ -595,8 +595,11 @@ function truncate(s, n) {
 }
 
 // clip cleans a header value shown outside the wrapper: invisible
-// characters removed, wrapper markers defused, at most HEADER_CHARS.
-const clip = (v) => cleanLine(String(v ?? "")).slice(0, HEADER_CHARS);
+// characters removed, wrapper markers defused, at most HEADER_CHARS. The
+// value is cut before it is cleaned (with headroom for what cleaning
+// removes), so a huge header costs no more than a short one.
+const HEADROOM = 512;
+const clip = (v) => truncate(cleanLine(truncate(String(v ?? ""), HEADER_CHARS + HEADROOM).text), HEADER_CHARS).text;
 const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
 
 function firstHeader(full, name) {
@@ -690,8 +693,9 @@ async function mailAttachment(args, ctx) {
   const run = newRun();
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
-  // Match the name as mail_read lists it (invisible characters stripped,
-  // at most 2000 characters), else the name exactly as Thunderbird has it.
+  // Match the name as mail_read lists it (cleaned by clip: invisible
+  // characters stripped, markers defused, at most 2000 characters), else
+  // the name exactly as Thunderbird has it.
   const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
   const att = atts.find((a) => clip(a.name) === name) || atts.find((a) => a.name === name);
   if (!att) fail("not_found", "No attachment of that name in this message.");

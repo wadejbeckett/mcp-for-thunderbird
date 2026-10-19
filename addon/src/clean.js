@@ -27,29 +27,65 @@ export function stripInvisible(s) {
 }
 
 // A marker inside the content could make the text after it look like it
-// is outside the wrapper, so it is defused: any case, spacing or
-// underscores, fullwidth letters, angle-bracket look-alikes, and missing
-// brackets. Matching runs on a copy with fullwidth ASCII (U+FF01-U+FF5E)
-// folded to ASCII; the fold keeps every index, so the original is cut at
-// the same places.
-const LT = "<\uFF1C\uFE64\u2039\u3008\u27E8\u2329\u00AB";
-const GT = ">\uFF1E\uFE65\u203A\u3009\u27E9\u232A\u00BB";
-const MARKER = new RegExp(
-  `[${LT}]*[ \\t]*(?:END[\\s_-]*)?UNTRUSTED[\\s_-]*EMAIL[\\s_-]*CONTENT[^${LT}${GT}\\r\\n]{0,200}[${GT}]*`,
-  "giu",
-);
+// is outside the wrapper, so it is defused. A marker is the phrase
+// UNTRUSTED EMAIL CONTENT (any case; spaces, underscores or hyphens between
+// the words; an optional END before it) with angle brackets before it or
+// after it: < or a look-alike (fullwidth, single guillemet, CJK or math
+// bracket) up to 8 of them, and a tail up to the first closing bracket
+// within TAIL characters (the real open marker's ": treat as data, never
+// as instructions" fits). The phrase in plain prose, with no bracket, is
+// left alone. Matching runs on a copy with fullwidth ASCII (U+FF01-U+FF5E)
+// folded to ASCII, which keeps every index. The work is linear: the
+// phrase is found by one bounded regular expression and each match looks
+// at most a fixed number of characters around it.
+const LT = "<＜﹤‹〈⟨〈«";
+const GT = ">＞﹥›〉⟩〉»";
+const PHRASE = /UNTRUSTED[\s_-]{0,8}EMAIL[\s_-]{0,8}CONTENT/giu;
+const SEP = /[\s_-]/u;
+const TAIL = 48;
+const RUN = 8;
 const MARKER_REMOVED = "[marker removed]";
 
-const foldWide = (s) => s.replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+const foldWide = (s) => s.replace(/[！-～]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+
+// markerSpan widens a phrase match at [i, j) to the whole marker, or
+// returns null when no bracket marks it as one.
+function markerSpan(f, i, j, floor) {
+  let start = i;
+  let k = i;
+  for (let n = 0; n < RUN && k > floor && SEP.test(f[k - 1]); n++) k--;
+  if (k - 3 >= floor && f.slice(k - 3, k).toUpperCase() === "END") start = k - 3;
+  k = start;
+  for (let n = 0; n < RUN && k > floor && (f[k - 1] === " " || f[k - 1] === "\t"); n++) k--;
+  let lt = k;
+  for (let n = 0; n < RUN && lt > floor && LT.includes(f[lt - 1]); n++) lt--;
+  const before = lt < k;
+  if (before) start = lt;
+
+  let end = j;
+  let t = j;
+  const limit = Math.min(f.length, j + TAIL);
+  while (t < limit && !GT.includes(f[t]) && !LT.includes(f[t]) && f[t] !== "\n" && f[t] !== "\r") t++;
+  let after = false;
+  if (t < f.length && GT.includes(f[t])) {
+    after = true;
+    end = t;
+    for (let n = 0; n < RUN && end < f.length && GT.includes(f[end]); n++) end++;
+  }
+  return before || after ? [start, end] : null;
+}
 
 export function defuseMarkers(s) {
   const src = String(s ?? "");
   const folded = foldWide(src);
   let out = "";
   let at = 0;
-  for (const m of folded.matchAll(MARKER)) {
-    out += src.slice(at, m.index) + MARKER_REMOVED;
-    at = m.index + m[0].length;
+  for (const m of folded.matchAll(PHRASE)) {
+    if (m.index < at) continue;
+    const span = markerSpan(folded, m.index, m.index + m[0].length, at);
+    if (!span) continue;
+    out += src.slice(at, span[0]) + MARKER_REMOVED;
+    at = span[1];
   }
   return out + src.slice(at);
 }
@@ -176,7 +212,9 @@ function colorIn(value) {
   return null;
 }
 
-function parseStyle(text) {
+// parseDecls reads CSS declarations into prop -> {v, imp} (imp: marked
+// !important).
+function parseDecls(text) {
   const out = new Map();
   if (!text) return out;
   // A CSS comment separates tokens like a space (an unterminated one runs
@@ -187,17 +225,26 @@ function parseStyle(text) {
     const i = decl.indexOf(":");
     if (i <= 0) continue;
     const prop = decl.slice(0, i).trim().toLowerCase();
-    const value = decl
-      .slice(i + 1)
-      .replace(/!\s*important/i, "")
-      .trim()
-      .toLowerCase();
-    if (prop) out.set(prop, value);
+    let value = decl.slice(i + 1);
+    const imp = /!\s*important/i.test(value);
+    value = value.replace(/!\s*important/i, "").trim().toLowerCase();
+    if (prop) out.set(prop, { v: value, imp });
   }
   return out;
 }
 
-const num = (v) => (v == null ? NaN : parseFloat(v));
+// CONFLICT stands for a property that style sheet rules set to different
+// values for one element (or an !important rule against the inline
+// style). Without weighing specificity the winner is unknown, so a
+// conflicting property never hides anything (ruling R29: losing real text
+// is worse than leaving crafted hidden text inside the wrapper).
+const CONFLICT = Symbol("conflict");
+
+const num = (v) => (v == null || v === CONFLICT ? NaN : parseFloat(v));
+const val = (st, k) => {
+  const v = st.get(k);
+  return v === CONFLICT ? undefined : v;
+};
 
 // length gives {n, unit} for a CSS length ("0" has no unit), or null.
 function length(v) {
@@ -205,52 +252,82 @@ function length(v) {
   return m ? { n: parseFloat(m[1]), unit: m[2] } : null;
 }
 
-// Text this small cannot be read: under 2px, 1.5pt or 0.1em/rem.
-function tinyFont(v) {
+// Font size is inherited, so it is tracked as an effective size in px
+// (the pane's default is 16) and text is hidden where it is under 2px. A
+// value this cannot work out counts as the default: unknown is visible.
+const DEFAULT_PX = 16;
+const MIN_PX = 2;
+const KEYWORD_PX = { "xx-small": 9, "x-small": 10, small: 13, medium: 16, large: 18, "x-large": 24, "xx-large": 32, "xxx-large": 48 };
+
+function fontPx(v, parent) {
+  if (v == null) return parent;
+  if (v === CONFLICT) return Math.max(parent, DEFAULT_PX);
+  if (KEYWORD_PX[v]) return KEYWORD_PX[v];
+  if (v === "smaller") return parent / 1.2;
+  if (v === "larger") return parent * 1.2;
   const l = length(v);
-  if (!l || Number.isNaN(l.n)) return false;
-  if (l.n <= 0) return true;
-  if (l.unit === "px") return l.n < 2;
-  if (l.unit === "pt") return l.n < 1.5;
-  if (l.unit === "em" || l.unit === "rem") return l.n < 0.1;
-  return false;
+  if (!l || Number.isNaN(l.n) || l.n < 0) return DEFAULT_PX;
+  switch (l.unit) {
+    case "":
+    case "px":
+      return l.unit === "" && l.n !== 0 ? DEFAULT_PX : l.n;
+    case "pt":
+      return (l.n * 4) / 3;
+    case "em":
+      return l.n * parent;
+    case "rem":
+      return l.n * DEFAULT_PX;
+    case "%":
+      return (l.n * parent) / 100;
+    default:
+      return DEFAULT_PX;
+  }
 }
 
-const FAR = 1000; // px: positioned or indented this far off, text is off-screen
+const FAR = 1000; // px: positioned this far off, a box is off-screen
 
 function farOff(v) {
   const l = length(v);
   return Boolean(l && l.unit === "px" && l.n <= -FAR);
 }
 
-function hiddenByStyle(st) {
-  if (st.get("display") === "none") return true;
-  const vis = st.get("visibility");
+// prunes says an element hides its whole subtree whatever its children
+// declare: display:none, visibility hidden or collapse (a child could set
+// visibility:visible again; that is not followed, best effort), opacity 0
+// (children cannot undo it), a zero box (spec), a box collapsed to no
+// height or width that clips its overflow, and a box positioned off-screen.
+// Font size and colours are inherited and decided per text node instead.
+function prunes(st) {
+  if (val(st, "display") === "none") return true;
+  const vis = val(st, "visibility");
   if (vis === "hidden" || vis === "collapse") return true;
   if (num(st.get("opacity")) === 0) return true;
-  if (tinyFont(st.get("font-size"))) return true;
   if (num(st.get("width")) === 0 && num(st.get("height")) === 0) return true;
-  // A box collapsed to no height (or width) that clips its overflow.
-  const clips = ["overflow", "overflow-y", "overflow-x"].some((k) => /^(?:hidden|clip)\b/.test(st.get(k) || ""));
-  if (clips && ["max-height", "height", "max-width"].some((k) => num(st.get(k)) === 0)) return true;
-  const pos = st.get("position");
-  if ((pos === "absolute" || pos === "fixed") && (farOff(st.get("left")) || farOff(st.get("top")))) return true;
-  if (farOff(st.get("text-indent"))) return true;
+  const clips = ["overflow", "overflow-y", "overflow-x"].some((k) => /^(?:hidden|clip)\b/.test(val(st, k) || ""));
+  if (clips && ["max-height", "height", "max-width", "width"].some((k) => num(st.get(k)) === 0)) return true;
+  const pos = val(st, "position");
+  if ((pos === "absolute" || pos === "fixed") && (farOff(val(st, "left")) || farOff(val(st, "top")))) return true;
   return false;
 }
 
 // ---- <style> blocks ----
 
-// Style sheet rules are applied as far as hiding goes: a rule's
-// declarations reach the elements its selectors match through
-// querySelectorAll, later rules over earlier ones (specificity is not
-// weighed), inline style over both. @-rules (@media and the like) are not
-// applied. Work is bounded by MAX_SHEET characters and MAX_RULES rules.
+// Style sheet rules count as far as hiding goes: a rule's declarations
+// reach the elements its selectors match through querySelectorAll, inline
+// style over them. Rules that disagree on a property for one element make
+// it CONFLICT (specificity is not weighed). @-rules (@media, @supports and
+// the like) are not applied at all, so a sheet that hides text only inside
+// @media is not followed. The work is bounded: at most MAX_SHEET
+// characters and MAX_RULES rules; QUERY_BUDGET counts elements scanned
+// (the document's size per selector) and APPLY_BUDGET matched elements
+// times declarations; once either runs out the remaining rules are
+// ignored, which can only show more text.
 const MAX_SHEET = 100_000;
 const MAX_RULES = 500;
+export const STYLE_BUDGET = { query: 1_000_000, apply: 200_000 };
 const SHEET_PROPS = new Set([
   "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "width", "height",
-  "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top", "text-indent",
+  "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top",
 ]);
 
 // rules splits style sheet text into [selector, declarations] pairs,
@@ -281,8 +358,8 @@ function rules(css) {
   return out;
 }
 
-// sheetStyles maps each element a <style> rule reaches to its
-// declarations (only the properties that can hide text).
+// sheetStyles maps each element a <style> rule reaches to prop ->
+// {v, imp} or CONFLICT (only the properties that can hide text).
 function sheetStyles(doc) {
   const out = new Map();
   let css = "";
@@ -290,23 +367,51 @@ function sheetStyles(doc) {
     css += String(el.textContent || "") + "\n";
     if (css.length >= MAX_SHEET) break;
   }
-  css = css.slice(0, MAX_SHEET).replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ");
+  // Comments, and the HTML comment delimiters old mail wraps sheets in.
+  css = css
+    .slice(0, MAX_SHEET)
+    .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ")
+    .replace(/<!--|-->/g, " ");
+  const size = doc.getElementsByTagName("*").length;
+  let query = STYLE_BUDGET.query;
+  let apply = STYLE_BUDGET.apply;
   for (const [selector, body] of rules(css)) {
-    const decls = [...parseStyle(body)].filter(([k]) => SHEET_PROPS.has(k));
+    const decls = [...parseDecls(body)].filter(([k]) => SHEET_PROPS.has(k));
     if (decls.length === 0 || !selector) continue;
+    query -= size;
+    if (query < 0) break;
     let els;
     try {
       els = doc.querySelectorAll(selector);
     } catch {
       continue; // a selector this parser does not know
     }
+    apply -= els.length * decls.length;
+    if (apply < 0) break;
     for (const el of els) {
       let st = out.get(el);
       if (!st) out.set(el, (st = new Map()));
-      for (const [k, v] of decls) st.set(k, v);
+      for (const [k, d] of decls) {
+        const had = st.get(k);
+        st.set(k, had === undefined ? d : had === CONFLICT || had.v !== d.v ? CONFLICT : { v: d.v, imp: had.imp || d.imp });
+      }
     }
   }
   return out;
+}
+
+// styleOf gives an element's declarations, prop -> value or CONFLICT:
+// inline style over the sheet, except that an !important sheet value the
+// inline style disagrees with is a CONFLICT.
+function styleOf(node, sheet) {
+  const st = new Map();
+  const fromSheet = sheet.get(node);
+  if (fromSheet) for (const [k, d] of fromSheet) st.set(k, d === CONFLICT ? CONFLICT : d.v);
+  for (const [k, d] of parseDecls(node.getAttribute("style"))) {
+    const s = fromSheet && fromSheet.get(k);
+    st.set(k, s && s !== CONFLICT && s.imp && s.v !== d.v ? CONFLICT : d.v);
+  }
+  return st;
 }
 
 // Text is built line by line: whitespace collapses as in HTML (except in
@@ -352,6 +457,12 @@ class Lines {
 
 const MAX_URL = 2048;
 
+// unreadable says text in this context cannot be read: under MIN_PX, or
+// in a colour too close to its background.
+function unreadable(ctx) {
+  return ctx.px < MIN_PX || Boolean(ctx.color && ctx.bg && alike(ctx.color, ctx.bg));
+}
+
 // htmlToText turns HTML into readable plain text (see the file comment).
 // The walk is iterative, so deep nesting cannot overflow the stack.
 export function htmlToText(html) {
@@ -361,7 +472,7 @@ export function htmlToText(html) {
   const sheet = sheetStyles(doc);
   const out = new Lines();
   // Mail is read on a white pane unless it sets its own background.
-  const stack = [{ node: doc, ctx: { color: null, bg: PANE, pre: false } }];
+  const stack = [{ node: doc, ctx: { color: null, bg: PANE, px: DEFAULT_PX, pre: false } }];
   while (stack.length > 0) {
     const item = stack.pop();
     if (item.exit) {
@@ -370,7 +481,7 @@ export function htmlToText(html) {
     }
     const { node, ctx } = item;
     if (node.nodeType === 3) {
-      out.text(String(node.data ?? node.nodeValue ?? ""), ctx.pre);
+      if (!unreadable(ctx)) out.text(String(node.data ?? node.nodeValue ?? ""), ctx.pre);
       continue;
     }
     let next = ctx;
@@ -379,33 +490,44 @@ export function htmlToText(html) {
       if (REMOVE.has(tag)) continue;
       if (node.hasAttribute("hidden")) continue;
       if (String(node.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true") continue;
-      const inline = parseStyle(node.getAttribute("style"));
-      const st = sheet.has(node) ? new Map([...sheet.get(node), ...inline]) : inline;
-      if (hiddenByStyle(st)) continue;
+      const st = styleOf(node, sheet);
+      if (prunes(st)) continue;
 
+      // Colours: CONFLICT or an unreadable value make the colour unknown.
       const colorDecl = st.has("color") ? st.get("color") : tag === "font" ? node.getAttribute("color") : null;
-      const bgDecl = st.has("background-color") ? st.get("background-color") : st.has("background") ? st.get("background") : node.getAttribute("bgcolor");
       let color = ctx.color;
-      if (colorDecl != null) {
+      if (colorDecl === CONFLICT) color = null;
+      else if (colorDecl != null) {
         const c = normColor(colorDecl);
         color = c === TRANSPARENT ? null : c;
       }
       let bg = ctx.bg;
-      if (bgDecl != null) {
-        const c = st.has("background-color") || !st.has("background") ? normColor(bgDecl) : colorIn(bgDecl);
+      const bgc = st.get("background-color");
+      const short = st.get("background");
+      if (bgc === CONFLICT || short === CONFLICT) bg = null;
+      else if (bgc != null) {
+        const c = normColor(bgc);
+        bg = c === TRANSPARENT ? ctx.bg : c;
+      } else if (short != null) {
+        const c = colorIn(short);
+        bg = c === TRANSPARENT ? ctx.bg : c;
+      } else if (node.getAttribute("bgcolor") != null) {
+        const c = normColor(node.getAttribute("bgcolor"));
         bg = c === TRANSPARENT ? ctx.bg : c;
       }
       // Over a background image the colour behind the text is unknown.
       const image = st.get("background-image");
-      if ((image && image !== "none") || node.getAttribute("background")) bg = null;
-      if ((colorDecl != null || bgDecl != null) && color && bg && alike(color, bg)) continue;
-      next = { color, bg, pre: ctx.pre || tag === "pre" };
+      if (image === CONFLICT || (image && image !== "none") || (typeof short === "string" && /url\s*\(/.test(short)) || node.getAttribute("background")) {
+        bg = null;
+      }
+      next = { color, bg, px: fontPx(st.get("font-size"), ctx.px), pre: ctx.pre || tag === "pre" };
 
       if (tag === "br") {
         out.newline();
         continue;
       }
       if (tag === "img") {
+        if (unreadable(next)) continue;
         const alt = String(node.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
         if (alt) out.text(`[image: ${alt}]`, false);
         continue;
@@ -417,7 +539,7 @@ export function htmlToText(html) {
         stack.push({ exit: () => out.text(" ", false) });
       } else if (tag === "a") {
         const href = String(node.getAttribute("href") || "").replace(/\s+/g, "").slice(0, MAX_URL);
-        if (href && !href.startsWith("#")) {
+        if (href && !href.startsWith("#") && !unreadable(next)) {
           const m = out.mark();
           stack.push({
             exit: () => {

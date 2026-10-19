@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/smtp"
 	"net/textproto"
 	"os"
 	"os/exec"
@@ -1028,6 +1029,30 @@ func smtpReceived(t *testing.T) (int, []string) {
 	return n, emails
 }
 
+// smtpOracleCheck shows that smtpReceived counts SMTP mail: it sends one
+// message to test@localhost over GreenMail's SMTP port and waits for the
+// count to go up by one, then returns the new count and the user list as
+// the baseline.
+func smtpOracleCheck(t *testing.T) (int, []string) {
+	t.Helper()
+	n0, users0 := smtpReceived(t)
+	msg := "From: probe@localhost\r\nTo: test@localhost\r\nSubject: E2E SMTP oracle probe\r\n\r\nprobe\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "probe@localhost", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP probe: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		n, users := smtpReceived(t)
+		if n == n0+1 && strings.Join(users, ",") == strings.Join(users0, ",") {
+			return n, users
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("SMTP oracle: %d messages before the probe, %d after; users %v -> %v", n0, n, users0, users)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // invisibleRE matches the characters the cleaner removes (clean.js
 // stripInvisible): soft hyphen, zero-width and direction characters, word
 // joiner and invisible operators, BOM, Unicode Tag characters.
@@ -1186,7 +1211,7 @@ var hostileFixtures = []hostile{
 // the e2e settings back afterwards.
 func TestE2EInjectionDefaults(t *testing.T) {
 	cs := httpSession(t)
-	smtpBefore, usersBefore := smtpReceived(t)
+	smtpBefore, usersBefore := smtpOracleCheck(t)
 
 	orig := addonSettings(t, nil)
 	origTools := toolNames(t, cs)
@@ -1283,10 +1308,9 @@ func TestE2EInjectionDefaults(t *testing.T) {
 		t.Fatalf("move into account3 naming it: %v %q", isErr, text)
 	}
 	text, isErr = call(t, cs, "mail_move", map[string]any{"ids": []string{id}, "folder": "/Elsewhere"})
-	if !isErr {
-		t.Fatalf("move to a folder only account3 has: %q", text)
+	if !isErr || !strings.HasPrefix(text, "not_found:") {
+		t.Fatalf("move to a folder only account3 has: %v %q", isErr, text)
 	}
-	t.Logf("move to a folder only account3 has: %s", text)
 	time.Sleep(3 * time.Second)
 	var elsewhere []json.RawMessage
 	greenmailGet(t, "/user/other@localhost/messages/Elsewhere", &elsewhere)

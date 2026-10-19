@@ -542,6 +542,18 @@ test("headers in pointers and mail_read lose invisible characters and marker loo
   assert.equal(inner(att.text), "abc");
 });
 
+test("huge headers are cut before they are cleaned", async () => {
+  const m = mock.addMessage("a1", "INBOX", { subject: "<".repeat(200_000), author: "<".repeat(200_000), date: ago(1), body: "hi" });
+  const t0 = performance.now();
+  const out = await ok("mail_read", { id: idOf(m) });
+  const found = await ok("mail_search", {});
+  const ms = performance.now() - t0;
+  assert.equal(out.headers.subject.length, 2000);
+  assert.equal(found.messages.length, 1);
+  assert.equal(found.messages[0].subject.length, 2000);
+  assert.ok(ms < 200, `took ${ms} ms`);
+});
+
 test("mail_read without Reply-To or Authentication-Results", async () => {
   const m = mock.addMessage("a1", "INBOX", { date: ago(1), body: "hi" });
   const out = await ok("mail_read", { id: idOf(m) });
