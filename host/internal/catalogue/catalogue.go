@@ -28,6 +28,15 @@ func enum(d string, v ...string) m {
 	return m{"type": "string", "enum": v, "description": d}
 }
 
+// maxAttachments matches the host's limit on attachments per message.
+const maxAttachments = 20
+
+func attachments() m {
+	a := strs("File names in the attachment folder; at most 20, 50 MiB in total.")
+	a["maxItems"] = maxAttachments
+	return a
+}
+
 func account() m { return str("Account id or name; optional when only one account is enabled.") }
 
 func schema(required []string, props m) m {
@@ -48,7 +57,7 @@ func composeProps() m {
 		"bcc":         strs("Bcc recipients."),
 		"subject":     str("Subject; defaults to the original's for replies and forwards."),
 		"body":        str("Plain-text body."),
-		"attachments": strs("File names in the attachment folder."),
+		"attachments": attachments(),
 	}
 }
 
@@ -138,7 +147,7 @@ var tools = []Tool{
 		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message.",
 		Input: schema([]string{"to", "subject", "body"}, m{
 			"account": account(), "to": strs("To recipients."), "cc": strs("Cc recipients."), "bcc": strs("Bcc recipients."),
-			"subject": str("Subject."), "body": str("Plain-text body."), "attachments": strs("File names in the attachment folder."),
+			"subject": str("Subject."), "body": str("Plain-text body."), "attachments": attachments(),
 		})},
 }
 

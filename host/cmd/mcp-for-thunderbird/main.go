@@ -161,15 +161,19 @@ func RunNative(stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 
+	var failed error
 	select {
 	case <-b.Done():
 	case err := <-serveErr:
-		logger.Printf("HTTP server failed: %v", err)
+		failed = fmt.Errorf("HTTP server failed: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	if err := hs.Shutdown(ctx); err != nil {
 		hs.Close()
+	}
+	if failed != nil {
+		return failed // main logs it and exits 1
 	}
 	logger.Printf("stopped")
 	return nil

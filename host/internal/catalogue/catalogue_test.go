@@ -155,3 +155,13 @@ func TestAccountAndIdArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestAttachmentsMaxItems(t *testing.T) {
+	for _, n := range []string{"mail_draft", "mail_compose", "mail_send"} {
+		props := byName(t, n).Input["properties"].(map[string]any)
+		a := props["attachments"].(map[string]any)
+		if a["maxItems"] != 20 {
+			t.Errorf("%s attachments maxItems = %v, want 20", n, a["maxItems"])
+		}
+	}
+}

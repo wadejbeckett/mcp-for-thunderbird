@@ -49,6 +49,8 @@ type Server struct {
 	conn    *connfile.Conn
 	enabled map[string]bool
 	clients map[string]bool
+	// clientsFull is set once the overflow line has been logged.
+	clientsFull bool
 }
 
 // New builds a server with no tools; call SetTools with the add-on's list.
@@ -158,6 +160,19 @@ func (s *Server) Rotate() error {
 	return connfile.Rotate(s.conn)
 }
 
+// maxClientNames bounds the client names logged.
+const maxClientNames = 256
+
+// Attachment limits per message.
+const (
+	maxAttachments     = 20
+	maxAttachmentTotal = files.MaxSize // 50 MiB across all attachments
+)
+
+// errorCodes are the shared error codes an add-on result may carry.
+var errorCodes = map[string]bool{"paused": true, "not_enabled": true, "excluded": true,
+	"not_found": true, "invalid_argument": true, "refused": true, "too_large": true, "thunderbird_error": true}
+
 // composeTools take attachments from the attachment folder.
 var composeTools = map[string]bool{"mail_draft": true, "mail_compose": true, "mail_send": true}
 
@@ -216,6 +231,9 @@ func (s *Server) resolveAttachments(args json.RawMessage) (json.RawMessage, [][]
 	if err := json.Unmarshal(raw, &names); err != nil {
 		return nil, nil, bridge.CallError{Code: "invalid_argument", Message: "attachments must be a list of file names"}
 	}
+	if len(names) > maxAttachments {
+		return nil, nil, bridge.CallError{Code: "too_large", Message: "Too many attachments (max 20)"}
+	}
 	type ref struct {
 		Name string `json:"name"`
 		Blob int    `json:"blob"`
@@ -223,10 +241,14 @@ func (s *Server) resolveAttachments(args json.RawMessage) (json.RawMessage, [][]
 	refs := make([]ref, 0, len(names))
 	blobs := make([][]byte, 0, len(names))
 	dir := s.attachmentDir()
+	total := 0
 	for i, name := range names {
 		data, base, err := files.ReadForDraft(dir, name)
 		if err != nil {
 			return nil, nil, fileError(err, name)
+		}
+		if total += len(data); total > maxAttachmentTotal {
+			return nil, nil, bridge.CallError{Code: "too_large", Message: "Attachments exceed 50 MiB in total"}
 		}
 		refs = append(refs, ref{Name: base, Blob: i})
 		blobs = append(blobs, data)
@@ -277,21 +299,31 @@ func (s *Server) toolError(tool string, err error) *mcp.CallToolResult {
 			ce = bridge.CallError{Code: "thunderbird_error", Message: "Internal error"}
 		}
 	}
+	if !errorCodes[ce.Code] {
+		ce.Code = "thunderbird_error"
+	}
 	s.Log.Printf("tool %s: error %s", tool, ce.Code)
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: ce.Code + ": " + ce.Message}}}
 }
 
-// noteClient logs a client name the first time it is seen.
+// noteClient logs a client name the first time it is seen. Once
+// maxClientNames names are known it logs one overflow line and no more.
 func (s *Server) noteClient(name string) {
 	name = safeName(name)
 	s.mu.Lock()
-	seen := s.clients[name]
-	if !seen && len(s.clients) < 256 {
+	line := ""
+	switch {
+	case s.clients[name]:
+	case len(s.clients) < maxClientNames:
 		s.clients[name] = true
+		line = "client connected: " + name
+	case !s.clientsFull:
+		s.clientsFull = true
+		line = "client connected: further client names not logged"
 	}
 	s.mu.Unlock()
-	if !seen {
-		s.Log.Printf("client connected: %s", name)
+	if line != "" {
+		s.Log.Print(line)
 	}
 }
 

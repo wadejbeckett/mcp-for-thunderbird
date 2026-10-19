@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -404,5 +405,98 @@ func TestEndpointIsMCPOnly(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAttachmentsBounded(t *testing.T) {
+	h := newHarness(t, []string{"mail_draft"})
+	big := filepath.Join(h.attDir, "big.bin")
+	if err := os.WriteFile(big, make([]byte, 20<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.attDir, "small.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cs := h.connect(t, nil)
+
+	// The same 20 MiB file three times passes 50 MiB in total.
+	res, err := call(t, cs, "mail_draft", map[string]any{"kind": "new", "body": "hi",
+		"attachments": []string{"big.bin", "big.bin", "big.bin"}})
+	if err != nil {
+		t.Fatalf("protocol error: %v", err)
+	}
+	if !res.IsError || text(res) != "too_large: Attachments exceed 50 MiB in total" {
+		t.Fatalf("repeated: isError=%v text=%q", res.IsError, text(res))
+	}
+
+	// 21 entries are too many, whatever their size. The schema says
+	// maxItems 20, so bypass client-side checks by calling the handler.
+	names := make([]string, 21)
+	for i := range names {
+		names[i] = "small.txt"
+	}
+	args, _ := json.Marshal(map[string]any{"kind": "new", "body": "hi", "attachments": names})
+	_, _, rerr := h.srv.resolveAttachments(args)
+	var ce bridge.CallError
+	if !errors.As(rerr, &ce) || ce.Code != "too_large" || ce.Message != "Too many attachments (max 20)" {
+		t.Fatalf("21 entries: err = %v", rerr)
+	}
+	res, err = call(t, cs, "mail_draft", map[string]any{"kind": "new", "body": "hi", "attachments": names})
+	if err == nil && (res == nil || !res.IsError) {
+		t.Fatal("21 attachments accepted")
+	}
+	if h.addon.callCount() != 0 {
+		t.Fatal("an over-limit draft reached the add-on")
+	}
+
+	// Exactly 20 small entries pass.
+	if _, blobs, err := h.srv.resolveAttachments(mustJSON(map[string]any{"attachments": names[:20]})); err != nil || len(blobs) != 20 {
+		t.Fatalf("20 entries: %v, %d blobs", err, len(blobs))
+	}
+}
+
+func mustJSON(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
+
+func TestUnknownErrorCodeMapped(t *testing.T) {
+	h := newHarness(t, []string{"mail_search"})
+	h.addon.setReply(func(map[string]any) map[string]any {
+		return map[string]any{"ok": false, "error": map[string]any{"code": "evil\nINJECTED log line", "message": "boom"}}
+	})
+	var logBuf strings.Builder
+	var lmu sync.Mutex
+	h.srv.Log = log.New(writerFunc(func(p []byte) (int, error) {
+		lmu.Lock()
+		defer lmu.Unlock()
+		return logBuf.Write(p)
+	}), "", 0)
+	cs := h.connect(t, nil)
+	res, err := call(t, cs, "mail_search", map[string]any{})
+	if err != nil || !res.IsError || text(res) != "thunderbird_error: boom" {
+		t.Fatalf("err=%v text=%q", err, text(res))
+	}
+	lmu.Lock()
+	defer lmu.Unlock()
+	if strings.Contains(logBuf.String(), "INJECTED") || !strings.Contains(logBuf.String(), "error thunderbird_error") {
+		t.Fatalf("log = %q", logBuf.String())
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestClientLogBounded(t *testing.T) {
+	var buf strings.Builder
+	s := &Server{Log: log.New(&buf, "", 0), clients: map[string]bool{}}
+	for i := 0; i < 300; i++ {
+		s.noteClient("client-" + strconv.Itoa(i))
+	}
+	s.noteClient("client-0") // already seen: no line
+	lines := strings.Count(buf.String(), "\n")
+	if lines != maxClientNames+1 {
+		t.Fatalf("%d log lines, want %d names plus one overflow line", lines, maxClientNames)
+	}
+	if strings.Contains(buf.String(), "client-299") {
+		t.Fatal("logged a name after the table was full")
 	}
 }
