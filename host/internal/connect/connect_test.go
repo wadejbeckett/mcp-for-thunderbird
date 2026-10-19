@@ -5,12 +5,14 @@
 package connect
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +41,18 @@ type upstream struct {
 
 	mu      sync.Mutex
 	clients []string
+	failing bool // answer calls with an add-on error
+	pipes   []io.Closer
+}
+
+func (u *upstream) setFailing(v bool) { u.mu.Lock(); u.failing = v; u.mu.Unlock() }
+
+func (u *upstream) stop() {
+	u.hs.CloseClientConnections()
+	u.hs.Close()
+	for _, c := range u.pipes {
+		c.Close()
+	}
 }
 
 func (u *upstream) lastClient() string {
@@ -72,9 +86,15 @@ func startUpstream(t *testing.T, instance string, tools []string) *upstream {
 			}
 			u.mu.Lock()
 			u.clients = append(u.clients, m["client"].(string))
+			failing := u.failing
 			u.mu.Unlock()
-			out, _ := json.Marshal(map[string]any{"type": "result", "id": m["id"], "ok": true,
-				"content": map[string]any{"echo": m["tool"]}})
+			reply := map[string]any{"type": "result", "id": m["id"], "ok": true,
+				"content": map[string]any{"echo": m["tool"]}}
+			if failing {
+				reply = map[string]any{"type": "result", "id": m["id"], "ok": false,
+					"error": map[string]any{"code": "not_found", "message": "Message not found in INBOX"}}
+			}
+			out, _ := json.Marshal(reply)
 			go func() { wmu.Lock(); defer wmu.Unlock(); _ = nativemsg.Write(inW, out) }()
 		}
 	}()
@@ -98,12 +118,8 @@ func startUpstream(t *testing.T, instance string, tools []string) *upstream {
 	hs.Listener = ln
 	hs.Start()
 	u.hs = hs
-	t.Cleanup(func() {
-		hs.CloseClientConnections()
-		hs.Close()
-		inW.Close()
-		outR.Close()
-	})
+	u.pipes = []io.Closer{inW, outR}
+	t.Cleanup(u.stop)
 	return u
 }
 
@@ -117,7 +133,29 @@ func stdioClient(t *testing.T, instance string, poll time.Duration, opts *mcp.Cl
 // older one uses the initialize handshake instead of server/discover.
 func stdioClientVersion(t *testing.T, instance string, poll time.Duration, opts *mcp.ClientOptions, version string) *mcp.ClientSession {
 	t.Helper()
-	cr, sw := io.Pipe() // proxy -> client
+	cs, _, _ := stdioClientCapture(t, instance, poll, opts, version)
+	return cs
+}
+
+// syncBuf is a goroutine-safe buffer for captured output.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// stdioClientCapture also returns everything the proxy wrote to stdout and
+// to its log.
+func stdioClientCapture(t *testing.T, instance string, poll time.Duration, opts *mcp.ClientOptions, version string) (*mcp.ClientSession, *syncBuf, *syncBuf) {
+	t.Helper()
+	stdout, logs := &syncBuf{}, &syncBuf{}
+	old := logOutput
+	logOutput = logs
+	t.Cleanup(func() { logOutput = old })
+	cr, sw0 := io.Pipe() // proxy -> client
+	sw := io.MultiWriter(sw0, stdout)
 	sr, cw := io.Pipe() // client -> proxy
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -142,7 +180,7 @@ func stdioClientVersion(t *testing.T, instance string, poll time.Duration, opts 
 			t.Error("Run did not return")
 		}
 	})
-	return cs
+	return cs, stdout, logs
 }
 
 func listNames(t *testing.T, cs *mcp.ClientSession) []string {
@@ -312,5 +350,141 @@ func TestLegacyInitializeHandshake(t *testing.T) {
 	}
 	if got := u.lastClient(); got != "Claude Desktop" {
 		t.Fatalf("upstream client %q", got)
+	}
+}
+
+func waitFor(t *testing.T, what string, d time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestForwardsUpstreamListChanged(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "fwd", []string{"mail_accounts"})
+	changed := make(chan struct{}, 4)
+	cs := stdioClient(t, "", time.Hour, &mcp.ClientOptions{ // polling never fires
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { changed <- struct{}{} },
+	})
+	if n := len(listNames(t, cs)); n != 1 {
+		t.Fatalf("tools = %d", n)
+	}
+	u.srv.SetTools([]string{"mail_accounts", "mail_search"})
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream list_changed not forwarded")
+	}
+	waitFor(t, "two tools", 3*time.Second, func() bool { return len(listNames(t, cs)) == 2 })
+}
+
+func TestTokenNeverOnStdoutOrLogs(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "secret", []string{"mail_accounts"})
+	cs, stdout, logs := stdioClientCapture(t, "", time.Hour, nil, "")
+	callTool(t, cs, "mail_accounts")
+	old := u.srv.Token()
+	if err := u.srv.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	callTool(t, cs, "mail_accounts") // exercises the 401 path and its logging
+	u.stop()
+	callTool(t, cs, "mail_accounts") // exercises the failure path
+	for _, tok := range []string{old, u.srv.Token()} {
+		if strings.Contains(stdout.String(), tok) || strings.Contains(logs.String(), tok) {
+			t.Fatal("token leaked to stdout or logs")
+		}
+	}
+}
+
+func TestRestartOnNewPortAndToken(t *testing.T) {
+	isolate(t)
+	u1 := startUpstream(t, "restart", []string{"mail_accounts"})
+	cs := stdioClient(t, "", time.Hour, nil)
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first: %q", resultText(res))
+	}
+	u1.stop()
+	u2 := startUpstream(t, "restart", []string{"mail_accounts"}) // new port, new token, same file
+	if u1.srv.Token() == u2.srv.Token() || u1.srv.URL() == u2.srv.URL() {
+		t.Fatal("restart did not change port and token")
+	}
+	res := callTool(t, cs, "mail_accounts")
+	if res.IsError || !strings.Contains(resultText(res), `"echo":"mail_accounts"`) {
+		t.Fatalf("after restart: %v %q", res.IsError, resultText(res))
+	}
+}
+
+func TestRejectedTokenMessage(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "badkey", []string{"mail_accounts"})
+	cs := stdioClient(t, "", time.Hour, nil)
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first: %q", resultText(res))
+	}
+	// The file keeps a token the server no longer accepts.
+	if err := u.srv.Rotate(); err != nil {
+		t.Fatal(err)
+	}
+	conn, _ := connfile.Load("badkey")
+	conn.Token = connfile.NewToken()
+	if err := connfile.Save(conn); err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, cs, "mail_accounts")
+	if !res.IsError || resultText(res) != RejectedMessage {
+		t.Fatalf("got %v %q", res.IsError, resultText(res))
+	}
+}
+
+func TestErrorResultPassesThrough(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "err", []string{"mail_accounts"})
+	cs := stdioClient(t, "", time.Hour, nil)
+	u.setFailing(true)
+	res := callTool(t, cs, "mail_accounts")
+	if !res.IsError || resultText(res) != "not_found: Message not found in INBOX" {
+		t.Fatalf("got %v %q", res.IsError, resultText(res))
+	}
+}
+
+func TestNoGoroutineLeakAcrossReconnects(t *testing.T) {
+	isolate(t)
+	cs := stdioClient(t, "", 20*time.Millisecond, nil)
+	cycle := func() {
+		u := startUpstream(t, "cycle", []string{"mail_accounts"})
+		waitFor(t, "tool appears", 5*time.Second, func() bool { return len(listNames(t, cs)) == 1 })
+		u.stop()
+		waitFor(t, "tool disappears", 5*time.Second, func() bool { return len(listNames(t, cs)) == 0 })
+	}
+	// Count the proxy's side only: goroutines in the upstream test server
+	// (its HTTP sessions outlive a vanished client by design) are excluded.
+	settle := func() int {
+		time.Sleep(300 * time.Millisecond)
+		runtime.GC()
+		buf := make([]byte, 4<<20)
+		stacks := strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n")
+		n := 0
+		for _, st := range stacks {
+			if strings.Contains(st, "streamableClientConn") || strings.Contains(st, "mcp.(*ClientSession)") ||
+				strings.Contains(st, "connect.(*proxy)") || strings.Contains(st, "authRT") {
+				n++
+			}
+		}
+		return n
+	}
+	cycle() // warm up
+	base := settle()
+	for i := 0; i < 20; i++ {
+		cycle()
+	}
+	if got := settle(); got > base+10 {
+		t.Fatalf("proxy goroutines grew from %d to %d over 20 reconnects", base, got)
 	}
 }

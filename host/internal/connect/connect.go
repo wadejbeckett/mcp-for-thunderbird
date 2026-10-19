@@ -43,7 +43,17 @@ const (
 	pingTimeout    = 3 * time.Second
 )
 
-var errUnavailable = errors.New("upstream unavailable")
+var (
+	errUnavailable = errors.New("upstream unavailable")
+	errRejected    = errors.New("upstream rejected the access key")
+)
+
+// RejectedMessage is the tool error when the upstream refuses the token even
+// after the connection file was re-read.
+const RejectedMessage = "MCP for Thunderbird rejected the access key. Restart Thunderbird, then restart this app."
+
+// logOutput is where the proxy logs (stderr); tests replace it.
+var logOutput io.Writer = os.Stderr
 
 // Run serves MCP on stdin/stdout until stdin closes or ctx ends. instance
 // selects a connection file; empty means the most recently updated one.
@@ -62,7 +72,7 @@ func run(ctx context.Context, stdin io.Reader, stdout io.Writer, instance string
 	p := &proxy{
 		instance:   instance,
 		poll:       poll,
-		logger:     log.New(os.Stderr, "mcp-for-thunderbird: ", log.LstdFlags),
+		logger:     log.New(logOutput, "mcp-for-thunderbird: ", log.LstdFlags),
 		registered: map[string][]byte{},
 		name:       "unknown",
 	}
@@ -95,6 +105,7 @@ type proxy struct {
 	registered map[string][]byte
 	polling    bool
 	closed     bool
+	lastFail   string // last logged connection failure, to log changes only
 
 	saw401 atomic.Bool
 	connMu sync.Mutex // serialises connection attempts
@@ -137,6 +148,9 @@ func (p *proxy) middleware(ctx context.Context) mcp.Middleware {
 					p.sync(c)
 				}
 				if p.session() == nil {
+					if p.saw401.Load() {
+						return rejectedResult(), nil
+					}
 					return closedResult(), nil
 				}
 			}
@@ -160,6 +174,34 @@ func clientName(req mcp.Request) string {
 
 func closedResult() *mcp.CallToolResult {
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: ClosedMessage}}}
+}
+
+func rejectedResult() *mcp.CallToolResult {
+	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: RejectedMessage}}}
+}
+
+// noteConnect logs a connection failure when it differs from the last one
+// logged, and a recovery once. It never logs the token or mail content.
+func (p *proxy) noteConnect(err error) {
+	msg := ""
+	if err != nil {
+		msg = "upstream not reachable: " + err.Error()
+		if p.saw401.Load() {
+			msg = "upstream rejected the access key"
+		}
+	}
+	p.mu.Lock()
+	same := p.lastFail == msg
+	p.lastFail = msg
+	p.mu.Unlock()
+	if same {
+		return
+	}
+	if msg == "" {
+		p.logger.Print("connected to upstream")
+	} else {
+		p.logger.Print(msg)
+	}
 }
 
 func (p *proxy) session() *mcp.ClientSession {
@@ -201,7 +243,7 @@ func (p *proxy) loadConn() (*connfile.Conn, error) {
 func (p *proxy) tryConnect(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	_ = p.connect(ctx)
+	p.noteConnect(p.connect(ctx))
 }
 
 // connect opens an upstream session unless one exists. On a 401 it re-reads
@@ -228,8 +270,13 @@ func (p *proxy) connect(ctx context.Context) error {
 			ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { go p.sync(context.Background()) },
 		})
 		tr := &mcp.StreamableClientTransport{
-			Endpoint:   fmt.Sprintf("http://127.0.0.1:%d/mcp", conn.Port),
-			HTTPClient: &http.Client{Transport: authRT{p}},
+			Endpoint: fmt.Sprintf("http://127.0.0.1:%d/mcp", conn.Port),
+			HTTPClient: &http.Client{
+				Transport: authRT{p},
+				// Never follow a redirect: the bearer token must go to the
+				// connection file's address and nowhere else.
+				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			},
 			MaxRetries: -1,
 		}
 		var cs *mcp.ClientSession
@@ -318,8 +365,11 @@ func (p *proxy) handler(tool string) mcp.ToolHandler {
 			args = json.RawMessage(`{}`)
 		}
 		res, err := p.callUpstream(ctx, tool, args)
-		if errors.Is(err, errUnavailable) {
+		switch {
+		case errors.Is(err, errUnavailable):
 			return closedResult(), nil
+		case errors.Is(err, errRejected):
+			return rejectedResult(), nil
 		}
 		return res, err
 	}
@@ -332,7 +382,12 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 	for attempt := 0; attempt < 2; attempt++ {
 		cs := p.session()
 		if cs == nil {
-			if err := p.connect(ctx); err != nil {
+			err := p.connect(ctx)
+			p.noteConnect(err)
+			if err != nil {
+				if p.saw401.Swap(false) {
+					return nil, errRejected
+				}
 				return nil, errUnavailable
 			}
 			if cs = p.session(); cs == nil {
@@ -348,9 +403,15 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 		if errors.As(err, &je) || ctx.Err() != nil {
 			return nil, err
 		}
+		// Transport failure: the old session may belong to a Thunderbird
+		// that restarted (new port or token). Drop it, re-read the
+		// connection file and retry once.
 		was401 := p.saw401.Swap(false)
 		p.drop(cs)
-		if !was401 {
+		if attempt == 1 {
+			if was401 {
+				return nil, errRejected
+			}
 			return nil, errUnavailable
 		}
 	}
@@ -403,7 +464,9 @@ func (p *proxy) pollOnce(ctx context.Context) {
 func (p *proxy) connectQuiet(ctx context.Context) bool {
 	cctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
-	return p.connect(cctx) == nil
+	err := p.connect(cctx)
+	p.noteConnect(err)
+	return err == nil
 }
 
 func (p *proxy) close() {
