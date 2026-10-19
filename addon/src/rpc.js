@@ -8,6 +8,8 @@ import { isToolError } from "./errors.js";
 import { load, groupOf } from "./settings.js";
 import { check } from "./policy.js";
 import { append } from "./log.js";
+import { decodeId } from "./ids.js";
+import { PAUSED_MESSAGE } from "./policy.js";
 
 // HANDLERS maps a tool name to async (args, ctx) => content. The handler
 // modules fill it in.
@@ -23,14 +25,30 @@ export function withSave(content, save) {
 
 const GENERIC = "Thunderbird could not complete the request.";
 
-// targets lists what the call names: opaque ids and folder paths only.
+const MAX_TARGETS = 20;
+const MAX_TARGET_CHARS = 200;
+
+function validId(id) {
+  try {
+    decodeId(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// targets lists what the call names: opaque ids that decode (anything else
+// is logged as "<invalid>") and the folder path; at most 20 entries of at
+// most 200 characters each.
 function targetsOf(args) {
   const t = [];
   if (!args || typeof args !== "object") return t;
-  if (typeof args.id === "string") t.push(args.id);
-  if (Array.isArray(args.ids)) t.push(...args.ids.filter((x) => typeof x === "string"));
+  const ids = [];
+  if ("id" in args) ids.push(args.id);
+  if (Array.isArray(args.ids)) ids.push(...args.ids);
+  for (const id of ids) t.push(validId(id) ? id : "<invalid>");
   if (typeof args.folder === "string") t.push(args.folder);
-  return t;
+  return t.slice(0, MAX_TARGETS).map((x) => x.slice(0, MAX_TARGET_CHARS));
 }
 
 // resolveAccountName maps an account given by name to its id, so policy
@@ -45,12 +63,15 @@ async function resolveAccountName(args, s) {
 
 export async function dispatch(call) {
   const client = typeof call.client === "string" && call.client ? call.client : "unknown";
-  let args = call.args && typeof call.args === "object" && !Array.isArray(call.args) ? call.args : {};
+  const argsOk = call.args == null || (typeof call.args === "object" && !Array.isArray(call.args));
+  let args = argsOk && call.args ? call.args : {};
   const targets = targetsOf(args);
   let msg;
   try {
-    if (!groupOf(call.tool)) throw { code: "invalid_argument", message: "Unknown tool." };
     const s = await load();
+    if (s.paused) throw { code: "paused", message: PAUSED_MESSAGE };
+    if (!groupOf(call.tool)) throw { code: "invalid_argument", message: "Unknown tool." };
+    if (!argsOk) throw { code: "invalid_argument", message: "Arguments must be an object." };
     args = await resolveAccountName(args, s);
     check(call.tool, args, s);
     const handler = HANDLERS[call.tool];

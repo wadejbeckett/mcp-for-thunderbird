@@ -61,6 +61,55 @@ test("with one enabled account a bare folder is checked against it", () => {
   assert.throws(() => check("mail_search", { folder: "Private" }, one), { code: "excluded" });
 });
 
+test("a bare folder with two or more enabled accounts is invalid_argument", () => {
+  assert.throws(() => check("mail_search", { folder: "INBOX" }, s()), {
+    code: "invalid_argument",
+    message: "Name the account for this folder.",
+  });
+});
+
+test("an account that differs from an id's account is refused", () => {
+  const msg = "Moving mail between accounts is not allowed.";
+  assert.throws(() => check("mail_move", { account: "a2", ids: [encodeId("a1", "INBOX", "x@y")], folder: "INBOX" }, s()), {
+    code: "refused",
+    message: msg,
+  });
+  assert.throws(() => check("mail_read", { account: "a2", id: encodeId("a1", "INBOX", "x@y") }, s()), { code: "refused", message: msg });
+  assert.throws(
+    () => check("mail_move", { ids: [encodeId("a1", "INBOX", "x@y"), encodeId("a2", "INBOX", "z@y")], folder: "INBOX" }, s()),
+    { code: "refused", message: msg },
+  );
+  check("mail_move", { account: "a1", ids: [encodeId("a1", "INBOX", "x@y")], folder: "Archive" }, s());
+});
+
+test("a target folder is checked against the ids' account even with no account given", () => {
+  assert.throws(() => check("mail_move", { ids: [encodeId("a1", "INBOX", "x@y")], folder: "Private/Sub" }, s()), { code: "excluded" });
+  check("mail_move", { ids: [encodeId("a2", "INBOX", "x@y")], folder: "Private" }, s());
+});
+
+test("wrong-typed id, ids, folder or account fail closed", () => {
+  for (const args of [
+    { id: 5 },
+    { id: null },
+    { ids: "m1.abc" },
+    { ids: [5] },
+    { ids: {} },
+    { folder: 3, account: "a1" },
+    { folder: ["Private"], account: "a1" },
+    { account: 1 },
+  ]) {
+    assert.throws(() => check("mail_read", args, s()), { code: "invalid_argument" }, JSON.stringify(args));
+  }
+});
+
+test("exclusion paths are compared without trailing slashes; a root exclusion excludes the account", () => {
+  const t = s({ excludedFolders: [{ accountId: "a1", path: "Private/" }, { accountId: "a2", path: "/" }] });
+  assert.equal(isExcluded("a1", "Private", t), true);
+  assert.equal(isExcluded("a1", "Private/", t), true);
+  assert.equal(isExcluded("a1", "Private/x", t), true);
+  assert.equal(isExcluded("a2", "INBOX", t), true);
+});
+
 test("a disabled group gives not_enabled", () => {
   assert.throws(() => check("mail_draft", {}, s()), { code: "not_enabled" });
   assert.throws(() => check("mail_contacts", { query: "x" }, s()), { code: "not_enabled" });

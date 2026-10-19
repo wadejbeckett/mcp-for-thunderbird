@@ -5,6 +5,8 @@
 // Settings live in storage.local under "settings". They are changed only
 // from the add-on's own pages, never over MCP.
 
+import { fail } from "./errors.js";
+
 export const STORAGE_KEY = "settings";
 
 // Tool groups, in catalogue order (Shared contracts).
@@ -86,7 +88,31 @@ async function e2eSettings() {
   }
 }
 
-export async function load() {
+// load and save run one at a time, so concurrent first loads agree on
+// one instance id and concurrent saves do not lose each other's changes.
+let queue = Promise.resolve();
+
+function serial(fn) {
+  const next = queue.then(fn, fn);
+  queue = next.catch(() => {});
+  return next;
+}
+
+// normaliseExcluded strips trailing slashes and refuses entries that name
+// no folder (an empty or root path) or no account.
+export function normaliseExcluded(list) {
+  if (!Array.isArray(list)) fail("invalid_argument", "Excluded folders must be a list.");
+  return list.map((ex) => {
+    const accountId = ex && ex.accountId;
+    const path = ex && typeof ex.path === "string" ? ex.path.replace(/\/+$/, "") : "";
+    if (typeof accountId !== "string" || accountId === "" || path === "") {
+      fail("invalid_argument", "An excluded folder needs an account and a folder path.");
+    }
+    return { accountId, path };
+  });
+}
+
+async function loadNow() {
   const local = globalThis.messenger.storage.local;
   const stored = (await local.get(STORAGE_KEY))[STORAGE_KEY];
   let s;
@@ -105,10 +131,17 @@ export async function load() {
   return s;
 }
 
-export async function save(patch) {
-  const current = await load();
-  const s = merge(current, patch);
-  s.instance = current.instance;
-  await globalThis.messenger.storage.local.set({ [STORAGE_KEY]: s });
-  return s;
+export function load() {
+  return serial(loadNow);
+}
+
+export function save(patch) {
+  return serial(async () => {
+    const current = await loadNow();
+    const s = merge(current, patch);
+    if (patch && "excludedFolders" in patch) s.excludedFolders = normaliseExcluded(patch.excludedFolders);
+    s.instance = current.instance;
+    await globalThis.messenger.storage.local.set({ [STORAGE_KEY]: s });
+    return s;
+  });
 }

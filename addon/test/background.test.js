@@ -81,8 +81,8 @@ test("mail_send is offered only while the messages.send permission is granted", 
   assert.equal(port.sentOfType("tools").at(-1).tools.includes("mail_send"), false);
 });
 
-test("reconnect backoff: immediate, then 1, 2, 4 ... capped at 60 s, reset by a welcome", async () => {
-  assert.deepEqual(BACKOFF_SECONDS, [0, 1, 2, 4, 8, 16, 32, 60]);
+test("reconnect backoff: immediate, then 1, 2, 4 ... capped at 25 s (R17), reset by a welcome", async () => {
+  assert.deepEqual(BACKOFF_SECONDS, [0, 1, 2, 4, 8, 16, 25]);
   await bg.start();
   const delays = [];
   for (let i = 0; i < 10; i++) {
@@ -92,7 +92,7 @@ test("reconnect backoff: immediate, then 1, 2, 4 ... capped at 60 s, reset by a 
     delays.push(timers.fire());
     await flush();
   }
-  assert.deepEqual(delays, [0, 1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000]);
+  assert.deepEqual(delays, [0, 1000, 2000, 4000, 8000, 16000, 25000, 25000, 25000, 25000]);
   assert.equal(mock.ports.length, 11);
 
   welcome(mock.lastPort());
@@ -283,14 +283,25 @@ test("hello is always the first message on a new port", async () => {
   const started = bg.start();
   await flush();
   const port = mock.lastPort();
-  const s = await (async () => {
-    local.get = realGet;
-    return load();
-  })();
+  // load() is serialised behind the gated call, so read storage directly.
+  const s = (await realGet("settings")).settings;
   mock.messenger.storage.onChanged.fire({ settings: { oldValue: s, newValue: { ...s, groups: { ...s.groups, compose: true } } } }, "local");
   await flush();
   release();
   await started;
   await flush();
   assert.equal(port.sent[0].type, "hello");
+});
+
+test("calls before a welcome ok:true are refused with Not connected yet", async () => {
+  HANDLERS.mail_accounts = async () => ({ ran: true });
+  await bg.start();
+  const port = mock.lastPort();
+  port.receive({ type: "call", id: "c0", tool: "mail_accounts", client: "x", args: {} });
+  await flush();
+  assert.deepEqual(port.sentOfType("result")[0].error, { code: "refused", message: "Not connected yet" });
+  welcome(port);
+  port.receive({ type: "call", id: "c1", tool: "mail_accounts", client: "x", args: {} });
+  await flush();
+  assert.equal(port.sentOfType("result")[1].ok, true);
 });

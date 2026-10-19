@@ -11,10 +11,18 @@ import { decodeId } from "./ids.js";
 
 export const PAUSED_MESSAGE = "Paused by the user in Thunderbird";
 
+const trimSlash = (p) => p.replace(/\/+$/, "");
+
+// isExcluded matches an excluded folder and its subfolders. Paths are
+// compared without trailing slashes; an entry that names the root (stored
+// by hand, since save refuses it) excludes the whole account.
 export function isExcluded(accountId, folderPath, s) {
-  return (s.excludedFolders || []).some(
-    (ex) => ex.accountId === accountId && (folderPath === ex.path || folderPath.startsWith(ex.path + "/")),
-  );
+  const path = trimSlash(String(folderPath));
+  return (s.excludedFolders || []).some((ex) => {
+    if (!ex || ex.accountId !== accountId) return false;
+    const ep = trimSlash(String(ex.path ?? ""));
+    return ep === "" || path === ep || path.startsWith(ep + "/");
+  });
 }
 
 export function assertFolderAllowed(accountId, folderPath, s) {
@@ -29,8 +37,12 @@ export function enabledAccountIds(s) {
   return Object.keys(s.accounts || {}).filter((id) => s.accounts[id] === true);
 }
 
+const CROSS_ACCOUNT = "Moving mail between accounts is not allowed.";
+
 // check refuses a call the settings do not allow. Order: paused, tool
-// group, account, then the ids and folder named in the arguments.
+// group, argument types, account, the ids, then the folder. Policy owns the
+// account and folder checks; handlers repeat assertFolderAllowed for every
+// message they reach.
 export function check(tool, args, s) {
   args = args || {};
   if (s.paused) fail("paused", PAUSED_MESSAGE);
@@ -41,23 +53,37 @@ export function check(tool, args, s) {
     fail("not_enabled", `The ${group} tools are turned off in MCP for Thunderbird.`);
   }
 
-  if (args.account != null) assertAccountEnabled(args.account, s);
+  const has = (k) => Object.prototype.hasOwnProperty.call(args, k);
+  if (has("account") && typeof args.account !== "string") fail("invalid_argument", "account must be a string.");
+  if (has("id") && typeof args.id !== "string") fail("invalid_argument", "id must be a string.");
+  if (has("ids") && !(Array.isArray(args.ids) && args.ids.every((x) => typeof x === "string"))) {
+    fail("invalid_argument", "ids must be a list of strings.");
+  }
+  if (has("folder") && typeof args.folder !== "string") fail("invalid_argument", "folder must be a string.");
+
+  if (has("account")) assertAccountEnabled(args.account, s);
 
   const ids = [];
-  if (typeof args.id === "string") ids.push(args.id);
-  if (Array.isArray(args.ids)) ids.push(...args.ids);
+  if (has("id")) ids.push(args.id);
+  if (has("ids")) ids.push(...args.ids);
+  const idAccounts = new Set();
   for (const id of ids) {
     const { accountId, folderPath } = decodeId(id);
     assertAccountEnabled(accountId, s);
     assertFolderAllowed(accountId, folderPath, s);
+    if (has("account") && accountId !== args.account) fail("refused", CROSS_ACCOUNT);
+    idAccounts.add(accountId);
   }
 
-  if (typeof args.folder === "string") {
-    let accountId = args.account;
-    if (accountId == null) {
+  if (has("folder")) {
+    if (idAccounts.size > 1) fail("refused", CROSS_ACCOUNT);
+    const accounts = new Set(idAccounts);
+    if (has("account")) accounts.add(args.account);
+    if (accounts.size === 0) {
       const enabled = enabledAccountIds(s);
-      if (enabled.length === 1) accountId = enabled[0];
+      if (enabled.length !== 1) fail("invalid_argument", "Name the account for this folder.");
+      accounts.add(enabled[0]);
     }
-    if (accountId != null) assertFolderAllowed(accountId, args.folder, s);
+    for (const a of accounts) assertFolderAllowed(a, args.folder, s);
   }
 }

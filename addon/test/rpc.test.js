@@ -134,3 +134,37 @@ test("concurrent appends are not lost", async () => {
   await Promise.all(Array.from({ length: 20 }, (_, i) => append({ time: "t", client: "c", tool: `t${i}`, targets: [], outcome: "ok" })));
   assert.equal((await list()).length, 20);
 });
+
+test("paused is checked before the unknown-tool check and before any accounts lookup", async () => {
+  await save({ paused: true });
+  let looked = false;
+  mock.messenger.accounts.list = async () => {
+    looked = true;
+    return [];
+  };
+  assert.equal((await dispatch(call("mail_bogus"))).error.code, "paused");
+  assert.equal((await dispatch(call("mail_folders", { account: "Work" }))).error.code, "paused");
+  assert.equal(looked, false);
+});
+
+test("non-object args are invalid_argument", async () => {
+  HANDLERS.mail_accounts = async () => ({});
+  assert.equal((await dispatch(call("mail_accounts", ["x"]))).error.code, "invalid_argument");
+  assert.equal((await dispatch(call("mail_accounts", "x"))).error.code, "invalid_argument");
+});
+
+test("log targets keep only decodable ids, at most 20 of at most 200 characters", async () => {
+  const good = encodeId("a1", "INBOX", "x@y");
+  const ids = [good, "m1.!!", "Secret subject", ...Array.from({ length: 30 }, (_, i) => encodeId("a1", "INBOX", `n${i}@y`))];
+  await dispatch(call("mail_mark", { ids, folder: "F".repeat(500) }));
+  const [e] = await list();
+  assert.equal(e.targets.length, 20);
+  assert.equal(e.targets[0], good);
+  assert.equal(e.targets[1], "<invalid>");
+  assert.equal(e.targets[2], "<invalid>");
+  assert.doesNotMatch(JSON.stringify(e), /Secret/);
+  for (const t of e.targets) assert.ok(t.length <= 200);
+  await clear();
+  await dispatch(call("mail_folders", { account: "a1", folder: "F".repeat(500) }));
+  assert.equal((await list())[0].targets[0].length, 200);
+});

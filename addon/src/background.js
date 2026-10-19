@@ -6,15 +6,17 @@
 // tool calls, keeps the host's tool list current and shows the state in
 // the toolbar button.
 //
-// MV3 event page (ruling R6): an open native port keeps the page alive, so
-// the first reconnect is immediate (docs/SPIKES.md §1).
+// MV3 event page (ruling R6): an open native port keeps the page alive.
+// Without one the page suspends after about 30 s and loses its timers, so
+// the first reconnect is immediate (docs/SPIKES.md §1) and the backoff is
+// capped at 25 s (ruling R17).
 
 import { load, enabledTools, STORAGE_KEY } from "./settings.js";
 import { dispatch } from "./rpc.js";
 
 export const HOST_NAME = "mcp_for_thunderbird";
 export const PROTOCOL = 1;
-export const BACKOFF_SECONDS = Object.freeze([0, 1, 2, 4, 8, 16, 32, 60]);
+export const BACKOFF_SECONDS = Object.freeze([0, 1, 2, 4, 8, 16, 25]);
 const REPLY_TIMEOUT_MS = 30_000;
 
 const TOOLBAR = {
@@ -249,6 +251,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     let ready;
     try {
       if (mismatch) return refuse({ code: "refused", message: UPDATE_NEEDED });
+      if (!welcomed) return refuse({ code: "refused", message: "Not connected yet" });
       ready = withAttachments(call);
     } catch (e) {
       return refuse(e && e.code === "invalid_argument" ? { code: e.code, message: e.message } : { code: "thunderbird_error", message: GENERIC });

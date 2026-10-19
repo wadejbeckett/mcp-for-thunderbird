@@ -89,3 +89,28 @@ test("e2e-settings.json is ignored when storage already has settings", async () 
   globalThis.fetch = fetchFrom({ "e2e-settings.json": { accounts: { acc1: true } } });
   assert.deepEqual((await load()).accounts, {});
 });
+
+test("concurrent loads on empty storage agree on the stored instance", async () => {
+  const all = await Promise.all([load(), load(), load()]);
+  const stored = (await mock.messenger.storage.local.get("settings")).settings.instance;
+  assert.match(stored, /^[0-9a-f]{32}$/);
+  for (const s of all) assert.equal(s.instance, stored);
+});
+
+test("concurrent saves both persist", async () => {
+  await Promise.all([save({ groups: { compose: true } }), save({ accounts: { a1: true } }), save({ send: { enabled: true } })]);
+  const s = await load();
+  assert.equal(s.groups.compose, true);
+  assert.deepEqual(s.accounts, { a1: true });
+  assert.equal(s.send.enabled, true);
+});
+
+test("excluded folder paths are normalised; empty and root paths are refused", async () => {
+  const s = await save({ excludedFolders: [{ accountId: "a1", path: "Private//" }] });
+  assert.deepEqual(s.excludedFolders, [{ accountId: "a1", path: "Private" }]);
+  for (const path of ["", "/", "//"]) {
+    await assert.rejects(save({ excludedFolders: [{ accountId: "a1", path }] }), { code: "invalid_argument" });
+  }
+  await assert.rejects(save({ excludedFolders: [{ accountId: "", path: "X" }] }), { code: "invalid_argument" });
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Private" }]);
+});

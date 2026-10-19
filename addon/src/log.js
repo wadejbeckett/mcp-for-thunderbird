@@ -4,7 +4,8 @@
 
 // Activity log: the last 500 calls in storage.local under "activity".
 // Entries hold only time, client, tool, targets (opaque ids or folder
-// paths) and outcome; never subjects, bodies or addresses.
+// paths, at most 20 of at most 200 characters) and outcome; never
+// subjects, bodies or addresses.
 
 export const LOG_KEY = "activity";
 export const LOG_SIZE = 500;
@@ -22,7 +23,12 @@ function entry({ time, client, tool, targets, outcome }) {
     time: String(time),
     client: String(client ?? "unknown"),
     tool: String(tool ?? ""),
-    targets: Array.isArray(targets) ? targets.filter((t) => typeof t === "string") : [],
+    targets: Array.isArray(targets)
+      ? targets
+          .filter((t) => typeof t === "string")
+          .slice(0, 20)
+          .map((t) => t.slice(0, 200))
+      : [],
     outcome: String(outcome ?? ""),
   };
 }
