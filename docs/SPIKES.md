@@ -210,3 +210,33 @@ Body scan rate: about 2,100 messages a second for 1.5 KB messages. Real mail is 
 - **Subjects.** `MessageHeader.subject` has the `Re:` stripped (for example "Quarterly hosting review" for a reply). Read the raw headers when the exact subject matters.
 - **Lookup by Message-ID.** `messages.query({headerMessageId})` is the lookup by `Message-ID` that the opaque id scheme needs.
 - **Marionette.** It works on 153 with `--marionette --remote-allow-system-access`. It is useful for the end-to-end harness set-up (stored logins), never in the product.
+
+# Milestone 2: end-to-end on Linux (Task 14)
+
+Run on 19 October 2026 on the same machine, Thunderbird 153.4.0esr (deb), with `test/e2e/run.sh`: GreenMail (the pinned image above, container `mft-greenmail`), a throwaway profile under `$TMPDIR/mft-e2e-profile`, the add-on built with `packaging/build-xpi.mjs --e2e-settings`, the real host, and `go test` in `test/e2e` as the MCP client (go-sdk v1.8.0). Thunderbird ran under its own Xvfb with `HOME` set to a throwaway directory, so the native manifest and the connection file never touched the real home. All six tests passed: `TestE2ERead`, `TestE2EFolderSearch`, `TestE2ENullOptionals`, `TestE2EConnectStdio`, `TestE2EToolbar` and `TestE2EConnectRestart`.
+
+## Checks deferred to this milestone
+
+| Check | Result |
+|---|---|
+| `messages.query` with `returnMessageListId: true`, then `continueList` | **Works.** On 153 the query returns the list id as a string (checked through Marionette with the add-on's own context), and `continueList` returns the pages. Every `mail_search` in the run goes this way, including empty date windows, and found the seeded mail. |
+| Explicit `null` for omitted optional arguments | **Refused before the fix.** `mail_search` with `"account": null` (and other optional nulls) gave `invalid_argument: account must be a string.` The go-sdk client sends only the arguments it is given, so it adds no nulls itself; some MCP clients do. Fixed in `fix(addon): treat null arguments as absent`: `dispatch` drops top-level nulls before policy and the handler. `TestE2ENullOptionals` passes. What Claude Code sends was not checked. |
+| Connect mode across Thunderbird restarts | **Recovers.** One stdio session (`connect`) kept working across five restarts; in each, the first call after the new connection file appeared succeeded (about 1.6 s after start): same port and token; same port with a new token (connection file removed while closed); a new port (47110 held by the test, the host took 47111); and two quick restarts with no call while Thunderbird was closed (new file, and same file), which a 5 s poll may not notice. While Thunderbird was closed, a call returned the closed copy. |
+| Module background, `folders.query` by path, toolbar | **All work.** The `"type": "module"` background loads its imports. `folders.query({accountId, path: "/INBOX"})` finds the folder (`mail_search` with `folder`, and every id lookup). The toolbar button shows the title "MCP for Thunderbird: connected" with an empty badge once the host answers. |
+
+## Other findings
+
+- **A sideloaded XPI runs only from the second start.** The start that finds `<profile>/extensions/<id>.xpi` installs it (the Add-ons Manager reports it active) but does not run it. It runs from the next start. `make-profile.sh` puts the XPI in place before the start that stores the test login, so the add-on is installed before the test start.
+- **Stored logins need a clean quit.** A login added through Marionette was lost when Thunderbird was stopped with SIGTERM; `logins.db` stayed empty and the next start showed the password prompt. `tb.sh stop` now asks Thunderbird to quit through Marionette first.
+- **Body search needs offline bodies.** `fullText` found the seeded message only after Thunderbird had downloaded the message bodies for offline use (about 60 s after the first start in the first runs; headers arrive at the first new-mail check). The harness asks for an inbox update and an offline download before the tests. Inference, not tested here: on a new account, `mail_search` with `text` misses mail whose body is not yet stored offline.
+- **curl's IMAP upload marks mail as read.** `curl --upload-file imap://…` appends with `\Seen`; `run.sh` clears the flag so the seeded mail is unread.
+- **Extensions run out of process on 153.** The background page is in a remote browser, so a chrome-context script reaches it only through the parent-side API with the add-on's background context.
+- **A console error at every start.** Thunderbird logs "module is not a constructor" from `ExtensionCommon.sys.mjs` (`asyncGetAPI`) at each start, also when the add-on is not running. Its source was not identified; the add-on starts and works.
+
+## Manual check with Claude Code: left for the owner
+
+Not run here, because `claude mcp add` changes the owner's Claude Code configuration. `TestE2EConnectStdio` does the same check with a go-sdk client instead: it starts `mcp-for-thunderbird connect` over stdio and asks `mail_search` for today's unread mail, which returns both seeded messages. To do the check by hand, run `MFT_E2E_HOLD=1 test/e2e/run.sh`, which keeps the e2e Thunderbird and GreenMail running after the tests until Enter is pressed (the connection file is under `$TMPDIR/mft-e2e/home/.config`, with `/tmp` when `TMPDIR` is unset), and meanwhile:
+
+1. `claude mcp add --scope user mft-dev -e XDG_CONFIG_HOME=$TMPDIR/mft-e2e/home/.config -- <abs path>/mcp-for-thunderbird connect`
+2. Ask Claude Code "list my unread mail from today".
+3. `claude mcp remove --scope user mft-dev`.

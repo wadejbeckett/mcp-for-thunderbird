@@ -1,0 +1,24 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# GreenMail for the end-to-end tests: IMAP on 127.0.0.1:3143, SMTP on
+# 127.0.0.1:3025, user test (password test, address test@localhost).
+# The image is pinned by digest (GreenMail 2.1.14, docs/SPIKES.md "Setup").
+# run.sh uses this file with `docker compose` when the plugin is installed
+# and otherwise starts the same container with `docker run`; keep the two
+# in step.
+name: mft-e2e
+services:
+  greenmail:
+    image: greenmail/standalone@sha256:1ef95a966418cd09b7ea91d504d8c0826bbe7a2f6e679a75c601a831587c1626
+    container_name: mft-greenmail
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.users=test:test@localhost
+        -Dgreenmail.hostname=0.0.0.0
+      JAVA_OPTS: -Xmx512m
+    ports:
+      - "127.0.0.1:3143:3143"
+      - "127.0.0.1:3025:3025"
