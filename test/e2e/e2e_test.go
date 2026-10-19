@@ -45,6 +45,7 @@ var (
 	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"}
 	organiseTools = []string{"mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"}
 	composeTools  = []string{"mail_draft", "mail_compose"}
+	contactsTools = []string{"mail_contacts"}
 )
 
 func TestMain(m *testing.M) {
@@ -1145,7 +1146,7 @@ type readResult struct {
 var hostileFixtures = []hostile{
 	{file: "hidden-html",
 		hidden: []string{"CANARY", "evil.com"},
-		inside: []string{"Your statement for October is ready.", "Thank you for banking with Acme."}},
+		inside: []string{"Your statement for October is ready.", "Thank you for banking with Acme.", "Decorative aria-hidden text."}},
 	{file: "white-on-white",
 		hidden: []string{"CANARY", "evil.com"},
 		inside: []string{"October news from Acme.", "Visible on dark", "See you next month."}},
@@ -1219,18 +1220,40 @@ func TestE2EInjectionDefaults(t *testing.T) {
 		addonSettings(t, orig)
 		waitTools(t, cs, origTools)
 	})
+	// The add-on's own defaults (settings.js DEFAULTS, written by run.sh).
+	b, err := os.ReadFile(os.Getenv("MFT_E2E_DEFAULTS"))
+	if err != nil {
+		t.Fatalf("MFT_E2E_DEFAULTS: %v", err)
+	}
+	var def struct {
+		Groups map[string]bool `json:"groups"`
+		Send   map[string]any  `json:"send"`
+	}
+	if err := json.Unmarshal(b, &def); err != nil {
+		t.Fatal(err)
+	}
 	defaults := map[string]any{}
 	for k, v := range orig {
 		defaults[k] = v
 	}
-	defaults["groups"] = map[string]any{"read": true, "organise": true, "compose": false, "contacts": false}
-	defaults["send"] = map[string]any{"enabled": false, "allow": []string{}}
+	defaults["groups"] = def.Groups
+	defaults["send"] = def.Send
 	defaults["accounts"] = map[string]any{"account1": true, "account3": true}
 	addonSettings(t, defaults)
 
-	// Only read and organise tools; sending tools are unknown even when
-	// called by name (messages.send is still granted from TestE2EDraftAndSend).
-	waitTools(t, cs, append(append([]string{}, readTools...), organiseTools...))
+	// The default groups' tools (read and organise); sending tools are
+	// unknown even when called by name (messages.send is still granted
+	// from TestE2EDraftAndSend).
+	var want []string
+	for _, g := range []struct {
+		name  string
+		tools []string
+	}{{"read", readTools}, {"contacts", contactsTools}, {"organise", organiseTools}, {"compose", composeTools}} {
+		if def.Groups[g.name] {
+			want = append(want, g.tools...)
+		}
+	}
+	waitTools(t, cs, want)
 	for _, tool := range []string{"mail_send", "mail_draft", "mail_compose"} {
 		_, _, err := tryCall(cs, tool, map[string]any{"to": []string{"x@evil.com"}, "subject": "s", "body": "b", "kind": "new"})
 		if err == nil || !strings.Contains(err.Error(), "unknown tool") {

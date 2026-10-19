@@ -129,6 +129,9 @@ cat >"$MFT_E2E_DIR/e2e-settings.json" <<EOF
   "setupDone": true
 }
 EOF
+# The add-on's own defaults (settings.js DEFAULTS) for
+# TestE2EInjectionDefaults, so the test never restates them.
+node --input-type=module -e "import { DEFAULTS } from 'file://$repo/addon/src/settings.js'; console.log(JSON.stringify({ groups: DEFAULTS.groups, send: DEFAULTS.send }))" >"$MFT_E2E_DIR/defaults.json"
 node "$repo/packaging/build-xpi.mjs" --e2e-settings "$MFT_E2E_DIR/e2e-settings.json" --out "$MFT_E2E_DIR/mcp-for-thunderbird-e2e.xpi" >/dev/null
 
 log "building the profile"
@@ -150,6 +153,7 @@ export MFT_E2E=1
 export MFT_E2E_BIN=$MFT_E2E_DIR/bin/mcp-for-thunderbird
 export MFT_E2E_TB=$here/tb.sh
 export MFT_E2E_ATTACHMENTS=$MFT_E2E_DIR/attachments
+export MFT_E2E_DEFAULTS=$MFT_E2E_DIR/defaults.json
 # The throwaway config dir holds the connection file. It is passed as its
 # own variable: setting XDG_CONFIG_HOME for go itself would hide the user's
 # go env file (GOPATH, module cache).
