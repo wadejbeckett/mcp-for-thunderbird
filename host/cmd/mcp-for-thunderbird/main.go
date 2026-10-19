@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connect"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connfile"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/server"
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/setup"
 )
 
 // Version is set at build time with -ldflags "-X main.Version=...".
@@ -73,8 +75,85 @@ func run(args []string, out io.Writer) int {
 		}
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: mcp-for-thunderbird version | connect [--instance <id>]")
+	if len(args) >= 1 && args[0] == "setup" {
+		return runSetup(args[1:], out)
+	}
+	fmt.Fprintln(os.Stderr, "usage: mcp-for-thunderbird version | connect [--instance <id>] | setup [--native-only | --clients=a,b | --uninstall]")
 	return 2
+}
+
+// runSetup registers the native manifest and lists the AI apps found
+// (setup), also configures the named apps (--clients=a,b), registers the
+// manifest only (--native-only), or removes the manifest and our entries
+// (--uninstall). It never asks questions; consent for app configuration is
+// the user naming the apps here or ticking them on the add-on's setup page.
+func runSetup(args []string, out io.Writer) int {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	nativeOnly := fs.Bool("native-only", false, "register the native-messaging manifest only")
+	uninstall := fs.Bool("uninstall", false, "remove the manifest and this program's entries from AI apps")
+	clientList := fs.String("clients", "", "comma-separated AI apps to configure: claude-desktop, claude-code, codex, cursor")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return 2
+	}
+	if (*uninstall && (*nativeOnly || *clientList != "")) || (*nativeOnly && *clientList != "") {
+		fmt.Fprintln(os.Stderr, "setup: --native-only, --clients and --uninstall cannot be combined")
+		return 2
+	}
+	code := 0
+	report := func(st []bridge.ClientStatus, verb string) {
+		for _, s := range st {
+			switch {
+			case s.Error != "":
+				fmt.Fprintf(out, "%s: %s\n", s.Name, s.Error)
+				code = 1
+			case verb != "":
+				fmt.Fprintf(out, "%s: %s\n", s.Name, verb)
+			case s.Configured:
+				fmt.Fprintf(out, "%s: found, set up\n", s.Name)
+			case s.Found:
+				fmt.Fprintf(out, "%s: found, not set up\n", s.Name)
+			default:
+				fmt.Fprintf(out, "%s: not found\n", s.Name)
+			}
+		}
+	}
+	if *uninstall {
+		if err := setup.UnregisterNative(); err != nil {
+			fmt.Fprintf(out, "native messaging: %v\n", err)
+			code = 1
+		} else {
+			fmt.Fprintln(out, "native messaging: removed")
+		}
+		report(setup.Uninstall(), "entry removed if it was there")
+		return code
+	}
+	bin, err := setup.Executable()
+	if err != nil {
+		fmt.Fprintf(out, "setup: cannot find this program's location: %v\n", err)
+		return 1
+	}
+	if err := setup.RegisterNative(bin); err != nil {
+		fmt.Fprintf(out, "native messaging: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, "native messaging: registered for Thunderbird")
+	if *nativeOnly {
+		return 0
+	}
+	if *clientList != "" {
+		var names []string
+		for _, n := range strings.Split(*clientList, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
+		}
+		report(setup.Configure(names, bin), "set up")
+		return code
+	}
+	report(setup.Detect(), "")
+	fmt.Fprintln(out, "Set up AI apps from MCP for Thunderbird's setup page in Thunderbird, or with setup --clients=<names>.")
+	return code
 }
 
 var tokenRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -129,8 +208,17 @@ func RunNative(stdin io.Reader, stdout io.Writer) error {
 		}
 		return "", ""
 	})
-	// Client detection and setup arrive with Task 18.
-	b.OnClients(func([]string) []bridge.ClientStatus { return []bridge.ClientStatus{} })
+	// clients_detect arrives as nil, clients_configure as the ticked names.
+	b.OnClients(func(names []string) []bridge.ClientStatus {
+		if names == nil {
+			return setup.Detect()
+		}
+		bin, err := setup.Executable()
+		if err != nil {
+			bin = ""
+		}
+		return setup.Configure(names, bin)
+	})
 
 	hello, err := b.WaitHello(context.Background())
 	if err != nil {

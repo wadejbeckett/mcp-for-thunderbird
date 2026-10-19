@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +83,12 @@ func TestNativeModeLifecycle(t *testing.T) {
 	home := filepath.Join(dir, "home")
 	cfg := filepath.Join(dir, "config")
 	cmd := exec.Command(bin, filepath.Join(dir, "mcp_for_thunderbird.json"), AddonID)
-	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+cfg, "APPDATA="+cfg)
+	// Every home and config directory is a temp one, and PATH is empty, so
+	// clients_detect/clients_configure never see the real AI apps (R24).
+	emptyPath := filepath.Join(dir, "path")
+	os.MkdirAll(emptyPath, 0o755)
+	cmd.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "XDG_CONFIG_HOME="+cfg,
+		"APPDATA="+cfg, "LOCALAPPDATA="+cfg, "CODEX_HOME=", "CLAUDE_CONFIG_DIR=", "PATH="+emptyPath)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -139,14 +146,45 @@ func TestNativeModeLifecycle(t *testing.T) {
 		t.Fatalf("token reply = %v", tok)
 	}
 
-	// clients_detect answers with an empty list until setup lands.
+	// clients_detect lists the four apps; only Cursor (its folder exists)
+	// is found. clients_configure writes our entry with this binary.
+	if err := os.MkdirAll(filepath.Join(home, ".cursor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cd, _ := json.Marshal(map[string]any{"type": "clients_detect", "req": "r1"})
 	if err := nativemsg.Write(stdin, cd); err != nil {
 		t.Fatal(err)
 	}
 	cr := readFrame(t, stdout)
-	if cl, ok := cr["clients"].([]any); cr["type"] != "clients_result" || cr["req"] != "r1" || !ok || len(cl) != 0 {
+	want := []any{
+		map[string]any{"name": "claude-desktop", "found": false, "configured": false},
+		map[string]any{"name": "claude-code", "found": false, "configured": false},
+		map[string]any{"name": "codex", "found": false, "configured": false},
+		map[string]any{"name": "cursor", "found": true, "configured": false},
+	}
+	if cr["type"] != "clients_result" || cr["req"] != "r1" || !reflect.DeepEqual(cr["clients"], want) {
 		t.Fatalf("clients_result = %v", cr)
+	}
+	cc, _ := json.Marshal(map[string]any{"type": "clients_configure", "req": "r2", "clients": []string{"cursor"}})
+	if err := nativemsg.Write(stdin, cc); err != nil {
+		t.Fatal(err)
+	}
+	cr = readFrame(t, stdout)
+	if cr["req"] != "r2" || !reflect.DeepEqual(cr["clients"], []any{map[string]any{"name": "cursor", "found": true, "configured": true}}) {
+		t.Fatalf("clients_result = %v", cr)
+	}
+	var cursor struct {
+		MCPServers map[string]struct {
+			Command string
+			Args    []string
+		}
+	}
+	raw, err = os.ReadFile(filepath.Join(home, ".cursor", "mcp.json"))
+	if err != nil || json.Unmarshal(raw, &cursor) != nil {
+		t.Fatalf("mcp.json: %s %v", raw, err)
+	}
+	if e := cursor.MCPServers["mcp-for-thunderbird"]; e.Command != bin || !reflect.DeepEqual(e.Args, []string{"connect"}) {
+		t.Fatalf("cursor entry %+v, want command %s", e, bin)
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "lifecycle-test", Version: "1"}, nil)
@@ -200,5 +238,91 @@ func TestNativeModeLifecycle(t *testing.T) {
 	}
 	if bytes.Contains(stderr.Bytes(), []byte(conn.Token)) {
 		t.Fatal("token appears in stderr")
+	}
+}
+
+// setupEnv sandboxes every home and config directory and PATH for an
+// in-process run of the setup subcommand (R24).
+func setupEnv(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	for k, v := range map[string]string{"HOME": home, "USERPROFILE": home,
+		"XDG_CONFIG_HOME": filepath.Join(home, ".config"), "APPDATA": filepath.Join(home, "AppData"),
+		"LOCALAPPDATA": filepath.Join(home, "Local"), "CODEX_HOME": "", "CLAUDE_CONFIG_DIR": "",
+		"PATH": t.TempDir()} {
+		t.Setenv(k, v)
+	}
+	return home
+}
+
+func TestSetupNativeOnly(t *testing.T) {
+	home := setupEnv(t)
+	os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+	var out bytes.Buffer
+	if code := run([]string{"setup", "--native-only"}, &out); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	m := filepath.Join(home, ".mozilla", "native-messaging-hosts", "mcp_for_thunderbird.json")
+	raw, err := os.ReadFile(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var man struct{ Path string }
+	exe, _ := os.Executable()
+	exe, _ = filepath.EvalSymlinks(exe)
+	if json.Unmarshal(raw, &man) != nil || man.Path != exe {
+		t.Fatalf("manifest path %q, want %q", man.Path, exe)
+	}
+	if strings.Contains(out.String(), "cursor") {
+		t.Fatalf("--native-only listed apps: %s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); err == nil {
+		t.Fatal("--native-only configured an app")
+	}
+}
+
+func TestSetupDetectsAndConfiguresOnlyNamedClients(t *testing.T) {
+	home := setupEnv(t)
+	os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
+	var out bytes.Buffer
+	if code := run([]string{"setup"}, &out); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "cursor: found") || !strings.Contains(out.String(), "claude-code: not found") {
+		t.Fatalf("output: %s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); err == nil {
+		t.Fatal("plain setup configured an app")
+	}
+	out.Reset()
+	if code := run([]string{"setup", "--clients=cursor"}, &out); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".cursor", "mcp.json")); err != nil {
+		t.Fatalf("cursor not configured: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); err == nil {
+		t.Fatal("codex configured without being named")
+	}
+	// A failure gives exit 1.
+	out.Reset()
+	if code := run([]string{"setup", "--clients=claude-code"}, &out); code != 1 {
+		t.Fatalf("missing app exit %d: %s", code, out.String())
+	}
+	// --uninstall removes the manifest and our cursor entry.
+	out.Reset()
+	if code := run([]string{"setup", "--uninstall"}, &out); code != 0 {
+		t.Fatalf("uninstall exit %d: %s", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".mozilla", "native-messaging-hosts", "mcp_for_thunderbird.json")); err == nil {
+		t.Fatal("manifest left after uninstall")
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, ".cursor", "mcp.json"))
+	if strings.Contains(string(raw), "mcp-for-thunderbird") {
+		t.Fatalf("cursor entry left: %s", raw)
+	}
+	if code := run([]string{"setup", "--uninstall", "--clients=cursor"}, &out); code != 2 {
+		t.Fatalf("conflicting flags exit %d", code)
 	}
 }

@@ -4,9 +4,9 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build the throwaway end-to-end profile (docs/SPIKES.md "Setup"):
-#  1. put the XPI at <profile>/extensions/<id>.xpi and write the native
-#     manifest into the throwaway HOME (Task 18's `setup --native-only`
-#     takes this over);
+#  1. put the XPI at <profile>/extensions/<id>.xpi and register the native
+#     manifest with the host's own `setup --native-only`, run with HOME and
+#     XDG_CONFIG_HOME pointing at the throwaway home (ruling R24);
 #  2. start Thunderbird once on a profile with no mail account and store
 #     the GreenMail test login through Marionette (an IMAP account without
 #     a stored password blocks start-up with a password prompt). This
@@ -80,17 +80,14 @@ base_prefs() {
 mkdir -p "$prof/extensions"
 cp "$xpi" "$prof/extensions/$ADDON_ID.xpi"
 
-nmh=$MFT_E2E_DIR/home/.mozilla/native-messaging-hosts
-mkdir -p "$nmh"
-cat >"$nmh/$HOST_NAME.json" <<EOF
-{
-  "name": "$HOST_NAME",
-  "description": "MCP for Thunderbird",
-  "path": "$host",
-  "type": "stdio",
-  "allowed_extensions": ["$ADDON_ID"]
-}
-EOF
+# Only the throwaway home: never the real ~/.mozilla.
+HOME="$MFT_E2E_DIR/home" XDG_CONFIG_HOME="$MFT_E2E_DIR/home/.config" \
+  "$host" setup --native-only >/dev/null
+nmh=$MFT_E2E_DIR/home/.mozilla/native-messaging-hosts/$HOST_NAME.json
+if ! grep -qF "\"path\": \"$host\"" "$nmh"; then
+  echo "make-profile.sh: setup --native-only did not write $nmh" >&2
+  exit 1
+fi
 # Phase 1: Local Folders only, store the login, quit.
 base_prefs
 pref mail.accountmanager.accounts '"account2"'
