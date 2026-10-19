@@ -8,5 +8,30 @@
       "id": "mcp-for-thunderbird@wadejbeckett.github.io",
       "strict_min_version": "153.0"
     }
-  }
+  },
+  "background": {
+    "scripts": [
+      "src/background.js"
+    ],
+    "type": "module"
+  },
+  "action": {
+    "default_title": "MCP for Thunderbird"
+  },
+  "permissions": [
+    "accountsRead",
+    "messagesRead",
+    "messagesMove",
+    "messagesUpdate",
+    "messagesTags",
+    "messagesImport",
+    "messages.save",
+    "compose",
+    "addressBooks",
+    "nativeMessaging",
+    "storage"
+  ],
+  "optional_permissions": [
+    "messages.send"
+  ]
 }

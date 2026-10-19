@@ -6,7 +6,7 @@
   "description": "MCP for Thunderbird: the Thunderbird add-on",
   "license": "MPL-2.0",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
     "linkedom": "0.18.13"

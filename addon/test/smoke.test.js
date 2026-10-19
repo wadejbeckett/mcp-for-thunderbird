@@ -19,3 +19,24 @@ test("manifest identifies the add-on and requires Thunderbird 153", () => {
 test("manifest declares no Experiment APIs", () => {
   assert.equal("experiment_apis" in manifest, false);
 });
+
+test("manifest is MV3 with a module event page and the agreed permissions", () => {
+  assert.equal(manifest.manifest_version, 3);
+  assert.deepEqual(manifest.background, { scripts: ["src/background.js"], type: "module" });
+  assert.deepEqual(manifest.permissions, [
+    "accountsRead",
+    "messagesRead",
+    "messagesMove",
+    "messagesUpdate",
+    "messagesTags",
+    "messagesImport",
+    "messages.save",
+    "compose",
+    "addressBooks",
+    "nativeMessaging",
+    "storage",
+  ]);
+  assert.deepEqual(manifest.optional_permissions, ["messages.send"]);
+  assert.equal(JSON.stringify(manifest).includes("messagesDelete"), false);
+  assert.ok(manifest.action);
+});
