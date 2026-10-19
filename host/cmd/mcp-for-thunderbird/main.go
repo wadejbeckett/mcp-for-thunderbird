@@ -8,16 +8,20 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/bridge"
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connect"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connfile"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/server"
 )
@@ -54,7 +58,22 @@ func run(args []string, out io.Writer) int {
 		fmt.Fprintf(out, "mcp-for-thunderbird %s\n", Version)
 		return 0
 	}
-	fmt.Fprintln(os.Stderr, "usage: mcp-for-thunderbird version")
+	if len(args) >= 1 && args[0] == "connect" {
+		fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		instance := fs.String("instance", "", "connection file instance id (default: the newest)")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
+			return 2
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := connect.Run(ctx, os.Stdin, out, *instance); err != nil {
+			logger.Printf("connect stopped: %v", err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, "usage: mcp-for-thunderbird version | connect [--instance <id>]")
 	return 2
 }
 
