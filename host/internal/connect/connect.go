@@ -153,6 +153,14 @@ func (p *proxy) middleware(ctx context.Context) mcp.Middleware {
 					}
 					return closedResult(), nil
 				}
+				// The upstream may vanish (and its tools be removed) between
+				// the check above and the dispatch: answer with the copy
+				// rather than an unknown-tool protocol error.
+				res, err := next(c, method, req)
+				if err != nil && p.session() == nil {
+					return closedResult(), nil
+				}
+				return res, err
 			}
 			return next(c, method, req)
 		}
