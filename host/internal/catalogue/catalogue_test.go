@@ -53,7 +53,8 @@ func TestNamesAndGroups(t *testing.T) {
 
 func TestAnnotations(t *testing.T) {
 	for _, tl := range catalogue.All() {
-		if tl.Group == "read" || tl.Group == "contacts" {
+		// mail_attachment writes a file to the attachment folder (R14).
+		if (tl.Group == "read" || tl.Group == "contacts") && tl.Name != "mail_attachment" {
 			if !tl.ReadOnly {
 				t.Errorf("%s should be ReadOnly", tl.Name)
 			}
@@ -64,6 +65,10 @@ func TestAnnotations(t *testing.T) {
 		if tl.Destructive != want {
 			t.Errorf("%s Destructive = %v, want %v", tl.Name, tl.Destructive, want)
 		}
+	}
+	if a := byName(t, "mail_attachment"); a.ReadOnly || a.Idempotent || a.Destructive {
+		t.Errorf("mail_attachment ReadOnly/Idempotent/Destructive = %v/%v/%v, want false/false/false",
+			a.ReadOnly, a.Idempotent, a.Destructive)
 	}
 	if byName(t, "mail_move").Destructive {
 		t.Error("mail_move must not be destructive")

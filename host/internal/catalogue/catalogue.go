@@ -79,7 +79,7 @@ var tools = []Tool{
 	{Name: "mail_thread", Group: "read", ReadOnly: true, Idempotent: true,
 		Description: "Returns the messages in the conversation of one message, headers and short excerpts only.",
 		Input:       schema([]string{"id"}, m{"account": account(), "id": str("Message id from mail_search.")})},
-	{Name: "mail_attachment", Group: "read", ReadOnly: true, Idempotent: true,
+	{Name: "mail_attachment", Group: "read",
 		Description: "Saves one attachment to the user's attachment folder and returns its path and, for text types, extracted text.",
 		Input: schema([]string{"id", "name"}, m{
 			"account": account(), "id": str("Message id."), "name": str("Attachment file name."),
