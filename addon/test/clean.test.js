@@ -141,3 +141,11 @@ test("R21: tag characters, U+034F and U+180E are removed; line and paragraph sep
   // neighbours stay
   assert.equal(stripInvisible("\u{E0080}\u034E\u180D"), "\u{E0080}\u034E\u180D");
 });
+
+test("a CSS comment separates tokens, so rgb(255/**/255/**/255) on white is hidden", () => {
+  const html = `<div style="background:#fff"><p style="color:rgb(255/**/255/**/255)">HIDDEN3</p><p>Shown.</p></div>
+    <p style="display:/**/none">HIDDEN4</p>`;
+  const text = htmlToText(html);
+  assert.doesNotMatch(text, /HIDDEN/);
+  assert.equal(text, "Shown.");
+});

@@ -13,10 +13,19 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // MaxSize is the largest attachment accepted, 50 MiB.
 const MaxSize = 50 << 20
+
+// MaxNameBytes is the longest file name Save creates, suffix included;
+// most file systems allow 255 bytes.
+const MaxNameBytes = 200
+
+// maxExtBytes is the longest extension kept apart from the stem; a longer
+// "extension" is treated as part of the name.
+const maxExtBytes = 32
 
 var (
 	// ErrOutside means the name or its resolved path leaves the folder.
@@ -53,6 +62,33 @@ func sanitise(name string) string {
 	return name
 }
 
+// cut shortens s to at most n bytes without splitting a UTF-8 sequence.
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 0 {
+		return ""
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// fit joins stem, suffix and ext, shortening the stem so the whole name is
+// at most MaxNameBytes. A shortened stem loses trailing dots and spaces.
+func fit(stem, suffix, ext string) string {
+	short := cut(stem, MaxNameBytes-len(suffix)-len(ext))
+	if short != stem {
+		short = strings.TrimRight(short, ". ")
+	}
+	if short == "" {
+		short = "attachment"
+	}
+	return short + suffix + ext
+}
+
 // Save writes data into dir under a sanitised name, never overwriting an
 // existing file, and returns the absolute path. dir is created with 0700.
 func Save(dir, name string, data []byte) (string, error) {
@@ -72,13 +108,13 @@ func Save(dir, name string, data []byte) (string, error) {
 	base := sanitise(name)
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
-	if stem == "" { // dotfile such as ".bashrc": keep whole name as the stem
+	if stem == "" || len(ext) > maxExtBytes { // dotfile such as ".bashrc", or no real extension
 		stem, ext = base, ""
 	}
 	for i := 1; i < 10000; i++ {
-		candidate := base
+		candidate := fit(stem, "", ext)
 		if i > 1 {
-			candidate = fmt.Sprintf("%s (%d)%s", stem, i, ext)
+			candidate = fit(stem, fmt.Sprintf(" (%d)", i), ext)
 		}
 		p := filepath.Join(real, candidate)
 		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)

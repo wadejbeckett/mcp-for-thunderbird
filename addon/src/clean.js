@@ -130,9 +130,10 @@ function colorIn(value) {
 function parseStyle(text) {
   const out = new Map();
   if (!text) return out;
-  // CSS comments are not part of a value (an unterminated one runs to the
-  // end): `display:/**/none` hides.
-  const css = String(text).replace(/\/\*[\s\S]*?(?:\*\/|$)/g, "");
+  // A CSS comment separates tokens like a space (an unterminated one runs
+  // to the end): `display:/**/none` hides, and rgb(255/**/255/**/255) is
+  // white.
+  const css = String(text).replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ");
   for (const decl of css.split(";")) {
     const i = decl.indexOf(":");
     if (i <= 0) continue;

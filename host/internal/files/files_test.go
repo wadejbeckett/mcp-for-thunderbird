@@ -8,7 +8,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/files"
 )
@@ -159,5 +161,31 @@ func TestEmptyDirRefused(t *testing.T) {
 	}
 	if _, err := files.Save("", "a", nil); !errors.Is(err, files.ErrNoDir) {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestSaveShortensLongNames(t *testing.T) {
+	dir := t.TempDir()
+	long := strings.Repeat("é", 1000) + strings.Repeat("n", 1000) + ".pdf" // 2004 characters
+	for i := 0; i < 2; i++ {
+		p, err := files.Save(dir, long, []byte("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := filepath.Base(p)
+		if len(base) > 200 || !utf8.ValidString(base) || !strings.HasSuffix(base, ".pdf") || !strings.HasPrefix(base, "éé") {
+			t.Errorf("save %d: name %q (%d bytes), want valid UTF-8 of at most 200 bytes ending .pdf", i, base, len(base))
+		}
+		if i == 1 && !strings.HasSuffix(base, " (2).pdf") {
+			t.Errorf("second save %q lacks (2)", base)
+		}
+	}
+	// a long "extension" is not kept whole
+	p, err := files.Save(dir, "a."+strings.Repeat("x", 2000), []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := filepath.Base(p); len(b) > 200 || !utf8.ValidString(b) {
+		t.Errorf("long extension: %q (%d bytes)", b, len(b))
 	}
 }
