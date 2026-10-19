@@ -15,7 +15,8 @@
 ;        /DSourceDir=dist\host_windows_amd64_v1 /DDocDir=. ^
 ;        /DOutputDir=dist packaging\windows\installer.iss
 ; Arch is amd64 or arm64. SourceDir holds mcp-for-thunderbird.exe; DocDir
-; holds LICENSE, NOTICE and README.md.
+; holds LICENSE, NOTICE and README.md. If registration fails, Setup logs
+; it and exits with code 100 (also under /SILENT and /VERYSILENT).
 
 #ifndef AppVersion
   #error Define AppVersion, e.g. /DAppVersion=0.1.0
@@ -82,13 +83,23 @@ Source: "{#DocDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; Removes the manifest, the registry key and this program's entries in AI apps.
 Filename: "{app}\{#ExeName}"; Parameters: "setup --uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "Unregister"
 
+[Registry]
+; The key's value is written by `setup --native-only`; this entry only makes
+; the uninstaller delete the key if `setup --uninstall` could not run.
+Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\mcp_for_thunderbird"; ValueType: none; Flags: uninsdeletekey
+
 [UninstallDelete]
 ; In case `setup --uninstall` could not run, the manifest still goes.
 Type: files; Name: "{app}\mcp_for_thunderbird.json"
 
 [Code]
-// Registers the host with Thunderbird after the files are in place, and
-// says so if registration fails ([Run] entries ignore exit codes).
+var
+  RegisterFailed: Boolean;
+
+// Registers the host with Thunderbird after the files are in place
+// ([Run] entries ignore exit codes). A failure is logged, shown in a
+// message box (suppressed by /SUPPRESSMSGBOXES), and makes Setup exit with
+// code 100 (outside Inno Setup's documented codes 0-8).
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Code: Integer;
@@ -96,10 +107,26 @@ begin
   if CurStep = ssPostInstall then
   begin
     if not Exec(ExpandConstant('{app}\{#ExeName}'), 'setup --native-only', '', SW_HIDE,
-      ewWaitUntilTerminated, Code) or (Code <> 0) then
+      ewWaitUntilTerminated, Code) then
+      Code := -1;
+    if Code <> 0 then
+    begin
+      RegisterFailed := True;
+      Log(Format('setup --native-only failed (exit code %d)', [Code]));
       SuppressibleMsgBox('{#AppName} could not register itself with Thunderbird. ' +
         'Open a command prompt in ' + ExpandConstant('{app}') +
         ' and run "{#ExeName} setup --native-only" to see why.',
         mbError, MB_OK, IDOK);
+    end;
   end;
+end;
+
+// Setup otherwise exits 0 even when registration failed; scripted and
+// /SILENT installs see the failure through the exit code.
+function GetCustomSetupExitCode: Integer;
+begin
+  if RegisterFailed then
+    Result := 100
+  else
+    Result := 0;
 end;

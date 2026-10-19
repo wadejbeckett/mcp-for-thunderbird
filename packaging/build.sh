@@ -6,7 +6,7 @@
 # build.sh [goreleaser release flags]
 #
 # Runs the pinned GoReleaser with packaging/goreleaser.yaml, then
-# packaging/check.sh. With no flags it makes a local snapshot:
+# packaging/check.sh and its self-test. With no flags it makes a local snapshot:
 #   sh packaging/build.sh                -> release --snapshot --clean
 #   sh packaging/build.sh --clean        -> a tagged release (CI, Task 21)
 # Tools run through `go run` at pinned versions; nothing is installed.
@@ -29,3 +29,4 @@ fi
 
 go run "$GORELEASER" release --config packaging/goreleaser.yaml "$@"
 sh packaging/check.sh dist
+sh packaging/check-selftest.sh dist

@@ -9,18 +9,9 @@
 # mcp_for_thunderbird.json). Installer passes the install location as $2.
 set -u
 
-bin="${2:-}/mcp-for-thunderbird"
-if [ ! -x "$bin" ]; then
-  bin="$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird"
-fi
-if [ ! -x "$bin" ]; then
-  echo "postinstall: mcp-for-thunderbird not found" >&2
-  exit 1
-fi
-
 # A current-user install normally runs as that user. If Installer runs the
-# script as root, register for the user logged in at the console instead,
-# so the manifest lands in their home, owned by them.
+# script as root, act for the user logged in at the console instead, so the
+# manifest lands in their home, owned by them.
 if [ "$(id -u)" -eq 0 ]; then
   user=${USER:-root}
   [ "$user" != root ] || user=$(stat -f %Su /dev/console)
@@ -28,6 +19,27 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "postinstall: no logged-in user to register for" >&2
     exit 1
   fi
+else
+  user=$(id -un)
+fi
+
+bin="${2:-}/mcp-for-thunderbird"
+if [ ! -x "$bin" ]; then
+  # $2 unusable: look in that user's home (from the directory service, not
+  # $HOME, which may be root's when Installer runs as root).
+  home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')
+  if [ -z "$home" ]; then
+    echo "postinstall: cannot find the home folder of $user" >&2
+    exit 1
+  fi
+  bin="$home/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird"
+fi
+if [ ! -x "$bin" ]; then
+  echo "postinstall: mcp-for-thunderbird not found" >&2
+  exit 1
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
   exec sudo -u "$user" -H "$bin" setup --native-only
 fi
 exec "$bin" setup --native-only

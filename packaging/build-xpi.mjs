@@ -9,10 +9,10 @@
 //   node packaging/build-xpi.mjs [--version <v>] [--dist <dir> | --out <file>]
 //   node packaging/build-xpi.mjs --e2e-settings <file> [--out <file>]
 //
-// --version (release mode) is the release version, X.Y.Z with an optional
-// -suffix (0.1.0-SNAPSHOT-abc1234). The XPI's manifest gets the X.Y.Z core,
-// since Gecko add-on versions are dotted integers; the file name carries
-// the full version. Without --version the manifest's own version is used.
+// --version (release mode) is the release version, X.Y.Z or a snapshot
+// X.Y.Z-SNAPSHOT-<id> (0.1.0-SNAPSHOT-abc1234); other suffixes are
+// refused. The XPI's manifest gets the X.Y.Z core, since Gecko add-on
+// versions are dotted integers; the file name carries the full version. Without --version the manifest's own version is used.
 //
 // --e2e-settings embeds <file> as e2e-settings.json, the initial settings
 // of an end-to-end test build (ruling R2). It cannot be combined with
@@ -28,8 +28,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const addon = join(root, "addon");
 const SKIP_DIRS = new Set(["test", "node_modules"]);
 const SKIP_FILES = new Set(["package.json", "package-lock.json"]);
-// X.Y.Z without leading zeros, optionally -suffix of [0-9A-Za-z.-].
-const VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(-[0-9A-Za-z.-]+)?$/;
+// X.Y.Z without leading zeros, optionally -SNAPSHOT[-id]. Other pre-release
+// suffixes are refused: the add-on would ship as plain X.Y.Z and collide
+// with the final release on addons.thunderbird.net.
+const VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(-SNAPSHOT(-[0-9A-Za-z.-]+)?)?$/;
 
 function usage(msg) {
   process.stderr.write(`build-xpi: ${msg}\nusage: build-xpi.mjs [--version <v>] [--dist <dir> | --out <file>] | --e2e-settings <file> [--out <file>]\n`);
@@ -49,7 +51,7 @@ function parseArgs(argv) {
   }
   if (opts.version !== null && opts.e2e) usage("--version (release) and --e2e-settings cannot be combined");
   if (opts.out && opts.dist) usage("--out and --dist cannot be combined");
-  if (opts.version !== null && !VERSION_RE.test(opts.version)) usage(`--version ${opts.version} is not X.Y.Z[-suffix]`);
+  if (opts.version !== null && !VERSION_RE.test(opts.version)) usage(`--version ${opts.version} is not X.Y.Z or X.Y.Z-SNAPSHOT[-id]`);
   return opts;
 }
 

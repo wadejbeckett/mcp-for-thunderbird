@@ -32,8 +32,11 @@ install -m 0755 "$here/postinstall" "$work/scripts/postinstall"
 cp "$root/LICENSE" "$work/resources/LICENSE"
 
 # With the current-user-home domain, the install location is taken
-# relative to the user's home folder.
+# relative to the user's home folder. --ownership recommended is explicit;
+# Task 21 verifies on CI that the installed files end up owned by the user
+# (not root) in the home domain.
 pkgbuild --root "$work/root" --identifier "$id" --version "$core" \
+  --ownership recommended \
   --install-location "/Library/Application Support/MCP for Thunderbird" \
   --scripts "$work/scripts" "$work/host.pkg"
 

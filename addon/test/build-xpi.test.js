@@ -115,3 +115,21 @@ test("build-xpi refuses --version with --e2e-settings and a malformed version", 
   assert.equal(run(["--version", "1.0"]), 2);
   assert.equal(run(["--version", "v1.0.0"]), 2);
 });
+
+test("build-xpi release mode accepts only a -SNAPSHOT pre-release suffix", () => {
+  const run = (v) => {
+    try {
+      execFileSync(process.execPath, [script, "--version", v, "--out", join(tmpdir(), `mft-v-${process.pid}.xpi`)], { stdio: "pipe" });
+      return 0;
+    } catch (err) {
+      return err.status;
+    } finally {
+      rmSync(join(tmpdir(), `mft-v-${process.pid}.xpi`), { force: true });
+    }
+  };
+  assert.equal(run("1.0.0-rc1"), 2);
+  assert.equal(run("1.0.0-beta.2"), 2);
+  assert.equal(run("1.0.0-SNAPSHOTX"), 2);
+  assert.equal(run("1.0.0-SNAPSHOT-abc1234"), 0);
+  assert.equal(run("1.0.0"), 0);
+});

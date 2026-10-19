@@ -91,7 +91,7 @@ for f in files:
         print(f"check: dpkg-deb not found; {f} contents not checked", file=sys.stderr)
         continue
     for name in n:
-        if BAD.search(name.lstrip("./")):
+        if BAD.search(name.removeprefix("./")):
             fail(f"{f} contains {name}")
     if f.endswith(".deb") and "./usr/lib/mcp-for-thunderbird/mcp-for-thunderbird" not in n:
         fail(f"{f} does not install /usr/lib/mcp-for-thunderbird/mcp-for-thunderbird")
