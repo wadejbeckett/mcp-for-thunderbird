@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "MCP for Thunderbird",
+  "version": "0.0.0",
+  "description": "Lets MCP clients work with your mail through a local host, with limits you set in Thunderbird.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mcp-for-thunderbird@wadejbeckett.github.io",
+      "strict_min_version": "153.0"
+    }
+  }
+}

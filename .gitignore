@@ -1,0 +1,11 @@
+.superpowers/
+dist/
+node_modules/
+
+# Go build outputs
+/host/mcp-for-thunderbird
+/host/mcp-for-thunderbird.exe
+*.exe
+*.test
+*.out
+coverage.txt
