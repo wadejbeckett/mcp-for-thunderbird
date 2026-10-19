@@ -144,7 +144,7 @@ var tools = []Tool{
 		Description: "Opens a compose window in Thunderbird, filled in, for the user to review and send.",
 		Input:       schema([]string{"kind", "body"}, composeProps())},
 	{Name: "mail_send", Group: "send", Destructive: true,
-		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message.",
+		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message. Direct send accepts only simple addresses (letters, digits, . _ + -) before the @ and a plain ASCII domain; use mail_draft for any other address.",
 		Input: schema([]string{"to", "subject", "body"}, m{
 			"account": account(), "to": strs("To recipients."), "cc": strs("Cc recipients."), "bcc": strs("Bcc recipients."),
 			"subject": str("Subject."), "body": str("Plain-text body."), "attachments": attachments(),

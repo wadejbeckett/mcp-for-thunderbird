@@ -119,7 +119,7 @@ test("TestAllowlistQuotedLocalPart: only plain dot-atom addresses pass (ruling R
   for (const addr of ['"a@evil.com,b"@allowed.com', '"x@evil.com"@allowed.com', '"<x@evil.com>"@allowed.com', "a@b@allowed.com", "a@allowéd.com", "a..b@allowed.com", ".a@allowed.com", "a@allowed..com", "a b@allowed.com"]) {
     assert.equal(isAllowed(addr, ["@allowed.com", "allowéd.com", "a@b@allowed.com"]), false, addr);
   }
-  assert.equal(isAllowed("o'brien+x@allowed.com", ["@allowed.com"]), true);
+  assert.equal(isAllowed("o'brien+x@allowed.com", ["@allowed.com"]), false);
   assert.equal(isAllowed("a@xn--allowd-fya.com", ["@xn--allowd-fya.com"]), true);
   assert.equal(isAllowed("test@localhost", ["@localhost"]), true);
 
@@ -134,6 +134,37 @@ test("TestAllowlistQuotedLocalPart: only plain dot-atom addresses pass (ruling R
   const r = await send({ to: ['"plain"@allowed.com'] });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.deepEqual(mock.calls.sendMessage[0][0].to, ["plain@allowed.com"]);
+});
+
+test("TestAllowlistEncodedWords: only simple local parts pass (ruling R28)", async () => {
+  const payloads = [
+    "=?utf-8?q?x=40evil=2Ecom=2Cb?=@allowed.com",
+    "=?utf-8?b?eA0KUkNQVCBUTzo8eUBldmlsLmNvbT4=?=@allowed.com",
+    "=?utf-8?q?x?=.=?utf-8?q?=40evil=2Ecom?=@allowed.com",
+    "a%evil.com@allowed.com",
+    "a=b@allowed.com",
+    "a?b@allowed.com",
+    "o'brien@allowed.com",
+    "a!b@allowed.com",
+  ];
+  for (const addr of payloads) {
+    assert.equal(isAllowed(addr, ["@allowed.com"]), false, addr);
+    refusedNoSend(await send({ to: [addr] }), addr);
+  }
+  const allow = ["@allowed.com", "@sub.allowed.com"];
+  assert.equal(isAllowed("first.last+tag@allowed.com", allow), true);
+  assert.equal(isAllowed("a-b_c@sub.allowed.com", allow), true);
+  await save({ send: { enabled: true, allow } });
+  const r = await send({ to: ["first.last+tag@allowed.com"], cc: ["a-b_c@sub.allowed.com"] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(mock.calls.sendMessage[0][0].to, ["first.last+tag@allowed.com"]);
+  assert.deepEqual(mock.calls.sendMessage[0][0].cc, ["a-b_c@sub.allowed.com"]);
+});
+
+test("mail_send refuses an address Thunderbird's RFC 2047 decoder changes", async () => {
+  // A decoder that changes even a plain address must refuse it (defence in depth).
+  mock.messenger.messengerUtilities.decodeMimeHeader = async (name, value) => [].concat(value).map((v) => v.replace("a@", "x@"));
+  refusedNoSend(await send({ to: ["a@allowed.com"] }), "a@allowed.com");
 });
 
 test("mail_send sends the checked addresses only, from the default identity", async () => {

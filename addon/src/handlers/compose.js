@@ -56,12 +56,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- allowlist ----
 
-// PLAIN is an addr-spec with a dot-atom local part and a domain of
+// PLAIN is an addr-spec with a simple local part (letters, digits and
+// . _ + -, dots only between other characters) and a domain of
 // letter-digit-hyphen labels (punycode, never Unicode). Anything else
-// fails closed (ruling R27): Thunderbird's parser keeps a quoted local part
-// such as "a@evil.com,b"@allowed.com as one address, but sendMessage splits
-// recipient strings at that comma and would deliver to evil.com.
-const ATOM = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+";
+// fails closed. Thunderbird's parser keeps a quoted local part such as
+// "a@evil.com,b"@allowed.com as one address, but sendMessage splits
+// recipient strings at that comma (ruling R27); and an RFC 2047 encoded
+// word such as =?utf-8?q?x=40evil=2Ecom?=@allowed.com is plain atext, but
+// MessageSend decodes it into the envelope recipient (ruling R28).
+const ATOM = "[A-Za-z0-9_+-]+";
 const LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?";
 const PLAIN = new RegExp(`^${ATOM}(?:\\.${ATOM})*@${LABEL}(?:\\.${LABEL})*$`);
 
@@ -558,6 +561,10 @@ async function mailSend(args, ctx) {
       // The address Thunderbird is given must parse back to itself, alone.
       const again = await mailboxes(run, [m.email]);
       if (again.length !== 1 || again[0].email !== m.email) fail("refused", `Recipient not in the allowed list: ${m.email}`);
+      // ... and RFC 2047 decoding, as MessageSend applies to recipients,
+      // must leave it unchanged.
+      const decoded = answered(await call(run, () => tb().messengerUtilities.decodeMimeHeader("to", [m.email], true)));
+      if (!Array.isArray(decoded) || decoded.length !== 1 || decoded[0] !== m.email) fail("refused", `Recipient not in the allowed list: ${m.email}`);
     }
     checked[k] = boxes.map((m) => m.email);
   }

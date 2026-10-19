@@ -479,7 +479,9 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         return parseMailboxes(text);
       },
       encodeMimeHeader: async (name, value) => [].concat(value).map((v) => encodeHeader(name, v)),
-      decodeMimeHeader: async (name, value) => [].concat(value),
+      // decodeMimeHeader decodes UTF-8 RFC 2047 encoded words, as
+      // Thunderbird's MessageSend does for envelope recipients.
+      decodeMimeHeader: async (name, value) => [].concat(value).map(decodeWords),
     },
     permissions: {
       contains: async ({ permissions = [] }) => permissions.every((p) => perms.has(p)),
@@ -602,6 +604,14 @@ function requote(addr) {
   const m = /^"([^"]*)"@([^@]*)$/.exec(addr);
   if (!m) return addr;
   return /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/.test(m[1]) ? `${m[1]}@${m[2]}` : addr;
+}
+
+function decodeWords(v) {
+  return String(v).replace(/=\?utf-8\?([qb])\?([^?]*)\?=/gi, (m, enc, text) =>
+    enc.toLowerCase() === "b"
+      ? Buffer.from(text, "base64").toString("utf8")
+      : Buffer.from(text.replace(/_/g, " ").replace(/=([0-9A-F]{2})/gi, (x, h) => String.fromCharCode(parseInt(h, 16))), "latin1").toString("utf8"),
+  );
 }
 
 const MAILBOX_HEADERS = ["from", "to", "cc", "bcc", "reply-to", "sender"];
