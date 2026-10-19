@@ -28,7 +28,7 @@
 // enough is found, on timeout, on error, and when an answer arrives after
 // its timeout.
 
-import { HANDLERS } from "../rpc.js";
+import { HANDLERS, withSave } from "../rpc.js";
 import { encodeId, resolveId } from "../ids.js";
 import { isExcluded, enabledAccountIds, assertFolderAllowed } from "../policy.js";
 import { fail } from "../errors.js";
@@ -644,8 +644,197 @@ async function mailRead(args, ctx) {
   };
 }
 
+// ---- mail_attachment ----
+
+// ATTACHMENT.maxBytes is the largest attachment returned (Review Focus 4).
+export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024 };
+const ATTACHMENT_TEXT = 20_000;
+const NO_DIR = "Choose an attachment folder in MCP for Thunderbird's options first.";
+const TOO_LARGE = "The attachment is larger than 50 MiB.";
+// base64 is built in pieces of whole 3-byte groups.
+const B64_PIECE = 3 * 16_384;
+
+function base64(buf) {
+  const bytes = new Uint8Array(buf);
+  const out = [];
+  for (let i = 0; i < bytes.length; i += B64_PIECE) {
+    out.push(btoa(String.fromCharCode.apply(null, bytes.subarray(i, i + B64_PIECE))));
+  }
+  return out.join("");
+}
+
+function decoderFor(contentType) {
+  const m = /charset\s*=\s*"?([^";\s]+)/i.exec(contentType);
+  try {
+    return new TextDecoder(m ? m[1] : "utf-8");
+  } catch {
+    return new TextDecoder("utf-8");
+  }
+}
+
+// mailAttachment returns a text attachment's text inline, or asks the
+// host to save any other attachment in the user's attachment folder. The
+// size Thunderbird lists is checked before any byte is read, and the
+// file's own size again before it is read.
+async function mailAttachment(args, ctx) {
+  const s = ctx.settings;
+  const name = optString(args, "name");
+  if (name === undefined) fail("invalid_argument", "name is required.");
+  const run = newRun();
+  const msg = await message(run, args.id, s);
+  const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
+  const att = (Array.isArray(list) ? list : []).find((a) => a && a.name === name);
+  if (!att) fail("not_found", "No attachment of that name in this message.");
+  const contentType = String(att.contentType || "application/octet-stream");
+  const isText = /^\s*text\//i.test(contentType);
+  if (typeof att.size === "number" && att.size > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
+  if (!isText && !s.attachmentDir) fail("refused", NO_DIR);
+
+  const file = answered(await call(run, () => tb().messages.getAttachmentFile(msg.id, att.partName)));
+  if (!file || typeof file.size !== "number") fail("thunderbird_error", "Thunderbird did not return the attachment.");
+  if (file.size > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
+  const shownName = stripInvisible(name);
+
+  if (isText) {
+    // at most 4 bytes a character, so this slice holds the first 20000
+    const sliceBytes = ATTACHMENT_TEXT * 4;
+    const buf = answered(await call(run, () => file.slice(0, sliceBytes).arrayBuffer()));
+    let text = decoderFor(contentType).decode(buf);
+    const partial = file.size > sliceBytes;
+    if (partial) text = text.replace(/�$/, "");
+    const { text: shown, cut } = truncate(stripInvisible(text), ATTACHMENT_TEXT);
+    return { name: shownName, contentType, text: wrapUntrusted(shown), truncated: cut || partial };
+  }
+
+  const buf = answered(await call(run, () => file.arrayBuffer()));
+  return withSave({ name: shownName, contentType, size: buf.byteLength }, { name: shownName, data: base64(buf) });
+}
+
+// ---- mail_filter_suggest ----
+
+// Thunderbird's own words in its message-filter editor (en-US, 153).
+const FIELDS = {
+  from: { label: "From", ops: ["contains", "is", "begins", "ends"] },
+  to: { label: "To", ops: ["contains", "is", "begins", "ends"] },
+  subject: { label: "Subject", ops: ["contains", "is", "begins", "ends"] },
+  body: { label: "Body", ops: ["contains", "is"] },
+  tag: { label: "Tags", ops: ["contains", "is"] },
+  date: { label: "Date", ops: ["is", "before", "after"] },
+};
+const OPS = { contains: "contains", is: "is", begins: "begins with", ends: "ends with", before: "is before", after: "is after" };
+const ACTIONS = { move: "Move Message to", copy: "Copy Message to", tag: "Tag Message", mark_read: "Mark As Read", flag: "Add Star" };
+const MAX_CONDITIONS = 50;
+const MAX_ACTIONS = 20;
+const MAX_VALUE = 500;
+
+const q = (s) => `"${s}"`;
+
+function listArg(args, k, max) {
+  const v = args[k];
+  if (v == null) return [];
+  if (!Array.isArray(v) || !v.every((x) => x && typeof x === "object" && !Array.isArray(x))) fail("invalid_argument", `${k} must be a list of objects.`);
+  if (v.length > max) fail("invalid_argument", `At most ${max} ${k}.`);
+  return v;
+}
+
+function valueOf(x, what) {
+  if (typeof x.value !== "string" || x.value.trim() === "") fail("invalid_argument", `${what} needs a value.`);
+  if (x.value.length > MAX_VALUE || /[\r\n]/.test(x.value)) fail("invalid_argument", `${what} value must be one line of at most ${MAX_VALUE} characters.`);
+  return x.value;
+}
+
+// tagLabel maps a tag key or name to the name Thunderbird shows. Without
+// a tag list (an older Thunderbird) the value is shown as given.
+function tagLabel(tags, value) {
+  if (!tags) return value;
+  const want = value.toLowerCase();
+  const t = tags.find((x) => x && (x.key === value || String(x.tag ?? "").toLowerCase() === want));
+  if (!t) fail("invalid_argument", `Unknown tag: ${value}`);
+  return String(t.tag);
+}
+
+async function tagList(run) {
+  const api = tb().messages.tags;
+  if (!api || typeof api.list !== "function") return null;
+  try {
+    const v = await call(run, () => api.list());
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// mailFilterSuggest validates a filter and describes how to make it in
+// Thunderbird's filter editor. It only reads (accounts, folders, tags).
+async function mailFilterSuggest(args, ctx) {
+  const s = ctx.settings;
+  if (typeof args.account !== "string" || args.account === "") fail("invalid_argument", "account is required.");
+  const accountId = args.account;
+  const match = args.match == null ? "all" : args.match;
+  if (match !== "all" && match !== "any") fail("invalid_argument", "match must be all or any.");
+  const conditions = listArg(args, "conditions", MAX_CONDITIONS);
+  const actions = listArg(args, "actions", MAX_ACTIONS);
+  if (actions.length === 0) fail("invalid_argument", "Give at least one action.");
+
+  const run = newRun();
+  const needTags = conditions.some((c) => c.field === "tag") || actions.some((a) => a.type === "tag");
+  const tags = needTags ? await tagList(run) : null;
+
+  const rules = conditions.map((c) => {
+    const f = Object.prototype.hasOwnProperty.call(FIELDS, c.field) ? FIELDS[c.field] : null;
+    if (!f) fail("invalid_argument", "A condition's field must be from, to, subject, body, tag or date.");
+    if (!f.ops.includes(c.op)) fail("invalid_argument", `The ${c.field} field takes ${f.ops.join(", ")}.`);
+    let value = valueOf(c, "A condition");
+    if (c.field === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail("invalid_argument", "A date condition needs a date as YYYY-MM-DD.");
+    if (c.field === "tag") value = tagLabel(tags, value);
+    return `${q(f.label)} ${q(OPS[c.op])} ${q(value)}`;
+  });
+
+  let folders = null;
+  const account = answered(await call(run, () => tb().accounts.get(accountId)));
+  const accountName = String((account && account.name) || accountId);
+  let moves = 0;
+  const steps = [];
+  for (const a of actions) {
+    if (!Object.prototype.hasOwnProperty.call(ACTIONS, a.type)) fail("invalid_argument", "An action must be move, copy, tag, mark_read or flag.");
+    const label = ACTIONS[a.type];
+    if (a.type === "move" || a.type === "copy") {
+      if (a.type === "move" && ++moves > 1) fail("invalid_argument", "A filter can move a message to one folder only.");
+      const path = valueOf(a, `The ${a.type} action`);
+      assertFolderAllowed(accountId, path, s);
+      folders ??= (answered(await call(run, () => tb().folders.query({ accountId }))) || []).filter((f) => realFolder(f, accountId));
+      if (!folders.some((f) => f.path === path)) fail("invalid_argument", `Unknown folder in this account: ${path}`);
+      steps.push(`${q(label)} the folder ${q(path)} in ${q(accountName)}`);
+    } else if (a.type === "tag") {
+      steps.push(`${q(label)} ${q(tagLabel(tags, valueOf(a, "The tag action")))}`);
+    } else {
+      steps.push(q(label));
+    }
+  }
+
+  const out = [
+    "In Thunderbird, open Tools → Message Filters. If the menu bar is hidden, open it from the ≡ application menu: Tools → Message Filters.",
+    `In "Filters for:", choose the account ${q(accountName)}.`,
+    'Click "New…".',
+    'In "Filter name:", type a name you will recognise.',
+  ];
+  if (rules.length === 0) {
+    out.push('Choose "Match all messages".');
+  } else {
+    out.push(`Choose ${q(match === "any" ? "Match any of the following" : "Match all of the following")}.`);
+    rules.forEach((r, i) => out.push(i === 0 ? `Set the first rule to ${r}.` : `Click "+" at the end of the last rule and set the new rule to ${r}.`));
+  }
+  steps.forEach((a, i) =>
+    out.push(i === 0 ? `Under "Perform these actions:", set the first action to ${a}.` : `Click "+" at the end of the last action and set the new action to ${a}.`),
+  );
+  out.push('Click "OK". The filter runs on new mail; to run it on mail already in a folder, select it in Message Filters and click "Run Now".');
+  return { steps: out.map((x, i) => `${i + 1}. ${x}`) };
+}
+
 HANDLERS.mail_accounts = mailAccounts;
 HANDLERS.mail_folders = mailFolders;
 HANDLERS.mail_search = mailSearch;
 HANDLERS.mail_thread = mailThread;
 HANDLERS.mail_read = mailRead;
+HANDLERS.mail_attachment = mailAttachment;
+HANDLERS.mail_filter_suggest = mailFilterSuggest;

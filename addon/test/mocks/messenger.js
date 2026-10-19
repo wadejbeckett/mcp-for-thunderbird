@@ -10,7 +10,7 @@
 // identities, folder info, date windows and the other query filters,
 // oldest-first ordering, never-settling queries, raw sources, attachments
 // and address books. Task 12 added getFull (plain and HTML parts, extra
-// headers), Task 13 getAttachmentFile.
+// headers), Task 13 getAttachmentFile and messages.tags.list.
 
 export function event() {
   const listeners = [];
@@ -270,6 +270,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (rest.hang) return new Promise(() => {});
         lists.delete(listId);
         return page(rest.items, rest.per, false, rest.root);
+      },
+      tags: {
+        list: async () => [
+          { key: "$label1", tag: "Important", color: "#FF0000", ordinal: "" },
+          { key: "$label4", tag: "To Do", color: "#3333FF", ordinal: "" },
+        ],
       },
       abortList: async (listId) => {
         calls.abortList.push(listId);
