@@ -1,0 +1,6 @@
+Message-ID: <bidi@example.org>
+From: Bob <bob@example.org>
+Subject: Bidi
+Content-Type: text/plain; charset=utf-8
+
+Invoice ‮fdp.exe‬ and ‪embed‬ ‫rtl‬ ‭lro‬ ⁦iso⁩ ⁧r⁩ ⁨fsi⁩ done.

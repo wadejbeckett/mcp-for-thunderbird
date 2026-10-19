@@ -1,0 +1,12 @@
+Message-ID: <auth@example.org>
+Authentication-Results: mx.work.example;
+ spf=pass (mx.work.example: domain of ann@example.org designates 192.0.2.1 as permitted sender; dkim=fail in a comment) smtp.mailfrom=ann@example.org;
+ dkim=pass header.d=example.org header.s=s1;
+ dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=example.org
+Authentication-Results: forged.example; spf=pass; dkim=pass; dmarc=pass
+Reply-To: Billing <billing@example.net>
+From: Ann <ann@example.org>
+Subject: Auth
+Content-Type: text/plain; charset=utf-8
+
+Hello.

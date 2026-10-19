@@ -9,7 +9,8 @@
 // folders, paged messages.query, action and permissions. Task 11 added
 // identities, folder info, date windows and the other query filters,
 // oldest-first ordering, never-settling queries, raw sources, attachments
-// and address books.
+// and address books. Task 12 added getFull (plain and HTML parts, extra
+// headers), Task 13 getAttachmentFile.
 
 export function event() {
   const listeners = [];
@@ -110,7 +111,20 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const bodies = new Map();
   const attachments = new Map();
   const refs = new Map();
-  const calls = { query: [], abortList: [], continueList: [], get: [], getRaw: [], listAttachments: [], getFolderInfo: [], contactsQuery: [] };
+  const htmlBodies = new Map();
+  const extraHeaders = new Map();
+  const calls = {
+    query: [],
+    abortList: [],
+    continueList: [],
+    get: [],
+    getRaw: [],
+    getFull: [],
+    listAttachments: [],
+    getAttachmentFile: [],
+    getFolderInfo: [],
+    contactsQuery: [],
+  };
   // hang: queries matching this predicate never settle (as some
   // Thunderbird searches do, docs/SPIKES.md §3); with returnMessageListId
   // the id comes back but the list's pages never do. delay(q) gives a
@@ -264,7 +278,36 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       listAttachments: async (id) => {
         calls.listAttachments.push(id);
         if (!store.has(id)) throw new Error(`Message not found: ${id}.`);
-        return clone(attachments.get(id) || []);
+        return (attachments.get(id) || []).map(({ content, ...a }) => clone(a));
+      },
+      // getAttachmentFile returns a File of the attachment's `content`
+      // (string or Uint8Array; empty when not given).
+      getAttachmentFile: async (id, partName) => {
+        calls.getAttachmentFile.push([id, partName]);
+        if (!store.has(id)) throw new Error(`Message not found: ${id}.`);
+        const a = (attachments.get(id) || []).find((x) => x.partName === partName);
+        if (!a) throw new Error(`Part not found: ${partName}`);
+        return new File([a.content ?? ""], a.name, { type: a.contentType });
+      },
+      // getFull builds a MessagePart tree: text/plain from `body`,
+      // text/html from `html` (multipart/alternative when both), then the
+      // attachments. Headers are lower-case names with lists of values.
+      getFull: async (id) => {
+        calls.getFull.push(id);
+        const h = store.get(id);
+        if (!h) throw new Error(`Message not found: ${id}.`);
+        const text = bodies.has(id) ? { contentType: "text/plain", partName: "1.1", body: bodies.get(id), size: bodies.get(id).length } : null;
+        const html = htmlBodies.has(id) ? { contentType: "text/html", partName: "1.2", body: htmlBodies.get(id), size: htmlBodies.get(id).length } : null;
+        const bodyPart = text && html ? { contentType: "multipart/alternative", partName: "1", parts: [text, html] } : text || html;
+        const atts = (attachments.get(id) || []).map(({ content, ...a }) => ({ ...clone(a), headers: {} }));
+        const headers = {
+          "message-id": [`<${h.headerMessageId}>`],
+          from: [h.author],
+          subject: [h.subject],
+          ...clone(extraHeaders.get(id) || {}),
+        };
+        const parts = [bodyPart, ...atts].filter(Boolean);
+        return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [{ contentType: "multipart/mixed", partName: "1", parts }] };
       },
       // getRaw builds a small RFC 5322 source from the header and side data;
       // a File (Blob) unless data_format is "BinaryString".
@@ -357,10 +400,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       const f = folderList.find((x) => x.accountId === accountId && x.path === path);
       if (!f) throw new Error(`no folder ${accountId} ${path}`);
       const id = nextId++;
-      const { body, attachments: atts, references, inReplyTo, ...rest } = extra;
+      const { body, html, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
       const h = header(id, { ...f }, rest);
       store.set(id, h);
       if (body !== undefined) bodies.set(id, body);
+      if (html !== undefined) htmlBodies.set(id, html);
+      if (headers !== undefined) extraHeaders.set(id, headers);
       if (atts !== undefined) attachments.set(id, atts);
       if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
       return clone(h);

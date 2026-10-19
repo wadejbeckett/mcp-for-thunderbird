@@ -2,15 +2,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Read handlers: mail_accounts, mail_folders, mail_search, mail_thread.
+// Read handlers: mail_accounts, mail_folders, mail_search, mail_thread,
+// mail_read, mail_attachment and mail_filter_suggest.
 // The thread lookup (References, In-Reply-To and a same-subject pass for
-// replies) and the concurrency limit follow the vitalio-sh
-// "thunderbird-cli" extension (seed commit 465613d), MIT licence, see
-// NOTICE.
+// replies), the concurrency limit and the walk over a message's parts
+// (bodyParts, after extractParts) follow the vitalio-sh "thunderbird-cli"
+// extension (seed commit 465613d), MIT licence, see NOTICE.
 //
 // Every message a handler returns passes `visible`: its account is enabled
-// and its folder is not excluded (Review Focus 2). Results carry Pointers
-// only, never message text.
+// and its folder is not excluded (Review Focus 2). Search and thread
+// results carry Pointers only; message text comes only from mail_read and
+// mail_attachment, cleaned and wrapped as untrusted content.
 //
 // Search (ruling R9, docs/SPIKES.md §3): Thunderbird returns matches
 // oldest first, and some queries never settle. So the search walks date
@@ -31,6 +33,7 @@ import { encodeId, resolveId } from "../ids.js";
 import { isExcluded, enabledAccountIds, assertFolderAllowed } from "../policy.js";
 import { fail } from "../errors.js";
 import { buildThreadIds, normalizeSubject, stripAngleBrackets, createLimiter } from "../thread-utils.js";
+import { htmlToText, stripInvisible, wrapUntrusted, authResults } from "../clean.js";
 
 // SEARCH.budgetMs is the time budget of one mail_search or mail_thread
 // call. Exported so tests can shorten it.
@@ -194,9 +197,9 @@ function optDay(args, k, after = false) {
   return after ? new Date(y, mo - 1, d + 1).getTime() : t.getTime();
 }
 
-export function limitArg(v, def, max) {
+export function limitArg(v, def, max, name = "limit") {
   if (v == null) return def;
-  if (typeof v !== "number" || !Number.isFinite(v)) fail("invalid_argument", "limit must be a number.");
+  if (typeof v !== "number" || !Number.isFinite(v)) fail("invalid_argument", `${name} must be a number.`);
   return Math.min(max, Math.max(1, Math.floor(v)));
 }
 
@@ -530,7 +533,119 @@ async function mailThread(args, ctx) {
   return out;
 }
 
+// ---- mail_read ----
+
+export const DEFAULT_MAX_CHARS = 8000;
+export const MAX_CHARS = 50_000;
+// A body part is read up to this many characters; HTML is parsed only up
+// to it (Review Focus 4).
+const BODY_CAP = 2 * 1024 * 1024;
+const HEADER_CHARS = 2000;
+const HEADER_LIST = 200;
+const ATTACHMENT_LIST = 200;
+
+function isAttachmentPart(p) {
+  if (p.name) return true;
+  const cd = p.headers && p.headers["content-disposition"];
+  const v = Array.isArray(cd) ? cd[0] : cd;
+  return typeof v === "string" && /^\s*attachment/i.test(v);
+}
+
+// bodyParts collects the plain and HTML text of a message's parts (not
+// its attachments), each capped at BODY_CAP; plainOver/htmlOver say a cap
+// was hit. Iterative, so a deeply nested message cannot overflow the stack.
+// After vitalio-sh extractParts (MIT, see NOTICE).
+function bodyParts(root) {
+  const out = { plain: "", html: "", plainOver: false, htmlOver: false };
+  const add = (key, body) => {
+    const room = BODY_CAP - out[key].length;
+    if (body.length > room) {
+      out[key] += body.slice(0, Math.max(0, room));
+      out[key + "Over"] = true;
+    } else {
+      out[key] += body;
+    }
+  };
+  const stack = [root];
+  while (stack.length > 0) {
+    const p = stack.pop();
+    if (!p || typeof p !== "object") continue;
+    const ct = String(p.contentType || "").toLowerCase();
+    if (typeof p.body === "string" && !isAttachmentPart(p)) {
+      if (ct === "text/plain") add("plain", p.body);
+      else if (ct === "text/html") add("html", p.body);
+    }
+    if (Array.isArray(p.parts)) for (let i = p.parts.length - 1; i >= 0; i--) stack.push(p.parts[i]);
+  }
+  return out;
+}
+
+// truncate cuts s to n characters without splitting a surrogate pair.
+function truncate(s, n) {
+  if (s.length <= n) return { text: s, cut: false };
+  let end = n;
+  const c = s.charCodeAt(end - 1);
+  if (c >= 0xd800 && c <= 0xdbff) end--;
+  return { text: s.slice(0, end), cut: true };
+}
+
+const clip = (v) => stripInvisible(String(v ?? "")).slice(0, HEADER_CHARS);
+const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
+
+function firstHeader(full, name) {
+  const v = full && full.headers ? full.headers[name] : undefined;
+  const x = Array.isArray(v) ? v[0] : v;
+  return typeof x === "string" ? x : "";
+}
+
+// message resolves an id to a visible message within the run's budget.
+async function message(run, id, s) {
+  const msg = answered(await call(run, () => resolveId(id)));
+  assertFolderAllowed(msg.folder.accountId, msg.folder.path, s);
+  if (!visible(msg, s)) fail("not_found", `Message not found in ${msg.folder.path}`);
+  return msg;
+}
+
+async function mailRead(args, ctx) {
+  const s = ctx.settings;
+  const maxChars = limitArg(args.max_chars, DEFAULT_MAX_CHARS, MAX_CHARS, "max_chars");
+  const run = newRun();
+  const msg = await message(run, args.id, s);
+  const [full, atts] = await Promise.all([
+    call(run, () => tb().messages.getFull(msg.id)),
+    call(run, () => tb().messages.listAttachments(msg.id)),
+  ]);
+  answered(full);
+  answered(atts);
+
+  const parts = bodyParts(full);
+  const plainFirst = parts.plain.trim() !== "";
+  const source = plainFirst ? parts.plain : htmlToText(parts.html);
+  const { text, cut } = truncate(stripInvisible(source), maxChars);
+  const over = plainFirst ? parts.plainOver : parts.htmlOver;
+  return {
+    id: args.id,
+    headers: {
+      date: iso(msg.date),
+      from: clip(msg.author),
+      to: clipList(msg.recipients),
+      cc: clipList(msg.ccList),
+      subject: clip(msg.subject),
+      replyTo: clip(firstHeader(full, "reply-to")),
+    },
+    auth: authResults(full && full.headers),
+    text: wrapUntrusted(text),
+    truncated: cut || over,
+    attachments: (Array.isArray(atts) ? atts : []).slice(0, ATTACHMENT_LIST).map((a) => ({
+      name: clip(a && a.name),
+      size: a && Number.isFinite(a.size) ? a.size : null,
+      contentType: clip(a && a.contentType),
+    })),
+  };
+}
+
 HANDLERS.mail_accounts = mailAccounts;
 HANDLERS.mail_folders = mailFolders;
 HANDLERS.mail_search = mailSearch;
 HANDLERS.mail_thread = mailThread;
+HANDLERS.mail_read = mailRead;
