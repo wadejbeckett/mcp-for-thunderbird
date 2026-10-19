@@ -1,0 +1,13 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Native-messaging hosts are registered per user, so the package cannot do
+# it for everyone; it tells the user what to run instead.
+set -e
+if [ "$1" = "configure" ]; then
+  echo 'Run `mcp-for-thunderbird setup` as your user'
+  echo '(each user who runs Thunderbird with the MCP for Thunderbird add-on runs it once).'
+fi
+exit 0

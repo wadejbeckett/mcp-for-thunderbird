@@ -1,0 +1,33 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# macOS Installer postinstall: registers the host with Thunderbird for the
+# user who installed it (`mcp-for-thunderbird setup --native-only` writes
+# ~/Library/Application Support/Mozilla/NativeMessagingHosts/
+# mcp_for_thunderbird.json). Installer passes the install location as $2.
+set -u
+
+bin="${2:-}/mcp-for-thunderbird"
+if [ ! -x "$bin" ]; then
+  bin="$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird"
+fi
+if [ ! -x "$bin" ]; then
+  echo "postinstall: mcp-for-thunderbird not found" >&2
+  exit 1
+fi
+
+# A current-user install normally runs as that user. If Installer runs the
+# script as root, register for the user logged in at the console instead,
+# so the manifest lands in their home, owned by them.
+if [ "$(id -u)" -eq 0 ]; then
+  user=${USER:-root}
+  [ "$user" != root ] || user=$(stat -f %Su /dev/console)
+  if [ -z "$user" ] || [ "$user" = root ]; then
+    echo "postinstall: no logged-in user to register for" >&2
+    exit 1
+  fi
+  exec sudo -u "$user" -H "$bin" setup --native-only
+fi
+exec "$bin" setup --native-only

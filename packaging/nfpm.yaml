@@ -1,0 +1,48 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# nfpm configuration for the .deb. packaging/post-build.sh runs it for each
+# linux build with MFT_VERSION, MFT_ARCH (Go arch) and MFT_BINARY set:
+#   go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3 pkg \
+#     --config packaging/nfpm.yaml --packager deb --target dist/
+# Native-messaging hosts are registered per user, so the package installs
+# the program only; each user then runs `mcp-for-thunderbird setup`.
+
+name: mcp-for-thunderbird
+arch: ${MFT_ARCH}
+platform: linux
+version: ${MFT_VERSION}
+version_schema: semver
+section: mail
+priority: optional
+maintainer: Wade J. Beckett <25611855+wadejbeckett@users.noreply.github.com>
+vendor: Wade J. Beckett
+homepage: https://github.com/wadejbeckett/mcp-for-thunderbird
+license: MPL-2.0
+description: |-
+  Local host for the MCP for Thunderbird add-on.
+  Lets MCP clients (AI apps) work with your Thunderbird mail through the
+  MCP for Thunderbird add-on, within the limits you set in Thunderbird.
+
+contents:
+  - src: ${MFT_BINARY}
+    dst: /usr/lib/mcp-for-thunderbird/mcp-for-thunderbird
+    expand: true
+    file_info:
+      mode: 0755
+  - src: /usr/lib/mcp-for-thunderbird/mcp-for-thunderbird
+    dst: /usr/bin/mcp-for-thunderbird
+    type: symlink
+  - src: LICENSE
+    dst: /usr/share/doc/mcp-for-thunderbird/copyright
+    file_info:
+      mode: 0644
+  - src: NOTICE
+    dst: /usr/share/doc/mcp-for-thunderbird/NOTICE
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/deb/postinst
+  preremove: packaging/deb/prerm

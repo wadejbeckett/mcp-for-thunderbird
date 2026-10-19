@@ -1,0 +1,120 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Release build for MCP for Thunderbird. From the repository root:
+#
+#   GOTOOLCHAIN=go1.25.14 go run github.com/goreleaser/goreleaser/v2@v2.13.3 \
+#     release --snapshot --clean --config packaging/goreleaser.yaml
+#
+# (packaging/build.sh does exactly this.) GoReleaser v2.13.3 is the newest
+# release whose go.mod needs at most Go 1.25. Outputs in dist/:
+#   - host binaries for linux, darwin and windows on amd64 and arm64, plus a
+#     macOS universal binary (input to packaging/macos/build-pkg.sh);
+#   - tarballs (zip on Windows), one SPDX SBOM per archive;
+#   - .deb packages (nfpm), .mcpb bundles and the add-on .xpi;
+#   - SHA256SUMS over all of the above.
+# The Windows installer and macOS pkg are built on CI (Task 21).
+
+version: 2
+project_name: mcp-for-thunderbird
+dist: dist
+
+snapshot:
+  # No tag yet: GoReleaser's version is 0.0.0, so the first snapshot is
+  # 0.1.0-SNAPSHOT-<short sha>.
+  version_template: "{{ incminor .Version }}-SNAPSHOT-{{ .ShortCommit }}"
+
+builds:
+  - id: host
+    dir: host
+    main: ./cmd/mcp-for-thunderbird
+    binary: mcp-for-thunderbird
+    env:
+      - CGO_ENABLED=0
+      - GOTOOLCHAIN=go1.25.14
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    hooks:
+      post:
+        - cmd: sh packaging/post-build.sh {{ .Os }} {{ .Arch }} {{ .Path }} {{ .Version }}
+          output: true
+
+universal_binaries:
+  - id: darwin-universal
+    ids: [host]
+    replace: false
+    name_template: mcp-for-thunderbird
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    hooks:
+      post:
+        - cmd: sh packaging/post-build.sh darwin all {{ .Path }} {{ .Version }}
+          output: true
+        # The add-on is built here because this hook runs exactly once, after
+        # dist/ is prepared (a `before` hook runs before the --clean check
+        # and would leave dist/ non-empty).
+        - cmd: node packaging/build-xpi.mjs --version {{ .Version }} --dist dist
+          output: true
+
+archives:
+  - id: host
+    ids: [host]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    wrap_in_directory: true
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+      - INSTALL.md
+      - SECURITY.md
+      - PRIVACY.md
+
+sboms:
+  - id: spdx
+    artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.spdx.json"
+    # syft v1.44.0 is the newest release whose go.mod needs at most Go 1.25;
+    # it runs through `go run`, so nothing is installed.
+    cmd: go
+    env:
+      - GOTOOLCHAIN=go1.25.14
+    args:
+      - run
+      - github.com/anchore/syft/cmd/syft@v1.44.0
+      - scan
+      - "file:$artifact"
+      - --output
+      - "spdx-json=$document"
+      - --quiet
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+  extra_files:
+    - glob: dist/*.xpi
+    - glob: dist/*.deb
+    - glob: dist/*.mcpb
+
+changelog:
+  use: git
+  sort: asc
+
+release:
+  github:
+    owner: wadejbeckett
+    name: mcp-for-thunderbird
+  draft: true
+  prerelease: auto
+  extra_files:
+    - glob: dist/*.xpi
+    - glob: dist/*.deb
+    - glob: dist/*.mcpb

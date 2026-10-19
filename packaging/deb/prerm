@@ -1,0 +1,15 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Per-user registrations live in each user's home, out of the package's
+# reach; remind the user how to remove them.
+set -e
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  echo 'Per-user registrations stay behind. Each user can delete'
+  echo '~/.mozilla/native-messaging-hosts/mcp_for_thunderbird.json and the'
+  echo 'mcp-for-thunderbird entry in their AI apps (or run'
+  echo '`mcp-for-thunderbird setup --uninstall` before removing the package).'
+fi
+exit 0

@@ -1,0 +1,31 @@
+{
+  "manifest_version": "0.2",
+  "name": "mcp-for-thunderbird",
+  "display_name": "MCP for Thunderbird",
+  "version": "0.0.0",
+  "description": "Work with your Thunderbird mail through the MCP for Thunderbird add-on, within the limits you set in Thunderbird.",
+  "long_description": "Connects to the MCP for Thunderbird add-on running in Thunderbird 153 or later. Install the add-on, choose which accounts and tool groups to allow, and keep Thunderbird open while you use it.",
+  "author": {
+    "name": "Wade J. Beckett",
+    "url": "https://github.com/wadejbeckett"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wadejbeckett/mcp-for-thunderbird"
+  },
+  "homepage": "https://github.com/wadejbeckett/mcp-for-thunderbird",
+  "license": "MPL-2.0",
+  "keywords": ["thunderbird", "email", "mail"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/mcp-for-thunderbird",
+    "mcp_config": {
+      "command": "${__dirname}/server/mcp-for-thunderbird",
+      "args": ["connect"]
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

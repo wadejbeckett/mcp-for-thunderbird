@@ -74,3 +74,44 @@ test("build-xpi --e2e-settings embeds the file as e2e-settings.json", () => {
   });
   assert.deepEqual(JSON.parse(e.get("e2e-settings.json").toString()), settings);
 });
+
+test("build-xpi --version sets the manifest version (release mode)", () => {
+  const e = build(() => ["--version", "1.2.3"]);
+  assert.equal(JSON.parse(e.get("manifest.json").toString()).version, "1.2.3");
+  assert.ok(!e.has("e2e-settings.json"));
+});
+
+test("build-xpi --version keeps the numeric core of a snapshot version", () => {
+  // Gecko add-on versions are dotted integers only; the full snapshot
+  // version stays in the file name.
+  const e = build(() => ["--version", "0.1.0-SNAPSHOT-abc1234"]);
+  assert.equal(JSON.parse(e.get("manifest.json").toString()).version, "0.1.0");
+});
+
+test("build-xpi names the file after the full --version", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mft-xpi-"));
+  try {
+    const out = execFileSync(process.execPath, [script, "--version", "0.1.0-SNAPSHOT-abc1234", "--dist", dir], { stdio: "pipe" })
+      .toString()
+      .trim();
+    assert.equal(out, join(dir, "mcp-for-thunderbird-0.1.0-SNAPSHOT-abc1234.xpi"));
+    assert.ok(readFileSync(out).length > 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("build-xpi refuses --version with --e2e-settings and a malformed version", () => {
+  const run = (args) => {
+    try {
+      execFileSync(process.execPath, [script, "--out", join(tmpdir(), "never.xpi"), ...args], { stdio: "pipe" });
+      return 0;
+    } catch (err) {
+      return err.status;
+    }
+  };
+  assert.equal(run(["--version", "1.0.0", "--e2e-settings", "x.json"]), 2);
+  assert.equal(run(["--version", "01.0.0"]), 2);
+  assert.equal(run(["--version", "1.0"]), 2);
+  assert.equal(run(["--version", "v1.0.0"]), 2);
+});
