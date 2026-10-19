@@ -69,9 +69,24 @@ func Executable() (string, error) {
 	return filepath.Abs(p)
 }
 
+// resolve follows symlinks of an existing path; a missing path is
+// returned as it is.
+func resolve(path string) (string, error) {
+	r, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return path, nil
+	}
+	return r, err
+}
+
 // writeAtomic replaces path with data through a temp file in the same
-// directory. An existing file keeps its mode; a new one gets newMode.
+// directory. An existing file keeps its mode; a new one gets newMode. A
+// symlinked path is resolved first, so the link survives.
 func writeAtomic(path string, data []byte, newMode fs.FileMode) error {
+	path, err := resolve(path)
+	if err != nil {
+		return err
+	}
 	mode := newMode
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()

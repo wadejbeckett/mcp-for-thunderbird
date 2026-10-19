@@ -28,13 +28,14 @@ func sandbox(t *testing.T) (home, bin string) {
 	cfg := filepath.Join(home, ".config")
 	appdata := filepath.Join(home, "AppData", "Roaming")
 	for k, v := range map[string]string{
-		"HOME":            home,
-		"USERPROFILE":     home,
-		"XDG_CONFIG_HOME": cfg,
-		"APPDATA":         appdata,
-		"LOCALAPPDATA":    filepath.Join(home, "AppData", "Local"),
-		"CODEX_HOME":      "",
-		"PATH":            bin,
+		"HOME":              home,
+		"USERPROFILE":       home,
+		"XDG_CONFIG_HOME":   cfg,
+		"APPDATA":           appdata,
+		"LOCALAPPDATA":      filepath.Join(home, "AppData", "Local"),
+		"CODEX_HOME":        "",
+		"CLAUDE_CONFIG_DIR": "",
+		"PATH":              bin,
 	} {
 		t.Setenv(k, v)
 	}
@@ -536,5 +537,142 @@ func TestCodexRemoveMiddleKeepsNeighbours(t *testing.T) {
 	}
 	if bk := backups(t, p); len(bk) != 1 {
 		t.Fatalf("backups: %v", bk)
+	}
+}
+
+func TestJSONMergeExactBytesWithKeyAfterServers(t *testing.T) {
+	home, _ := sandbox(t)
+	dir := filepath.Join(home, ".cursor")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "mcp.json")
+	os.WriteFile(p, []byte(`{"a":1,"mcpServers":{"o":{"command":"x"}},"z":[1,{"b":2}]}`), 0o600)
+	Configure([]string{"cursor"}, binPath)
+	b, _ := os.ReadFile(p)
+	want := `{
+  "a": 1,
+  "mcpServers": {
+    "o": {
+      "command": "x"
+    },
+    "mcp-for-thunderbird": {
+      "command": "/opt/mft/mcp-for-thunderbird",
+      "args": [
+        "connect"
+      ]
+    }
+  },
+  "z": [
+    1,
+    {
+      "b": 2
+    }
+  ]
+}
+`
+	if string(b) != want {
+		t.Fatalf("merged:\n%s\nwant:\n%s", b, want)
+	}
+	Uninstall()
+	b, _ = os.ReadFile(p)
+	want = "{\n  \"a\": 1,\n  \"mcpServers\": {\n    \"o\": {\n      \"command\": \"x\"\n    }\n  },\n  \"z\": [\n    1,\n    {\n      \"b\": 2\n    }\n  ]\n}\n"
+	if string(b) != want {
+		t.Fatalf("after uninstall:\n%s", b)
+	}
+	// An object emptied by uninstall stays valid.
+	os.WriteFile(p, []byte(`{"mcpServers":{}, "k": true}`), 0o600)
+	Configure([]string{"cursor"}, binPath)
+	Uninstall()
+	if b, _ := os.ReadFile(p); string(b) != "{\n  \"mcpServers\": {},\n  \"k\": true\n}\n" {
+		t.Fatalf("empty servers:\n%s", b)
+	}
+}
+
+func TestNullServersTreatedAsAbsent(t *testing.T) {
+	home, _ := sandbox(t)
+	dir := filepath.Join(home, ".cursor")
+	os.MkdirAll(dir, 0o755)
+	p := filepath.Join(dir, "mcp.json")
+	os.WriteFile(p, []byte(`{"mcpServers": null, "k": 1}`), 0o600)
+	if s := status(t, Configure([]string{"cursor"}, binPath), "cursor"); !s.Configured || s.Error != "" {
+		t.Fatalf("null mcpServers: %+v", s)
+	}
+	m := readJSON(t, p)
+	if m["k"] != float64(1) || m["mcpServers"].(map[string]any)["mcp-for-thunderbird"] == nil {
+		t.Fatalf("result: %v", m)
+	}
+}
+
+func TestSymlinkedConfigKeepsLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	home, _ := sandbox(t)
+	dir := filepath.Join(home, ".cursor")
+	os.MkdirAll(dir, 0o755)
+	target := filepath.Join(home, "dotfiles", "cursor-mcp.json")
+	os.MkdirAll(filepath.Dir(target), 0o755)
+	os.WriteFile(target, []byte(`{"mcpServers":{}}`), 0o600)
+	link := filepath.Join(dir, "mcp.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(t, Configure([]string{"cursor"}, binPath), "cursor"); !s.Configured {
+		t.Fatalf("configure: %+v", s)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link replaced: %v %v", fi.Mode(), err)
+	}
+	if m := readJSON(t, target); m["mcpServers"].(map[string]any)["mcp-for-thunderbird"] == nil {
+		t.Fatalf("target not updated: %v", m)
+	}
+	if bk := backups(t, target); len(bk) != 1 {
+		t.Fatalf("target backup: %v", bk)
+	}
+}
+
+func TestClaudeCodeRemoveWithoutClaudeReported(t *testing.T) {
+	home, _ := sandbox(t)
+	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/x","args":["connect"]}}}`), 0o600)
+	s := status(t, Uninstall(), "claude-code")
+	if !strings.Contains(s.Error, "claude mcp remove --scope user mcp-for-thunderbird") {
+		t.Fatalf("missing claude not reported: %+v", s)
+	}
+}
+
+func TestClaudeCodeArgsWithSpacesAndQuote(t *testing.T) {
+	home, bin := sandbox(t)
+	logf := fakeClaude(t, bin, 0)
+	odd := filepath.Join(home, `My Apps`, `it's "here"`, "mcp-for-thunderbird")
+	if s := status(t, Configure([]string{"claude-code"}, odd), "claude-code"); !s.Configured || s.Error != "" {
+		t.Fatalf("configure: %+v", s)
+	}
+	b, _ := os.ReadFile(logf)
+	want := "mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + odd + "\nconnect\n--end--\n"
+	if string(b) != want {
+		t.Fatalf("args:\n%s\nwant:\n%s", b, want)
+	}
+}
+
+func TestWindowsShimMetacharactersRefused(t *testing.T) {
+	args := []string{"mcp", "add", "--", `C:\A&B\mcp-for-thunderbird.exe`, "connect"}
+	for _, shim := range []string{`C:\npm\claude.cmd`, `C:\npm\claude.BAT`} {
+		if err := checkShim("windows", shim, args); err == nil {
+			t.Fatalf("%s accepted &", shim)
+		}
+	}
+	for _, c := range []string{"^", "|", "<", ">", "%"} {
+		a := []string{`C:\A` + c + `B\x.exe`}
+		if err := checkShim("windows", `C:\npm\claude.cmd`, a); err == nil {
+			t.Fatalf("%q accepted", c)
+		}
+	}
+	if err := checkShim("windows", `C:\npm\claude.exe`, args); err != nil {
+		t.Fatalf(".exe refused: %v", err)
+	}
+	if err := checkShim("windows", `C:\npm\claude.cmd`, []string{`C:\Program Files\MFT\x.exe`}); err != nil {
+		t.Fatalf("plain path refused: %v", err)
+	}
+	if err := checkShim("linux", "/usr/bin/claude.cmd", args); err != nil {
+		t.Fatalf("non-Windows refused: %v", err)
 	}
 }

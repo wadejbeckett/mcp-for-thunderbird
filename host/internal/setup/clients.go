@@ -219,7 +219,7 @@ func jsonClient(name string, path func() (string, bool, error)) client {
 			raw, _ := json.Marshal(entry{Command: binPath, Args: []string{"connect"}})
 			servers.set(EntryName, raw)
 			doc.set("mcpServers", servers.encode(""))
-			return replace(p, doc.encode(""), 0o600)
+			return replace(p, append(doc.encode(""), '\n'), 0o600)
 		},
 		remove: func() error {
 			p, _, err := path()
@@ -238,13 +238,19 @@ func jsonClient(name string, path func() (string, bool, error)) client {
 				return nil
 			}
 			doc.set("mcpServers", servers.encode(""))
-			return replace(p, doc.encode(""), 0o600)
+			return replace(p, append(doc.encode(""), '\n'), 0o600)
 		},
 	}
 }
 
 // replace backs path up (if it exists) and writes data atomically.
+// A symlinked file is resolved first, so the link survives and its target
+// is backed up and updated.
 func replace(path string, data []byte, newMode fs.FileMode) error {
+	path, err := resolve(path)
+	if err != nil {
+		return err
+	}
 	if err := backup(path); err != nil {
 		return fmt.Errorf("backing up %s: %w", filepath.Base(path), err)
 	}
@@ -339,7 +345,7 @@ func (o *object) del(k string) bool {
 // it is something else.
 func (o *object) object(k string) (*object, error) {
 	raw, ok := o.get(k)
-	if !ok {
+	if !ok || string(bytes.TrimSpace(raw)) == "null" {
 		return nil, nil
 	}
 	sub, err := parseObject(raw)
@@ -350,7 +356,8 @@ func (o *object) object(k string) (*object, error) {
 }
 
 // encode writes the object with two-space indentation, each nested level
-// indented under prefix.
+// indented under prefix, with no trailing newline (it may be embedded as a
+// raw member value).
 func (o *object) encode(prefix string) []byte {
 	var b bytes.Buffer
 	if len(o.keys) == 0 {
@@ -374,9 +381,6 @@ func (o *object) encode(prefix string) []byte {
 			b.WriteByte('\n')
 		}
 		b.WriteString(prefix + "}")
-	}
-	if prefix == "" {
-		b.WriteByte('\n')
 	}
 	return b.Bytes()
 }
@@ -441,11 +445,11 @@ func claudeCodeAdd(binPath string) error {
 }
 
 func claudeCodeRemove() error {
-	if _, err := exec.LookPath("claude"); err != nil {
-		return nil
-	}
 	if _, ok, err := claudeCodeEntry(); err != nil || !ok {
 		return err
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		return errors.New("claude was not found on PATH; remove the entry with: claude mcp remove --scope user mcp-for-thunderbird")
 	}
 	return runClaude("mcp", "remove", "--scope", "user", EntryName)
 }
@@ -463,10 +467,15 @@ func runClaude(args ...string) error {
 			return fmt.Errorf("backing up .claude.json: %w", err)
 		}
 	}
+	if err := checkShim(runtime.GOOS, path, args); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = nil
+	// A child that leaves the output pipes open cannot hold us past this.
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -480,6 +489,25 @@ func runClaude(args ...string) error {
 			return fmt.Errorf("claude mcp %s failed: %v: %s", args[1], err, msg)
 		}
 		return fmt.Errorf("claude mcp %s failed: %v", args[1], err)
+	}
+	return nil
+}
+
+// checkShim refuses arguments cmd.exe would interpret when claude is a
+// .cmd or .bat shim on Windows (npm installs one): Go cannot quote & ^ | <
+// > % safely for cmd.exe.
+func checkShim(goos, path string, args []string) error {
+	if goos != "windows" {
+		return nil
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".cmd" && ext != ".bat" {
+		return nil
+	}
+	for _, a := range args {
+		if strings.ContainsAny(a, "&^|<>%") {
+			return errors.New("the program's folder name contains one of & ^ | < > %, which cannot be passed to claude safely; move MCP for Thunderbird to another folder or run: claude mcp add --scope user mcp-for-thunderbird -- <path> connect")
+		}
 	}
 	return nil
 }
