@@ -282,3 +282,37 @@ test("organise tools are off when the group is off", async () => {
   }
   noOrganiseCalls();
 });
+
+test("mail_archive is refused when an excluded folder lies under the archive folder", async () => {
+  const m = add("a1", "INBOX", 1);
+  for (const path of ["Archives/2026", "Archives/2026/10"]) {
+    await save({ excludedFolders: [{ accountId: "a1", path }] });
+    const r = await call("mail_archive", { ids: [m.id] });
+    assert.equal(r.error.code, "excluded", path);
+    assert.equal(r.error.message, "An excluded folder is inside this account's archive folder.");
+  }
+  // an excluded folder elsewhere, or a sibling with the same prefix, does not block it
+  await save({ excludedFolders: [{ accountId: "a1", path: "ArchivesOld" }, { accountId: "a2", path: "Archives/2026" }] });
+  const ok = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(ok.content.done, [m.id]);
+});
+
+test("a timed-out change reports mayHaveCompleted", async () => {
+  SEARCH.budgetMs = 60;
+  const a = add("a1", "INBOX", 1);
+  mock.behaviour.stall = (op) => op === "move";
+  const r = await call("mail_move", { ids: [a.id], folder: "Work" });
+  assert.deepEqual(r.content.failed, [{ id: a.id, code: "thunderbird_error", mayHaveCompleted: true }]);
+  mock.behaviour.stall = null;
+  const b = add("a1", "INBOX", 2);
+  mock.behaviour.fail = () => true;
+  const r2 = await call("mail_mark", { ids: [b.id], read: true });
+  assert.deepEqual(r2.content.failed, [{ id: b.id, code: "thunderbird_error" }]);
+});
+
+test("mail_tag matches keys case-insensitively", async () => {
+  const m = add("a1", "INBOX", 1);
+  const r = await call("mail_tag", { ids: [m.id], add: ["$LABEL4"] });
+  assert.deepEqual(r.content.done, [m.id]);
+  assert.deepEqual(mock.store.get(m.num).tags, ["$label4"]);
+});

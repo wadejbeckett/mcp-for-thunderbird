@@ -20,8 +20,8 @@
 import { HANDLERS } from "../rpc.js";
 import { decodeId, resolveId } from "../ids.js";
 import { assertFolderAllowed } from "../policy.js";
-import { fail, isToolError } from "../errors.js";
-import { call, newRun, answered, folderByPath, realFolder } from "./read.js";
+import { fail, isToolError, ToolError } from "../errors.js";
+import { call, newRun, answered, folderByPath, realFolder, tagKeyOf, tagList, TIMEOUT } from "./read.js";
 
 export const MAX_IDS = 100;
 const MAX_TAGS = 20;
@@ -58,15 +58,25 @@ async function forEachMessage(ids, run, s, fn) {
       await fn(h);
       out.done.push(id);
     } catch (e) {
-      out.failed.push({ id, code: isToolError(e) ? e.code : "thunderbird_error" });
+      const entry = { id, code: isToolError(e) ? e.code : "thunderbird_error" };
+      if (e && e.mayHaveCompleted) entry.mayHaveCompleted = true;
+      out.failed.push(entry);
     }
   }
   return out;
 }
 
 // api runs one Thunderbird call within the budget.
+// A timeout of a change may still have taken effect, so the error carries
+// mayHaveCompleted.
 async function api(run, fn) {
-  return answered(await call(run, fn));
+  const v = await call(run, fn);
+  if (v === TIMEOUT) {
+    const e = new ToolError("thunderbird_error", "Thunderbird did not answer in time.");
+    e.mayHaveCompleted = true;
+    throw e;
+  }
+  return v;
 }
 
 // ---- mail_mark ----
@@ -93,24 +103,15 @@ function tagNames(args, k) {
   return v;
 }
 
-// tagKey maps a tag key or label (case-insensitive) to the key.
-function tagKey(list, value) {
-  const want = value.toLowerCase();
-  const t = list.find((x) => x && (x.key === value || String(x.tag ?? "").toLowerCase() === want));
-  if (!t || typeof t.key !== "string") fail("invalid_argument", `Unknown tag: ${value}`);
-  return t.key;
-}
-
 async function mailTag(args, ctx) {
   const add = tagNames(args, "add");
   const remove = tagNames(args, "remove");
   if (add.length === 0 && remove.length === 0) fail("invalid_argument", "Give tags to add, remove or both.");
   const ids = idsArg(args);
   const run = newRun();
-  const list = await api(run, () => tb().messages.tags.list());
-  if (!Array.isArray(list)) fail("thunderbird_error", "Thunderbird did not list its tags.");
-  const addKeys = add.map((t) => tagKey(list, t));
-  const removeKeys = new Set(remove.map((t) => tagKey(list, t)));
+  const list = await tagList(run);
+  const addKeys = add.map((t) => tagKeyOf(list, t));
+  const removeKeys = new Set(remove.map((t) => tagKeyOf(list, t)));
   return forEachMessage(ids, run, ctx.settings, (h) => {
     const tags = [...new Set([...(h.tags || []), ...addKeys])].filter((k) => !removeKeys.has(k));
     return api(run, () => tb().messages.update(h.id, { tags }));
@@ -169,11 +170,20 @@ async function mailArchive(args, ctx) {
   const s = ctx.settings;
   const ids = idsArg(args);
   const run = newRun();
-  // Thunderbird picks the archive folder (and year subfolders); where the
-  // account has one and it is excluded, nothing is archived.
+  // Thunderbird picks the archive folder and may file into year or month
+  // subfolders; if any excluded folder of the account is at or under the
+  // archive root, nothing is archived.
   for (const accountId of accountsOf(ids)) {
     const f = await specialFolder(run, accountId, "archive");
-    if (f) assertFolderAllowed(accountId, f.path, s);
+    if (!f) continue;
+    assertFolderAllowed(accountId, f.path, s);
+    const root = f.path.replace(/\/+$/, "");
+    const inside = (s.excludedFolders || []).some((ex) => {
+      if (!ex || ex.accountId !== accountId) return false;
+      const ep = String(ex.path ?? "").replace(/\/+$/, "");
+      return ep === root || ep.startsWith(root + "/");
+    });
+    if (inside) fail("excluded", "An excluded folder is inside this account's archive folder.");
   }
   return forEachMessage(ids, run, s, (h) => api(run, () => tb().messages.archive([h.id])));
 }

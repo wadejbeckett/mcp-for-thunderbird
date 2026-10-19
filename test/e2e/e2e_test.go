@@ -639,8 +639,7 @@ func TestE2EOrganise(t *testing.T) {
 	// tag: a known tag by label; an unknown one is refused.
 	callOK(t, cs, "mail_tag", map[string]any{"ids": []string{two.ID}, "add": []string{"important"}}, &o)
 	o.only(t, "mail_tag", two.ID)
-	// mail_search takes the tag key ($label1 is Thunderbird's "Important").
-	tagged, _ := searchUntil(t, cs, map[string]any{"tag": "$label1"}, subj2)
+	tagged, _ := searchUntil(t, cs, map[string]any{"tag": "important"}, subj2)
 	if got := find(tagged, subj2).Tags; len(got) != 1 || got[0] != "$label1" {
 		t.Fatalf("tags after mail_tag = %v", got)
 	}

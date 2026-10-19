@@ -104,7 +104,7 @@ test("search maps its arguments to messages.query with Date objects", async () =
     until: "2026-03-04",
     unread: true,
     flagged: false,
-    tag: "$label2",
+    tag: "to do",
     has_attachment: true,
     limit: 7,
   });
@@ -118,7 +118,7 @@ test("search maps its arguments to messages.query with Date objects", async () =
   assert.equal(q.subject, "s");
   assert.equal(q.read, false);
   assert.equal(q.flagged, false);
-  assert.deepEqual(q.tags, { tags: { $label2: true }, mode: "all" });
+  assert.deepEqual(q.tags, { tags: { $label4: true }, mode: "all" });
   assert.equal(q.attachment, true);
   assert.equal(q.messagesPerPage, 7);
   assert.equal(q.autoPaginationTimeout, 0);
@@ -891,4 +891,37 @@ test("filter suggest refuses bad arguments", async () => {
   }
   const r = await call("mail_filter_suggest", { account: "a2", actions: act });
   assert.equal(r.error.code, "not_enabled");
+});
+
+test("mail_search tag accepts a key or a label in any case; unknown is invalid_argument", async () => {
+  const m = install({ accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }] });
+  globalThis.fetch = fetchFrom({});
+  await save({ accounts: { a1: true } });
+  const run = (args) => dispatch({ type: "call", id: "c1", tool: "mail_search", args, client: "test" });
+  for (const t of ["IMPORTANT", "$LABEL1", "$label1"]) {
+    const r = await run({ tag: t });
+    assert.equal(r.ok, true, t);
+    assert.deepEqual(m.calls.query.at(-1).tags, { tags: { $label1: true }, mode: "all" });
+  }
+  const bad = await run({ tag: "Nope" });
+  assert.equal(bad.error.code, "invalid_argument");
+});
+
+test("a failing tags.list is thunderbird_error for search and filter suggestion", async () => {
+  const m = install({ accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }] });
+  globalThis.fetch = fetchFrom({});
+  await save({ accounts: { a1: true } });
+  m.messenger.messages.tags.list = async () => {
+    throw new Error("nope");
+  };
+  const s = await dispatch({ type: "call", id: "c1", tool: "mail_search", args: { tag: "x" }, client: "test" });
+  assert.equal(s.error.code, "thunderbird_error");
+  const f = await dispatch({
+    type: "call",
+    id: "c2",
+    tool: "mail_filter_suggest",
+    args: { account: "a1", conditions: [], actions: [{ type: "tag", value: "Important" }] },
+    client: "test",
+  });
+  assert.equal(f.error.code, "thunderbird_error");
 });

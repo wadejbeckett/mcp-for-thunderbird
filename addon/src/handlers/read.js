@@ -418,13 +418,16 @@ async function mailSearch(args, ctx) {
     if (!Array.isArray(args.tags) || !args.tags.every((x) => typeof x === "string")) fail("invalid_argument", "tags must be a list of strings.");
     tags.push(...args.tags);
   }
-  if (tags.length > 0) base.tags = { tags: Object.fromEntries(tags.map((t) => [t, true])), mode: "all" };
   const sinceMs = optDay(args, "since");
   const untilArg = optDay(args, "until", true);
   const untilMs = untilArg ?? Date.now() + DAY;
   if (sinceMs != null && sinceMs >= untilMs) return { messages: [], truncated: false };
 
   const run = newRun();
+  if (tags.length > 0) {
+    const list = await tagList(run);
+    base.tags = { tags: Object.fromEntries(tags.map((t) => [tagKeyOf(list, t), true])), mode: "all" };
+  }
   let scopes;
   const folder = optString(args, "folder");
   if (folder !== undefined) {
@@ -753,25 +756,27 @@ function valueOf(x, what) {
   return x.value;
 }
 
-// tagLabel maps a tag key or name to the name Thunderbird shows. Without
-// a tag list (an older Thunderbird) the value is shown as given.
-function tagLabel(tags, value) {
-  if (!tags) return value;
+// tagKeyOf maps a tag key or label (case-insensitive) to the tag's key.
+export function tagKeyOf(list, value) {
   const want = value.toLowerCase();
-  const t = tags.find((x) => x && (x.key === value || String(x.tag ?? "").toLowerCase() === want));
+  const t = list.find((x) => x && typeof x.key === "string" && (x.key.toLowerCase() === want || String(x.tag ?? "").toLowerCase() === want));
   if (!t) fail("invalid_argument", `Unknown tag: ${value}`);
-  return String(t.tag);
+  return t.key;
 }
 
-async function tagList(run) {
+// tagLabel maps a tag key or name to the name Thunderbird shows.
+function tagLabel(list, value) {
+  const key = tagKeyOf(list, value);
+  return String(list.find((x) => x.key === key).tag);
+}
+
+// tagList returns Thunderbird's tags; a failure is thunderbird_error.
+export async function tagList(run) {
   const api = tb().messages.tags;
-  if (!api || typeof api.list !== "function") return null;
-  try {
-    const v = await call(run, () => api.list());
-    return Array.isArray(v) ? v : null;
-  } catch {
-    return null;
-  }
+  if (!api || typeof api.list !== "function") fail("thunderbird_error", "Thunderbird cannot list its tags.");
+  const v = answered(await call(run, () => api.list()));
+  if (!Array.isArray(v)) fail("thunderbird_error", "Thunderbird did not list its tags.");
+  return v;
 }
 
 // mailFilterSuggest validates a filter and describes how to make it in
@@ -788,7 +793,7 @@ async function mailFilterSuggest(args, ctx) {
 
   const run = newRun();
   const needTags = conditions.some((c) => c.field === "tag") || actions.some((a) => a.type === "tag");
-  const tags = needTags ? await tagList(run) : null;
+  const tags = needTags ? await tagList(run) : [];
 
   const rules = conditions.map((c) => {
     const f = Object.prototype.hasOwnProperty.call(FIELDS, c.field) ? FIELDS[c.field] : null;

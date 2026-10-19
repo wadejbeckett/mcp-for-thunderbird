@@ -23,7 +23,6 @@
     "messagesRead",
     "messagesMove",
     "messagesUpdate",
-    "messagesTags",
     "messagesTagsList",
     "messagesImport",
     "messages.save",
