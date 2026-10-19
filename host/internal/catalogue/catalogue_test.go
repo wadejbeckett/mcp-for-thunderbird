@@ -108,6 +108,9 @@ func TestSearchSchemaHasNoBodyOutput(t *testing.T) {
 	if !strings.Contains(byName(t, "mail_draft").Description, "Drafts") {
 		t.Error("mail_draft description must mention Drafts")
 	}
+	if !strings.Contains(byName(t, "mail_draft").Description, "draftId may be null") {
+		t.Error("mail_draft description must say draftId may be null")
+	}
 }
 
 func props(t *testing.T, name string) map[string]map[string]any {

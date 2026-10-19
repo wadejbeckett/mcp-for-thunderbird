@@ -589,10 +589,19 @@ export function parseMailboxes(text) {
     .filter(Boolean)
     .map((p) => {
       const m = /^([^]*?)<([^<>]*)>\s*$/.exec(p);
-      if (!m) return { name: undefined, group: undefined, email: p };
+      if (!m) return { name: undefined, group: undefined, email: requote(p) };
       const name = m[1].trim().replace(/^"([^]*)"$/, "$1");
-      return { name: name || undefined, group: undefined, email: m[2].trim() || undefined };
+      return { name: name || undefined, group: undefined, email: requote(m[2].trim()) || undefined };
     });
+}
+
+// requote treats a quoted local part as jsmime does: quotes are dropped
+// when the local part is a plain dot-atom and kept otherwise, so
+// "a@evil.com,b"@allowed.com stays one address with its quotes.
+function requote(addr) {
+  const m = /^"([^"]*)"@([^@]*)$/.exec(addr);
+  if (!m) return addr;
+  return /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/.test(m[1]) ? `${m[1]}@${m[2]}` : addr;
 }
 
 const MAILBOX_HEADERS = ["from", "to", "cc", "bcc", "reply-to", "sender"];

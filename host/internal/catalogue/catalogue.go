@@ -138,7 +138,7 @@ var tools = []Tool{
 		Description: "Moves messages to the account's Trash folder.",
 		Input:       schema([]string{"ids"}, m{"account": account(), "ids": strs("Message ids.")})},
 	{Name: "mail_draft", Group: "compose",
-		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards are saved to Drafts with threading kept.",
+		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards are saved to Drafts with threading kept. Returns draftId, the saved draft's message id; draftId may be null when Thunderbird has not yet shown the saved draft in Drafts (the draft is still saved; do not save it again).",
 		Input:       schema([]string{"kind", "body"}, composeProps())},
 	{Name: "mail_compose", Group: "compose",
 		Description: "Opens a compose window in Thunderbird, filled in, for the user to review and send.",

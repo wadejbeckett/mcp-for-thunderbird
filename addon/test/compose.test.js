@@ -9,7 +9,7 @@ import { install, fetchFrom } from "./mocks/messenger.js";
 import { dispatch } from "../src/rpc.js";
 import { save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, COMPOSE } from "../src/handlers/compose.js";
+import { isAllowed, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -113,6 +113,27 @@ test("TestAllowlistOneBadOfMany", async () => {
   // several mailboxes in one entry are each checked
   refusedNoSend(await send({ to: ["a@allowed.com, z@evil.com"] }), "z@evil.com");
   refusedNoSend(await send({ to: ["a@allowed.com", "undisclosed"] }), "undisclosed");
+});
+
+test("TestAllowlistQuotedLocalPart: only plain dot-atom addresses pass (ruling R27)", async () => {
+  for (const addr of ['"a@evil.com,b"@allowed.com', '"x@evil.com"@allowed.com', '"<x@evil.com>"@allowed.com', "a@b@allowed.com", "a@allowéd.com", "a..b@allowed.com", ".a@allowed.com", "a@allowed..com", "a b@allowed.com"]) {
+    assert.equal(isAllowed(addr, ["@allowed.com", "allowéd.com", "a@b@allowed.com"]), false, addr);
+  }
+  assert.equal(isAllowed("o'brien+x@allowed.com", ["@allowed.com"]), true);
+  assert.equal(isAllowed("a@xn--allowd-fya.com", ["@xn--allowd-fya.com"]), true);
+  assert.equal(isAllowed("test@localhost", ["@localhost"]), true);
+
+  await save({ send: { enabled: true, allow: ["@allowed.com", "allowéd.com"] } });
+  refusedNoSend(await send({ to: ['"a@evil.com,b"@allowed.com'] }), '"a@evil.com,b"@allowed.com');
+  refusedNoSend(await send({ to: ['"x@evil.com"@allowed.com'] }), '"x@evil.com"@allowed.com');
+  refusedNoSend(await send({ to: ['Boss <"x@evil.com"@allowed.com>'] }), '"x@evil.com"@allowed.com');
+  refusedNoSend(await send({ to: ['"<x@evil.com>"@allowed.com'] }), '"<x@evil.com>"@allowed.com');
+  refusedNoSend(await send({ to: ["a@b@allowed.com"] }), "a@b@allowed.com");
+  refusedNoSend(await send({ bcc: ["a@allowéd.com"] }), "a@allowéd.com");
+  // a needlessly quoted plain local part is unquoted by the parser, as jsmime does
+  const r = await send({ to: ['"plain"@allowed.com'] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(mock.calls.sendMessage[0][0].to, ["plain@allowed.com"]);
 });
 
 test("mail_send sends the checked addresses only, from the default identity", async () => {
@@ -347,6 +368,33 @@ test("mail_draft new uses the header saveMessage returns", async () => {
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(decodeId(r.content.draftId).folderPath, "Drafts");
   assert.equal(mock.calls.getFull.length, 0);
+});
+
+test("mail_draft new gives up the draft lookup after LOOKUP.maxMs (10 s) of the budget", async (t) => {
+  assert.equal(LOOKUP.maxMs, 10_000);
+  const max = LOOKUP.maxMs;
+  LOOKUP.maxMs = 1500;
+  t.after(() => {
+    LOOKUP.maxMs = max;
+  });
+  mock.messenger.messages.saveMessage = async (details, options) => {
+    mock.calls.saveMessage.push([details, options]);
+    return { mode: "draft", messages: [] };
+  };
+  const t0 = Date.now();
+  const r = await call("mail_draft", { kind: "new", body: "a" });
+  const took = Date.now() - t0;
+  assert.deepEqual(r.content, { draftId: null });
+  // the 30 s call budget is not what ended the lookup
+  assert.ok(took >= 500 && took < 3000, `took ${took} ms`);
+});
+
+test("mail_draft new normalises recipients", async () => {
+  const r = await call("mail_draft", { kind: "new", to: ['Alice A <alice@example.test>, "Bob, B" <bob@example.test>'], cc: ["nobody-here"], body: "a" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const [d] = mock.calls.saveMessage[0];
+  assert.deepEqual(d.to, ['"Alice A" <alice@example.test>', '"Bob, B" <bob@example.test>']);
+  assert.deepEqual(d.cc, ["nobody-here"]);
 });
 
 test("mail_draft new returns a null draftId when the draft does not show up in time", async () => {

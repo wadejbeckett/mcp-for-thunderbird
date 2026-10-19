@@ -900,6 +900,14 @@ func TestE2EDraftAndSend(t *testing.T) {
 	if !isErr || text != "refused: Recipient not in the allowed list: x@example.org" {
 		t.Fatalf("send to x@example.org: %v %q", isErr, text)
 	}
+	// A quoted local part hiding another address (ruling R27): Thunderbird's
+	// parser keeps it as one address at localhost, but sendMessage would
+	// split it at the comma.
+	text, isErr = call(t, cs, "mail_send", map[string]any{"to": []string{`"x@example.org,b"@localhost`}, "subject": refusedSubj, "body": "Must not be sent."})
+	if !isErr || !strings.HasPrefix(text, "refused: Recipient not in the allowed list: ") || !strings.Contains(text, "x@example.org,b") {
+		t.Fatalf("send to a quoted local part: %v %q", isErr, text)
+	}
+	t.Logf("quoted local part refused: %s", text)
 	time.Sleep(3 * time.Second)
 	refused := fmt.Sprintf("SUBJECT %q", refusedSubj)
 	if n := len(imapUIDs(t, "INBOX", refused)) + len(imapUIDs(t, "Sent", refused)); n != 0 {

@@ -48,17 +48,32 @@ const NO_SEND = "Thunderbird has not granted MCP for Thunderbird permission to s
 const LOOKUP_SLACK_MS = 60_000;
 const LOOKUP_CANDIDATES = 25;
 const POLL_MS = 500;
+// The lookup uses at most this much of the call's budget.
+export const LOOKUP = { maxMs: 10_000 };
 
 const tb = () => globalThis.messenger;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- allowlist ----
 
-// isAllowed says whether an addr-spec passes the allowlist. Entries are an
-// exact address, or a domain (`@example.com` or `example.com`) equal to the
-// address's domain; never a suffix match. Case-insensitive.
+// PLAIN is an addr-spec with a dot-atom local part and a domain of
+// letter-digit-hyphen labels (punycode, never Unicode). Anything else
+// fails closed (ruling R27): Thunderbird's parser keeps a quoted local part
+// such as "a@evil.com,b"@allowed.com as one address, but sendMessage splits
+// recipient strings at that comma and would deliver to evil.com.
+const ATOM = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+";
+const LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?";
+const PLAIN = new RegExp(`^${ATOM}(?:\\.${ATOM})*@${LABEL}(?:\\.${LABEL})*$`);
+
+export const isPlainAddress = (address) => typeof address === "string" && address.length <= 254 && PLAIN.test(address);
+
+// isAllowed says whether an addr-spec passes the allowlist. Only a plain
+// address can pass. Entries are an exact address, or a domain
+// (`@example.com` or `example.com`) equal to the address's domain; never a
+// suffix match. Case-insensitive.
 export function isAllowed(address, allow) {
   const a = String(address ?? "").trim().toLowerCase();
+  if (!isPlainAddress(a)) return false;
   const at = a.lastIndexOf("@");
   if (at <= 0 || at === a.length - 1) return false;
   const domain = a.slice(at + 1);
@@ -417,7 +432,8 @@ async function replyDraft(run, kind, h, a, who, drafts) {
 // findDraft looks for the draft saveMessage stored (IMAP returns no
 // header, docs/SPIKES.md §2) by its X-MFT-Draft header, until the budget
 // is nearly spent.
-async function findDraft(run, drafts, tag, since) {
+async function findDraft(outer, drafts, tag, since) {
+  const run = { ...outer, deadline: Math.min(outer.deadline, Date.now() + LOOKUP.maxMs) };
   const checked = new Set();
   for (;;) {
     const page = await call(run, () => tb().messages.query({ accountId: drafts.accountId, folderId: drafts.id, fromDate: new Date(since - LOOKUP_SLACK_MS), messagesPerPage: 100 }));
@@ -440,17 +456,23 @@ async function findDraft(run, drafts, tag, since) {
 
 async function newDraft(run, a, identity, drafts) {
   const tag = globalThis.crypto.randomUUID();
-  const since = Date.now();
+  // Recipients are parsed and written back in one form, as for replies;
+  // an entry that yields no address is kept as given.
+  const norm = async (list) => {
+    const boxes = await mailboxes(run, list || []);
+    return boxes.map((m) => (m.email ? formatMailbox(m) : m.raw)).filter((x, i, all) => all.indexOf(x) === i);
+  };
   const details = {
     identityId: identity.id,
-    to: a.to || [],
-    cc: a.cc || [],
-    bcc: a.bcc || [],
+    to: await norm(a.to),
+    cc: await norm(a.cc),
+    bcc: await norm(a.bcc),
     subject: oneLine(a.subject ?? ""),
     body: textToHtml(a.body),
     customHeaders: [{ name: "X-MFT-Draft", value: tag }],
   };
   if (a.attachments.length) details.attachments = files(a.attachments);
+  const since = Date.now();
   const res = done(await call(run, () => tb().messages.saveMessage(details, { mode: "draft" })), "the draft may have been saved");
   let h = res && Array.isArray(res.messages) ? res.messages.find((m) => m && m.folder && m.headerMessageId) : null;
   // The draft is saved: a failed lookup gives no id rather than an error,
@@ -533,6 +555,9 @@ async function mailSend(args, ctx) {
     const boxes = await mailboxes(run, a[k] || []);
     for (const m of boxes) {
       if (!isAllowed(m.email, allow)) fail("refused", `Recipient not in the allowed list: ${m.email || m.raw}`);
+      // The address Thunderbird is given must parse back to itself, alone.
+      const again = await mailboxes(run, [m.email]);
+      if (again.length !== 1 || again[0].email !== m.email) fail("refused", `Recipient not in the allowed list: ${m.email}`);
     }
     checked[k] = boxes.map((m) => m.email);
   }
