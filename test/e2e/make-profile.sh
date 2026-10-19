@@ -17,14 +17,13 @@
 #     SMTP on 3025, offline sync on and the sideload prefs (ruling R3).
 #
 # usage: make-profile.sh <xpi> <host-binary>
-# Environment as tb.sh (MFT_E2E_DIR, MFT_E2E_PROFILE, MFT_E2E_MARIONETTE).
+# Environment as tb.sh (MFT_E2E_DIR, MFT_E2E_PROFILE).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 : "${MFT_E2E_DIR:=${TMPDIR:-/tmp}/mft-e2e}"
 : "${MFT_E2E_PROFILE:=${TMPDIR:-/tmp}/mft-e2e-profile}"
-: "${MFT_E2E_MARIONETTE:=28290}"
-export MFT_E2E_DIR MFT_E2E_PROFILE MFT_E2E_MARIONETTE
+export MFT_E2E_DIR MFT_E2E_PROFILE
 
 ADDON_ID=mcp-for-thunderbird@wadejbeckett.github.io
 HOST_NAME=mcp_for_thunderbird
@@ -32,9 +31,15 @@ xpi=$(realpath "$1")
 host=$(realpath "$2")
 prof=$MFT_E2E_PROFILE
 
-case "$(basename "$prof")" in
+# The profile is removed with rm -rf: check its name and that it is not
+# under ~/.thunderbird first (both resolved).
+real=$(realpath -m "$prof")
+case "$(basename "$real")" in
   mft-e2e*) ;;
   *) echo "make-profile.sh: refusing profile $prof (name must start mft-e2e)" >&2; exit 1 ;;
+esac
+case "$real" in
+  "$(realpath -m "$HOME")"/.thunderbird*) echo "make-profile.sh: refusing profile $prof" >&2; exit 1 ;;
 esac
 rm -rf "$prof"
 mkdir -p "$prof" "$MFT_E2E_DIR/home"
@@ -48,7 +53,6 @@ base_prefs() {
   pref extensions.autoDisableScopes 0
   pref extensions.enabledScopes 15
   pref xpinstall.signatures.required false
-  pref marionette.port "$MFT_E2E_MARIONETTE"
   pref mail.shell.checkDefaultClient false
   pref mailnews.start_page.enabled false
   pref mail.provider.enabled false
@@ -73,23 +77,11 @@ base_prefs() {
   pref mail.server.server2.directory-rel '"[ProfD]Mail/Local Folders"'
 }
 
-wait_port() { # port seconds
-  for _ in $(seq 1 $(($2 * 4))); do
-    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0
-    sleep 0.25
-  done
-  return 1
-}
-
 mkdir -p "$prof/extensions"
 cp "$xpi" "$prof/extensions/$ADDON_ID.xpi"
 
 nmh=$MFT_E2E_DIR/home/.mozilla/native-messaging-hosts
 mkdir -p "$nmh"
-if [ -e "$nmh/$HOST_NAME.json" ]; then
-  echo "make-profile.sh: $nmh/$HOST_NAME.json already exists" >&2
-  exit 1
-fi
 cat >"$nmh/$HOST_NAME.json" <<EOF
 {
   "name": "$HOST_NAME",
@@ -104,13 +96,8 @@ base_prefs
 pref mail.accountmanager.accounts '"account2"'
 pref mail.account.account2.server '"server2"'
 "$here/tb.sh" start
-if ! wait_port "$MFT_E2E_MARIONETTE" 60; then
-  "$here/tb.sh" stop
-  echo "make-profile.sh: Marionette did not start" >&2
-  exit 1
-fi
 sleep 2
-result=$(python3 "$here/marionette.py" "$MFT_E2E_MARIONETTE" - <<'JS'
+result=$("$here/tb.sh" marionette - <<'JS'
 const resolve = arguments[arguments.length - 1];
 (async () => {
   const origin = "imap://127.0.0.1";

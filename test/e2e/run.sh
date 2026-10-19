@@ -20,17 +20,21 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 export MFT_E2E_DIR=${MFT_E2E_DIR:-${TMPDIR:-/tmp}/mft-e2e}
 export MFT_E2E_PROFILE=${MFT_E2E_PROFILE:-${TMPDIR:-/tmp}/mft-e2e-profile}
-export MFT_E2E_MARIONETTE=${MFT_E2E_MARIONETTE:-28290}
 export GOTOOLCHAIN=${GOTOOLCHAIN:-auto}
 
 CONTAINER=mft-greenmail
 IMAGE=greenmail/standalone@sha256:1ef95a966418cd09b7ea91d504d8c0826bbe7a2f6e679a75c601a831587c1626
 
-# Both are removed with rm -rf, so their names are checked first.
+# Both are removed with rm -rf, so their names (resolved) are checked first,
+# and neither may be under ~/.thunderbird.
 for d in "$MFT_E2E_DIR" "$MFT_E2E_PROFILE"; do
-  case "$(basename "$d")" in
+  real=$(realpath -m "$d")
+  case "$(basename "$real")" in
     mft-e2e*) ;;
     *) echo "run.sh: refusing $d (the name must start mft-e2e)" >&2; exit 1 ;;
+  esac
+  case "$real" in
+    "$(realpath -m "$HOME")"/.thunderbird*) echo "run.sh: refusing $d (under ~/.thunderbird)" >&2; exit 1 ;;
   esac
 done
 
