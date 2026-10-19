@@ -14,7 +14,9 @@
 #     sideloaded add-on on the start that finds it but runs it only from
 #     the next start (docs/SPIKES.md "Milestone 2");
 #  3. write user.js with the IMAP account test@localhost on 127.0.0.1:3143,
-#     SMTP on 3025, offline sync on and the sideload prefs (ruling R3).
+#     SMTP on 3025, offline sync on and the sideload prefs (ruling R3), and
+#     a second IMAP account other@localhost (account3) on the same server,
+#     the other account of the injection suite's cross-account move.
 #
 # usage: make-profile.sh <xpi> <host-binary>
 # Environment as tb.sh (MFT_E2E_DIR, MFT_E2E_PROFILE).
@@ -101,6 +103,9 @@ const resolve = arguments[arguments.length - 1];
   const li = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(Ci.nsILoginInfo);
   li.init(origin, null, origin, "test", "test", "", "");
   await Services.logins.addLoginAsync(li);
+  const li2 = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(Ci.nsILoginInfo);
+  li2.init(origin, null, origin, "other", "other", "", "");
+  await Services.logins.addLoginAsync(li2);
   const all = await Services.logins.getAllLogins();
   return all.filter((l) => l.origin === origin).length;
 })().then(resolve, (e) => resolve("error: " + e));
@@ -109,15 +114,15 @@ JS
 "$here/tb.sh" stop
 # A connection file from this start (if the add-on already ran) is stale.
 rm -rf "$MFT_E2E_DIR/home/.config/mcp-for-thunderbird"
-if [ "$result" != "1" ]; then
+if [ "$result" != "2" ]; then
   echo "make-profile.sh: storing the test login failed: $result" >&2
   exit 1
 fi
 
-# Phase 2: the IMAP account.
+# Phase 2: the IMAP accounts.
 base_prefs
 for kv in \
-  'mail.accountmanager.accounts "account1,account2"' \
+  'mail.accountmanager.accounts "account1,account3,account2"' \
   'mail.accountmanager.defaultaccount "account1"' \
   'mail.account.account1.identities "id1"' \
   'mail.account.account1.server "server1"' \
@@ -137,6 +142,21 @@ for kv in \
   'mail.server.server1.directory-rel "[ProfD]ImapMail/127.0.0.1"' \
   'mail.server.server1.useIdle true' \
   'mail.server.default.autosync_max_age_days -1' \
+  'mail.account.account3.identities "id2"' \
+  'mail.account.account3.server "server3"' \
+  'mail.server.server3.type "imap"' \
+  'mail.server.server3.hostname "127.0.0.1"' \
+  'mail.server.server3.port 3143' \
+  'mail.server.server3.userName "other"' \
+  'mail.server.server3.name "other@localhost"' \
+  'mail.server.server3.socketType 0' \
+  'mail.server.server3.authMethod 3' \
+  'mail.server.server3.login_at_startup true' \
+  'mail.server.server3.directory-rel "[ProfD]ImapMail/127.0.0.1-other"' \
+  'mail.identity.id2.useremail "other@localhost"' \
+  'mail.identity.id2.fullName "Other User"' \
+  'mail.identity.id2.smtpServer "smtp1"' \
+  'mail.identity.id2.valid true' \
   'mail.identity.id1.useremail "test@localhost"' \
   'mail.identity.id1.fullName "Test User"' \
   'mail.identity.id1.smtpServer "smtp1"' \

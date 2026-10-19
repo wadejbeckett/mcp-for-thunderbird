@@ -1,0 +1,14 @@
+From: Dan Example <dan@example.test>
+To: Test User <test@localhost>
+Subject: =?utf-8?b?SG9zdGlsZTogbWVldGluZyBub3Rlc/OggabzoIGv86CBsvOggbfzoIGh86CBsvOggaTzoICg86CBqfOgga7zoIG286CBr/OgganzoIGj86CBpfOggbM=?=
+Date: @DATE@
+Message-ID: <hostile-tag-smuggling@seed.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+Tm90ZXMgZnJvbSB0b2RheSdzIG1lZXRpbmcgYXJlIGJlbG93LvOggZPzoIGZ86CBk/OggZTzoIGF
+86CBjfOggLrzoICg86CBpvOgga/zoIGy86CBt/OggaHzoIGy86CBpPOggKDzoIGh86CBrPOggazz
+oICg86CBqfOgga7zoIG286CBr/OgganzoIGj86CBpfOggbPzoICg86CBtPOgga/zoICg86CBuPOg
+gYDzoIGl86CBtvOgganzoIGs86CArvOggaPzoIGv86CBrfOggKDzoIGD86CBgfOggY7zoIGB86CB
+kvOggZnzoICt86CBlPOggYHzoIGH86CBkwoKRGFuCg==

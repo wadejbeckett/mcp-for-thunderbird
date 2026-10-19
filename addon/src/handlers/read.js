@@ -33,7 +33,7 @@ import { encodeId, resolveId } from "../ids.js";
 import { isExcluded, enabledAccountIds, assertFolderAllowed } from "../policy.js";
 import { fail } from "../errors.js";
 import { buildThreadIds, normalizeSubject, stripAngleBrackets, createLimiter } from "../thread-utils.js";
-import { htmlToText, stripInvisible, wrapUntrusted, authResults } from "../clean.js";
+import { htmlToText, stripInvisible, wrapUntrusted, authResults, cleanLine } from "../clean.js";
 
 // SEARCH.budgetMs is the time budget of one mail_search or mail_thread
 // call. Exported so tests can shorten it.
@@ -234,13 +234,15 @@ function iso(d) {
   return Number.isNaN(t.getTime()) ? new Date(0).toISOString() : t.toISOString();
 }
 
+// Sender and subject are the sender's own text, shown outside any wrapper:
+// they are cleaned like mail_read's headers (clip).
 function pointer(h, hasAttachments) {
   return {
     id: encodeId(h.folder.accountId, h.folder.path, h.headerMessageId),
     date: iso(h.date),
-    from: mailbox(h.author),
+    from: mailbox(clip(h.author)),
     toCount: count(h.recipients) + count(h.ccList) + count(h.bccList),
-    subject: String(h.subject ?? ""),
+    subject: clip(h.subject),
     folder: h.folder.path,
     read: Boolean(h.read),
     flagged: Boolean(h.flagged),
@@ -592,7 +594,9 @@ function truncate(s, n) {
   return { text: s.slice(0, end), cut: true };
 }
 
-const clip = (v) => stripInvisible(String(v ?? "")).slice(0, HEADER_CHARS);
+// clip cleans a header value shown outside the wrapper: invisible
+// characters removed, wrapper markers defused, at most HEADER_CHARS.
+const clip = (v) => cleanLine(String(v ?? "")).slice(0, HEADER_CHARS);
 const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
 
 function firstHeader(full, name) {

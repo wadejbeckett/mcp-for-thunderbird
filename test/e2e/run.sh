@@ -45,8 +45,8 @@ greenmail_up() {
     docker compose -f "$here/greenmail.compose.yaml" up -d >/dev/null
   else
     docker run -d --name "$CONTAINER" \
-      -p 127.0.0.1:3143:3143 -p 127.0.0.1:3025:3025 \
-      -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=test:test@localhost -Dgreenmail.hostname=0.0.0.0' \
+      -p 127.0.0.1:3143:3143 -p 127.0.0.1:3025:3025 -p 127.0.0.1:3080:8080 \
+      -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=test:test@localhost,other:other@localhost -Dgreenmail.hostname=0.0.0.0' \
       -e JAVA_OPTS=-Xmx512m \
       "$IMAGE" >/dev/null
   fi
@@ -89,14 +89,16 @@ log "starting GreenMail"
 started_greenmail=1
 greenmail_up
 for i in $(seq 1 120); do
-  curl -s --max-time 2 -u test:test "imap://127.0.0.1:3143/" -X "NOOP" >/dev/null 2>&1 && break
+  curl -s --max-time 2 -u test:test "imap://127.0.0.1:3143/" -X "NOOP" >/dev/null 2>&1 &&
+    curl -s --max-time 2 --fail "http://127.0.0.1:3080/api/service/readiness" >/dev/null 2>&1 && break
   [ "$i" = 120 ] && { log "GreenMail did not start"; exit 1; }
   sleep 0.5
 done
 
 log "seeding fixtures"
 date_now=$(LC_ALL=C date -R)
-for f in "$here"/fixtures/seed/*.eml; do
+# The hostile fixtures (TestE2EInjectionDefaults) go into the same inbox.
+for f in "$here"/fixtures/seed/*.eml "$here"/fixtures/hostile/*.eml; do
   sed -e "s/@DATE@/$date_now/" -e 's/$/\r/' "$f" >"$MFT_E2E_DIR/seed.eml"
   curl -s --fail -u test:test --upload-file "$MFT_E2E_DIR/seed.eml" "imap://127.0.0.1:3143/INBOX"
 done
@@ -110,12 +112,17 @@ for folder in Trash Sorted Drafts Sent; do
 done
 # curl appends with \Seen; the seeded mail starts unread.
 curl -s --fail -u test:test "imap://127.0.0.1:3143/INBOX" -X 'STORE 1:* -FLAGS (\Seen)' >/dev/null
+# The second account (other@localhost, account3 in the profile) has one
+# folder of its own, the target of the cross-account move the injection
+# suite expects to be refused.
+curl -s --fail -u other:other "imap://127.0.0.1:3143/" -X "CREATE Elsewhere" >/dev/null
+curl -s --fail -u other:other "imap://127.0.0.1:3143/" -X "SUBSCRIBE Elsewhere" >/dev/null
 
 log "building the host and the add-on"
 (cd "$repo/host" && go build -o "$MFT_E2E_DIR/bin/mcp-for-thunderbird" ./cmd/mcp-for-thunderbird)
 cat >"$MFT_E2E_DIR/e2e-settings.json" <<EOF
 {
-  "accounts": {"account1": true},
+  "accounts": {"account1": true, "account3": true},
   "groups": {"read": true, "organise": true, "compose": true, "contacts": false},
   "send": {"enabled": true, "allow": ["@localhost"]},
   "attachmentDir": "$MFT_E2E_DIR/attachments",
@@ -131,7 +138,7 @@ log "starting Thunderbird"
 "$here/tb.sh" start
 conn=$("$here/tb.sh" wait-conn 120)
 log "connection file: $(basename "$conn")"
-n=$(ls "$here"/fixtures/seed/*.eml | wc -l)
+n=$(ls "$here"/fixtures/seed/*.eml "$here"/fixtures/hostile/*.eml | wc -l)
 synced=$("$here/tb.sh" sync "$n")
 case "$synced" in
   [0-9]*) log "inbox synchronised: $synced messages" ;;

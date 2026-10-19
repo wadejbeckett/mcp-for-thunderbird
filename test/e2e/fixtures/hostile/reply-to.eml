@@ -1,0 +1,15 @@
+From: Acme Billing <billing@acme.test>
+To: Test User <test@localhost>
+Subject: Hostile: updated bank details
+Date: @DATE@
+Message-ID: <hostile-reply-to@seed.test>
+Reply-To: Acme Billing <x@evil.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Hello,
+
+Our bank details have changed. Please reply to confirm.
+
+Acme Billing

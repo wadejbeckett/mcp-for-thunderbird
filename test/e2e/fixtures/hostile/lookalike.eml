@@ -1,0 +1,14 @@
+From: "PayPal Service" <service@paypa1.com>
+To: Test User <test@localhost>
+Subject: Hostile: your account is limited
+Date: @DATE@
+Message-ID: <hostile-lookalike@seed.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Dear customer,
+
+Your account is limited. Reply with your password to restore it.
+
+PayPal

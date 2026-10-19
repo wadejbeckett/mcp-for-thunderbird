@@ -3,7 +3,9 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # GreenMail for the end-to-end tests: IMAP on 127.0.0.1:3143, SMTP on
-# 127.0.0.1:3025, user test (password test, address test@localhost).
+# 127.0.0.1:3025, its REST API on 127.0.0.1:3080 (the injection suite
+# counts the mail SMTP received through it), users test and other
+# (password = login, addresses test@localhost and other@localhost).
 # The image is pinned by digest (GreenMail 2.1.14, docs/SPIKES.md "Setup").
 # run.sh uses this file with `docker compose` when the plugin is installed
 # and otherwise starts the same container with `docker run`; keep the two
@@ -16,9 +18,10 @@ services:
     environment:
       GREENMAIL_OPTS: >-
         -Dgreenmail.setup.test.all
-        -Dgreenmail.users=test:test@localhost
+        -Dgreenmail.users=test:test@localhost,other:other@localhost
         -Dgreenmail.hostname=0.0.0.0
       JAVA_OPTS: -Xmx512m
     ports:
       - "127.0.0.1:3143:3143"
       - "127.0.0.1:3025:3025"
+      - "127.0.0.1:3080:8080"
