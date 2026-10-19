@@ -16,6 +16,7 @@ import { dispatch } from "./rpc.js";
 // Handler modules register themselves in rpc.HANDLERS.
 import "./handlers/read.js";
 import "./handlers/contacts.js";
+import "./handlers/organise.js";
 
 export const HOST_NAME = "mcp_for_thunderbird";
 export const PROTOCOL = 1;

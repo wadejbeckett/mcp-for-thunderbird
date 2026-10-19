@@ -124,12 +124,19 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     getAttachmentFile: [],
     getFolderInfo: [],
     contactsQuery: [],
+    update: [],
+    move: [],
+    copy: [],
+    archive: [],
+    delete: [],
   };
   // hang: queries matching this predicate never settle (as some
   // Thunderbird searches do, docs/SPIKES.md §3); with returnMessageListId
   // the id comes back but the list's pages never do. delay(q) gives a
   // query's answer time in ms.
-  const behaviour = { hang: null, delay: null, inFlight: 0, maxInFlight: 0 };
+  // fail(op, id) true makes that organise call reject; stall(op) true makes
+  // it never settle.
+  const behaviour = { hang: null, delay: null, fail: null, stall: null, inFlight: 0, maxInFlight: 0 };
   // pages read per query (index into calls.query), first page included
   const pagesByQuery = new Map();
   const lists = new Map();
@@ -187,7 +194,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     },
     folders: {
       query: async (q = {}) =>
-        folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path)).map(clone),
+        folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path) && (q.specialUse == null || q.specialUse.some((u) => f.specialUse.includes(u)))).map(clone),
       get: async (id) => {
         const f = folderList.find((x) => x.id === id);
         if (!f) throw new Error(`Folder not found: ${id}`);
@@ -270,6 +277,51 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (rest.hang) return new Promise(() => {});
         lists.delete(listId);
         return page(rest.items, rest.per, false, rest.root);
+      },
+      // Organise calls (Task 15). Ids stay the same when a message moves.
+      update: async (id, props) => {
+        calls.update.push([id, clone(props)]);
+        await organiseGate("update", id);
+        const h = store.get(id);
+        if (!h) throw new Error(`Message not found: ${id}.`);
+        for (const k of ["read", "flagged", "tags"]) if (props[k] !== undefined) h[k] = clone(props[k]);
+      },
+      move: async (ids, dest) => {
+        calls.move.push([[...ids], dest]);
+        for (const id of ids) await organiseGate("move", id);
+        const f = folderList.find((x) => x.id === (typeof dest === "string" ? dest : dest && dest.id));
+        if (!f) throw new Error("Folder not found");
+        for (const id of ids) {
+          const h = store.get(id);
+          if (!h) throw new Error(`Message not found: ${id}.`);
+          h.folder = { ...f };
+        }
+      },
+      copy: async (ids, dest) => {
+        calls.copy.push([[...ids], dest]);
+        for (const id of ids) await organiseGate("copy", id);
+        const f = folderList.find((x) => x.id === (typeof dest === "string" ? dest : dest && dest.id));
+        if (!f) throw new Error("Folder not found");
+        for (const id of ids) {
+          const h = store.get(id);
+          if (!h) throw new Error(`Message not found: ${id}.`);
+          const nid = nextId++;
+          store.set(nid, { ...clone(h), id: nid, folder: { ...f } });
+        }
+      },
+      archive: async (ids) => {
+        calls.archive.push([...ids]);
+        for (const id of ids) await organiseGate("archive", id);
+        for (const id of ids) {
+          const h = store.get(id);
+          if (!h) throw new Error(`Message not found: ${id}.`);
+          const f = folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archive"));
+          if (f) h.folder = { ...f };
+        }
+      },
+      delete: async (ids) => {
+        calls.delete.push([...ids]);
+        for (const id of ids) store.delete(id);
       },
       tags: {
         list: async () => [
@@ -378,6 +430,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       onRemoved: event(),
     },
   };
+
+  async function organiseGate(op, id) {
+    if (behaviour.stall && behaviour.stall(op, id)) await new Promise(() => {});
+    if (behaviour.fail && behaviour.fail(op, id)) throw new Error(`${op} failed`);
+  }
 
   function page(items, per, emptyFirst = false, root = -1) {
     const take = emptyFirst ? [] : items.slice(0, per);

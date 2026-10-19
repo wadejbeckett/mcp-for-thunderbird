@@ -59,13 +59,13 @@ const ABORT_WAIT_MS = 1000;
 
 // At most 4 Thunderbird calls in flight, across all calls.
 const limiter = createLimiter(4);
-const TIMEOUT = Symbol("timeout");
+export const TIMEOUT = Symbol("timeout");
 
 const tb = () => globalThis.messenger;
 
 // A run is one handler call: its deadline, the message lists it has open,
 // and whether it ran out of time or failed.
-function newRun() {
+export function newRun() {
   return { deadline: Date.now() + SEARCH.budgetMs, open: new Set(), timedOut: false, failed: false };
 }
 
@@ -74,7 +74,7 @@ const listIdOf = (v) => (typeof v === "string" ? v : v && typeof v.id === "strin
 // call runs fn through the limiter and gives up at the run's deadline,
 // freeing its slot even when Thunderbird never answers. With list: true, a
 // message list that arrives after the timeout is aborted.
-function call(run, fn, { list = false } = {}) {
+export function call(run, fn, { list = false } = {}) {
   return limiter.run(() => {
     const left = run.deadline - Date.now();
     if (left <= 0) {
@@ -266,7 +266,7 @@ async function pointers(headers, known, run) {
 }
 
 // answered fails the call when Thunderbird did not answer in time.
-function answered(v) {
+export function answered(v) {
   if (v === TIMEOUT) fail("thunderbird_error", "Thunderbird did not answer in time.");
   return v;
 }
@@ -292,7 +292,7 @@ async function mailAccounts(args, ctx) {
 
 // ---- mail_folders ----
 
-const realFolder = (f, accountId) =>
+export const realFolder = (f, accountId) =>
   f && f.accountId === accountId && typeof f.path === "string" && !f.isRoot && !f.isVirtual && !f.isTag && !f.isUnified;
 
 const countOf = (v) => (Number.isInteger(v) ? v : null);
@@ -389,7 +389,7 @@ async function searchScope(base, { limit, untilMs, sinceMs, run, s }) {
   }
 }
 
-async function folderByPath(run, accountId, path) {
+export async function folderByPath(run, accountId, path) {
   const list = answered(await call(run, () => tb().folders.query({ accountId, path }))) || [];
   const f = list.find((x) => realFolder(x, accountId) && x.path === path);
   if (!f) fail("not_found", `Folder not found: ${path}`);

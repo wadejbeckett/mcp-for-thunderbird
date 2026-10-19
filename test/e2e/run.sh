@@ -101,6 +101,12 @@ for f in "$here"/fixtures/seed/*.eml; do
   curl -s --fail -u test:test --upload-file "$MFT_E2E_DIR/seed.eml" "imap://127.0.0.1:3143/INBOX"
 done
 rm -f "$MFT_E2E_DIR/seed.eml"
+# Folders for TestE2EOrganise: Thunderbird finds Trash by name, and
+# GreenMail starts with INBOX only.
+for folder in Trash Sorted; do
+  curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "CREATE $folder" >/dev/null
+  curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "SUBSCRIBE $folder" >/dev/null
+done
 # curl appends with \Seen; the seeded mail starts unread.
 curl -s --fail -u test:test "imap://127.0.0.1:3143/INBOX" -X 'STORE 1:* -FLAGS (\Seen)' >/dev/null
 

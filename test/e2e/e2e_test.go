@@ -16,9 +16,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/textproto"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -224,7 +226,8 @@ type pointer struct {
 		Name    string `json:"name"`
 		Address string `json:"address"`
 	} `json:"from"`
-	HasAttachments *bool `json:"hasAttachments"`
+	HasAttachments *bool    `json:"hasAttachments"`
+	Tags           []string `json:"tags"`
 }
 
 type searchResult struct {
@@ -505,6 +508,171 @@ func accountsOK(t *testing.T, cs *mcp.ClientSession, what string) {
 	text, isErr, err := tryCall(cs, "mail_accounts", map[string]any{})
 	if err != nil || isErr || !strings.Contains(text, "account1") {
 		t.Fatalf("%s: first call: err %v, tool error %v, %q", what, err, isErr, text)
+	}
+}
+
+// imapLookup asks GreenMail directly (IMAP on 127.0.0.1:3143, user test)
+// whether mailbox holds the message with this Message-ID, and returns its
+// flags. The e2e module imports only the go-sdk (ruling R1), so this is a
+// minimal client over net/textproto.
+func imapLookup(t *testing.T, mailbox, msgID string) (found bool, flags string) {
+	t.Helper()
+	conn, err := textproto.Dial("tcp", "127.0.0.1:3143")
+	if err != nil {
+		t.Fatalf("imap: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ReadLine(); err != nil { // greeting
+		t.Fatalf("imap greeting: %v", err)
+	}
+	// run sends one tagged command and returns its untagged lines and
+	// whether it completed OK.
+	n := 0
+	run := func(format string, a ...any) ([]string, bool) {
+		n++
+		tag := fmt.Sprintf("a%d", n)
+		if err := conn.PrintfLine(tag+" "+format, a...); err != nil {
+			t.Fatalf("imap: %v", err)
+		}
+		var lines []string
+		for {
+			line, err := conn.ReadLine()
+			if err != nil {
+				t.Fatalf("imap: %v", err)
+			}
+			if strings.HasPrefix(line, tag+" ") {
+				return lines, strings.HasPrefix(line, tag+" OK")
+			}
+			lines = append(lines, line)
+		}
+	}
+	if _, ok := run("LOGIN test test"); !ok {
+		t.Fatal("imap login failed")
+	}
+	if _, ok := run("EXAMINE %q", mailbox); !ok {
+		return false, "" // no such mailbox
+	}
+	lines, ok := run("UID SEARCH HEADER Message-ID %q", msgID)
+	if !ok {
+		t.Fatalf("imap search failed: %v", lines)
+	}
+	var uid string
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) >= 3 && f[0] == "*" && f[1] == "SEARCH" {
+			uid = f[2]
+		}
+	}
+	if uid == "" {
+		return false, ""
+	}
+	lines, ok = run("UID FETCH %s (FLAGS)", uid)
+	if !ok {
+		t.Fatalf("imap fetch failed: %v", lines)
+	}
+	m := regexp.MustCompile(`FLAGS \(([^)]*)\)`).FindStringSubmatch(strings.Join(lines, "\n"))
+	if m == nil {
+		t.Fatalf("imap: no flags in %v", lines)
+	}
+	return true, m[1]
+}
+
+// imapWait polls imapLookup until check accepts the state, as Thunderbird
+// writes its changes to the IMAP server a moment after the API call.
+func imapWait(t *testing.T, what, mailbox, msgID string, check func(found bool, flags string) bool) (bool, string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		found, flags := imapLookup(t, mailbox, msgID)
+		if check(found, flags) {
+			return found, flags
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %s/%s on the server: found %v, flags %q", what, mailbox, msgID, found, flags)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+type organised struct {
+	Done   []string `json:"done"`
+	Failed []struct {
+		ID   string `json:"id"`
+		Code string `json:"code"`
+	} `json:"failed"`
+}
+
+func (o organised) only(t *testing.T, tool, id string) {
+	t.Helper()
+	if len(o.Done) != 1 || o.Done[0] != id || len(o.Failed) != 0 {
+		t.Fatalf("%s = %+v, want only %s done", tool, o, id)
+	}
+}
+
+// TestE2EOrganise marks, tags, moves within the account and trashes a
+// message, and checks the server over IMAP: the trashed message is in Trash
+// and has not been expunged (no \Deleted flag), and mail_move refuses
+// Trash as a target.
+func TestE2EOrganise(t *testing.T) {
+	cs := httpSession(t)
+	const (
+		subj1 = "Sort me one"
+		id1   = "organise-one@seed.test"
+		subj2 = "Sort me two"
+	)
+	res, _ := searchUntil(t, cs, map[string]any{"text": "organise test"}, subj1)
+	one, two := find(res, subj1), find(res, subj2)
+	if one.ID == "" || two.ID == "" || one.Read {
+		t.Fatalf("seed messages: %+v / %+v", one, two)
+	}
+
+	// mark: read and flagged, seen in the add-on and on the server.
+	var o organised
+	callOK(t, cs, "mail_mark", map[string]any{"ids": []string{one.ID}, "read": true, "flagged": true}, &o)
+	o.only(t, "mail_mark", one.ID)
+	imapWait(t, "mark", "INBOX", id1, func(found bool, flags string) bool {
+		return found && strings.Contains(flags, `\Seen`) && strings.Contains(flags, `\Flagged`)
+	})
+	if r, _ := searchUntil(t, cs, map[string]any{"text": "organise test", "flagged": true}, subj1); !find(r, subj1).Read {
+		t.Fatalf("flagged search: %+v", r)
+	}
+
+	// tag: a known tag by label; an unknown one is refused.
+	callOK(t, cs, "mail_tag", map[string]any{"ids": []string{two.ID}, "add": []string{"important"}}, &o)
+	o.only(t, "mail_tag", two.ID)
+	// mail_search takes the tag key ($label1 is Thunderbird's "Important").
+	tagged, _ := searchUntil(t, cs, map[string]any{"tag": "$label1"}, subj2)
+	if got := find(tagged, subj2).Tags; len(got) != 1 || got[0] != "$label1" {
+		t.Fatalf("tags after mail_tag = %v", got)
+	}
+	if text, isErr := call(t, cs, "mail_tag", map[string]any{"ids": []string{two.ID}, "add": []string{"No such tag"}}); !isErr || !strings.HasPrefix(text, "invalid_argument:") {
+		t.Fatalf("unknown tag: %v %s", isErr, text)
+	}
+
+	// move within the account; Trash is not a mail_move target.
+	if text, isErr := call(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": "/Trash"}); !isErr || !strings.HasPrefix(text, "refused:") {
+		t.Fatalf("move to Trash: %v %s", isErr, text)
+	}
+	callOK(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": "/Sorted"}, &o)
+	o.only(t, "mail_move", one.ID)
+	imapWait(t, "move", "Sorted", id1, func(found bool, _ string) bool { return found })
+	imapWait(t, "move", "INBOX", id1, func(found bool, _ string) bool { return !found })
+	moved, _ := searchUntil(t, cs, map[string]any{"folder": "/Sorted"}, subj1)
+	sorted := find(moved, subj1)
+	if sorted.Folder != "Sorted" && sorted.Folder != "/Sorted" {
+		t.Fatalf("moved message is in %q", sorted.Folder)
+	}
+
+	// trash: the message lands in Trash, flagged nothing, not expunged.
+	callOK(t, cs, "mail_trash", map[string]any{"ids": []string{sorted.ID}}, &o)
+	o.only(t, "mail_trash", sorted.ID)
+	_, flags := imapWait(t, "trash", "Trash", id1, func(found bool, _ string) bool { return found })
+	if strings.Contains(flags, `\Deleted`) {
+		t.Fatalf("trashed message is marked deleted on the server: %q", flags)
+	}
+	imapWait(t, "trash", "Sorted", id1, func(found bool, _ string) bool { return !found })
+	trashed, _ := searchUntil(t, cs, map[string]any{"folder": "/Trash"}, subj1)
+	if p := find(trashed, subj1); p.Folder != "Trash" && p.Folder != "/Trash" {
+		t.Fatalf("trashed message is in %q", p.Folder)
 	}
 }
 

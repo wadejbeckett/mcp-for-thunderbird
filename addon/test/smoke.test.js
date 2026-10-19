@@ -29,6 +29,7 @@ test("manifest is MV3 with a module event page and the agreed permissions", () =
     "messagesMove",
     "messagesUpdate",
     "messagesTags",
+    "messagesTagsList",
     "messagesImport",
     "messages.save",
     "compose",
