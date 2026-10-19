@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up MCP for Thunderbird</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<main>
+<h1>Set up MCP for Thunderbird</h1>
+<p class="lead">MCP for Thunderbird lets AI apps on this computer work with your mail, within the limits you choose here. You can change every choice later in the add-on options.</p>
+
+<section id="step-accounts">
+<h2>1. Choose the accounts</h2>
+<p>AI apps can use only the accounts you tick. None are ticked to begin with.</p>
+<div id="accounts" class="choices"></div>
+<p id="accounts-empty" class="hint" hidden>No mail accounts were found in Thunderbird.</p>
+</section>
+
+<section id="step-level">
+<h2>2. Choose what AI apps may do</h2>
+<div id="levels" class="choices">
+<label><input type="radio" name="level" value="read_only"> <strong>Read only</strong><span class="hint">Search and read mail.</span></label>
+<label><input type="radio" name="level" value="read_organise" checked> <strong>Read and organise</strong> <span class="badge">Suggested</span><span class="hint">Also mark, tag, move, archive and bin mail. Nothing is deleted for good.</span></label>
+<label><input type="radio" name="level" value="read_organise_draft"> <strong>Read, organise and draft</strong><span class="hint">Also write drafts and open pre-filled messages for you to review. Nothing is sent without you.</span></label>
+</div>
+</section>
+
+<section id="step-clients">
+<h2>3. Set up AI apps</h2>
+<p>MCP for Thunderbird can look for AI apps on this computer and set them up for you.</p>
+<button type="button" id="detect">Set up AI apps</button>
+<div id="clients" class="choices" hidden></div>
+<button type="button" id="configure" hidden>Set up the ticked apps</button>
+<p id="clients-status" class="status" role="status" aria-live="polite"></p>
+</section>
+
+<section id="step-finish">
+<h2>4. Finish</h2>
+<button type="button" id="finish" class="primary">Finish</button>
+<p id="finish-status" class="status" role="status" aria-live="polite"></p>
+</section>
+</main>
+<script type="module" src="setup.js"></script>
+</body>
+</html>

@@ -11,7 +11,8 @@
 // the first reconnect is immediate (docs/SPIKES.md §1) and the backoff is
 // capped at 25 s (ruling R17).
 
-import { load, enabledTools, STORAGE_KEY } from "./settings.js";
+import { load, save, enabledTools, STORAGE_KEY } from "./settings.js";
+import { list as logList, clear as logClear } from "./log.js";
 import { dispatch } from "./rpc.js";
 // Handler modules register themselves in rpc.HANDLERS.
 import "./handlers/read.js";
@@ -349,23 +350,49 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     return Promise.resolve(true);
   }
 
-  // UI pages (Task 17) reach the background through runtime messaging.
+  // UI pages (setup, options, popup) reach the background through
+  // runtime messaging and never touch the native port. The reply is a
+  // promise, or undefined for a message that is not ours.
+  async function getState() {
+    return { state: state(), paused: (await load()).paused };
+  }
+
+  async function setPaused(value) {
+    if (typeof value !== "boolean") throw new Error("Paused must be true or false.");
+    await save({ paused: value });
+    return { paused: value };
+  }
+
+  async function getEndpoint() {
+    const { url } = await requestToken();
+    return { url };
+  }
+
+  async function listLog(limit) {
+    const all = await logList();
+    const n = Number.isInteger(limit) && limit > 0 ? limit : all.length;
+    return all.slice(-n).reverse();
+  }
+
+  const ROUTES = {
+    getState: () => getState(),
+    setPaused: (msg) => setPaused(msg.paused),
+    requestToken: () => requestToken(),
+    getEndpoint: () => getEndpoint(),
+    detectClients: () => detectClients(),
+    configureClients: (msg) => configureClients(Array.isArray(msg.clients) ? msg.clients : []),
+    rotateToken: () => rotateToken(),
+    listLog: (msg) => listLog(msg.limit),
+    clearLog: async () => {
+      await logClear();
+      return true;
+    },
+  };
+
   function onRuntimeMessage(msg, sender) {
     if (!msg || typeof msg !== "object" || (sender && sender.id !== m().runtime.id)) return undefined;
-    switch (msg.type) {
-      case "status":
-        return Promise.resolve({ state: state() });
-      case "token_request":
-        return requestToken();
-      case "rotate_token":
-        return rotateToken();
-      case "clients_detect":
-        return detectClients();
-      case "clients_configure":
-        return configureClients(Array.isArray(msg.clients) ? msg.clients : []);
-      default:
-        return undefined;
-    }
+    const route = Object.hasOwn(ROUTES, msg.type) ? ROUTES[msg.type] : null;
+    return route ? route(msg) : undefined;
   }
 
   async function onInstalled(details) {

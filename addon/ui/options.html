@@ -1,0 +1,90 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP for Thunderbird options</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<main>
+<h1>MCP for Thunderbird</h1>
+<p id="state" class="state" role="status" aria-live="polite"></p>
+
+<form id="form" novalidate>
+<section>
+<h2>Accounts</h2>
+<p>AI apps can use only the accounts you tick.</p>
+<div id="accounts" class="choices"></div>
+<p id="accounts-empty" class="hint" hidden>No mail accounts were found in Thunderbird.</p>
+</section>
+
+<section>
+<h2>What AI apps may do</h2>
+<div class="choices">
+<label><input type="checkbox" id="group-read"> <strong>Read mail</strong><span class="hint">Search, read, list folders and attachments.</span></label>
+<label><input type="checkbox" id="group-organise"> <strong>Organise mail</strong><span class="hint">Mark, tag, move, archive and bin mail.</span></label>
+<label><input type="checkbox" id="group-compose"> <strong>Draft mail</strong><span class="hint">Write drafts and open pre-filled messages for you to review.</span></label>
+<label><input type="checkbox" id="group-contacts"> <strong>Search contacts</strong><span class="hint">Look people up in your address books.</span></label>
+</div>
+</section>
+
+<section>
+<h2>Sending</h2>
+<div class="choices">
+<label><input type="checkbox" id="send-enabled"> <strong>Allow sending without a window</strong><span class="hint">AI apps can send mail to the addresses below with no review. Thunderbird will ask you to allow this.</span></label>
+</div>
+<label for="send-allow">Allowed recipients, one per line</label>
+<p class="hint">Use a full address (anna@example.com) or a whole domain (@example.com). Domains with accented or non-Latin letters must be written in their punycode form (xn--...).</p>
+<textarea id="send-allow" rows="5" spellcheck="false" autocomplete="off"></textarea>
+<p id="send-allow-error" class="error" role="alert"></p>
+</section>
+
+<section>
+<h2>Attachment folder</h2>
+<label for="attachment-dir">Folder for saved attachments</label>
+<p class="hint">The full path of a folder on this computer. AI apps can save and attach files only in this folder. It is created the first time you save.</p>
+<input type="text" id="attachment-dir" spellcheck="false" autocomplete="off">
+<p id="attachment-dir-error" class="error" role="alert"></p>
+</section>
+
+<section>
+<h2>Excluded folders</h2>
+<p>Tick any folder AI apps must never see or move mail into. Only folders of ticked accounts are listed.</p>
+<div id="excluded" class="choices"></div>
+<p id="excluded-empty" class="hint" hidden>Tick an account above to choose folders to exclude.</p>
+</section>
+
+<p class="actions"><button type="submit" id="save" class="primary">Save changes</button></p>
+<p id="save-status" class="status" role="status" aria-live="polite"></p>
+<p id="restart-note" class="note" hidden>If an AI app does not see changes, restart it.</p>
+</form>
+
+<section>
+<h2>Pause</h2>
+<p><button type="button" id="pause">Pause</button></p>
+</section>
+
+<section>
+<h2>Connection details</h2>
+<p>Most AI apps are set up for you and need nothing here. For an app you set up by hand, use this address and send the access key in an Authorization header as a bearer token.</p>
+<p>Address: <code id="endpoint">Not available yet</code></p>
+<p><button type="button" id="copy-token">Copy token</button> <button type="button" id="rotate">Rotate access key</button></p>
+<p class="hint">Rotating the access key signs out any app that has the old key. Apps set up by MCP for Thunderbird pick up the new key by themselves.</p>
+<p id="connection-status" class="status" role="status" aria-live="polite"></p>
+</section>
+
+<section>
+<h2>Activity log</h2>
+<p>The last 500 requests from AI apps: time, app, tool and outcome. Message text and addresses are never recorded.</p>
+<p><button type="button" id="clear-log">Clear log</button></p>
+<ul id="log" class="log"></ul>
+<p id="log-empty" class="hint" hidden>No activity yet.</p>
+</section>
+</main>
+<script type="module" src="options.js"></script>
+</body>
+</html>

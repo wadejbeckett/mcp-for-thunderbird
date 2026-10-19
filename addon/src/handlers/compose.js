@@ -27,6 +27,7 @@
 
 import { HANDLERS } from "../rpc.js";
 import { encodeId } from "../ids.js";
+import { isPlainAddress } from "../address.js";
 import { assertFolderAllowed, enabledAccountIds } from "../policy.js";
 import { fail, ToolError } from "../errors.js";
 import { htmlToText, stripInvisible } from "../clean.js";
@@ -56,19 +57,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- allowlist ----
 
-// PLAIN is an addr-spec with a simple local part (letters, digits and
-// . _ + -, dots only between other characters) and a domain of
-// letter-digit-hyphen labels (punycode, never Unicode). Anything else
-// fails closed. Thunderbird's parser keeps a quoted local part such as
-// "a@evil.com,b"@allowed.com as one address, but sendMessage splits
-// recipient strings at that comma (ruling R27); and an RFC 2047 encoded
-// word such as =?utf-8?q?x=40evil=2Ecom?=@allowed.com is plain atext, but
-// MessageSend decodes it into the envelope recipient (ruling R28).
-const ATOM = "[A-Za-z0-9_+-]+";
-const LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?";
-const PLAIN = new RegExp(`^${ATOM}(?:\\.${ATOM})*@${LABEL}(?:\\.${LABEL})*$`);
-
-export const isPlainAddress = (address) => typeof address === "string" && address.length <= 254 && PLAIN.test(address);
+// isPlainAddress (src/address.js) is the one rule for a sendable address,
+// shared with the options page's allowlist check.
+export { isPlainAddress };
 
 // isAllowed says whether an addr-spec passes the allowlist. Only a plain
 // address can pass. Entries are an exact address, or a domain

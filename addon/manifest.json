@@ -16,7 +16,8 @@
     "type": "module"
   },
   "action": {
-    "default_title": "MCP for Thunderbird"
+    "default_title": "MCP for Thunderbird",
+    "default_popup": "ui/popup.html"
   },
   "permissions": [
     "accountsRead",
@@ -33,5 +34,9 @@
   ],
   "optional_permissions": [
     "messages.send"
-  ]
+  ],
+  "options_ui": {
+    "page": "ui/options.html",
+    "open_in_tab": true
+  }
 }

@@ -90,6 +90,9 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const tabs = [];
   const actionState = { badgeText: "", title: "", badgeColor: null };
   const perms = new Set(granted);
+  const requested = [];
+  const denyRequests = { value: false };
+  let optionsOpened = 0;
 
   const folderList = [];
   for (const a of accounts) {
@@ -157,6 +160,9 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     runtime: {
       id: "mcp-for-thunderbird@wadejbeckett.github.io",
       getManifest: () => manifest,
+      openOptionsPage: async () => {
+        optionsOpened++;
+      },
       getURL: (p) => `moz-extension://test-uuid/${p.replace(/^\//, "")}`,
       connectNative: (name) => {
         const p = new MockPort(name);
@@ -485,6 +491,15 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     },
     permissions: {
       contains: async ({ permissions = [] }) => permissions.every((p) => perms.has(p)),
+      // request grants what is asked unless denyRequests is set; every
+      // request is recorded.
+      request: async ({ permissions = [] }) => {
+        requested.push([...permissions]);
+        if (denyRequests.value) return false;
+        for (const p of permissions) perms.add(p);
+        messenger.permissions.onAdded.fire({ permissions, origins: [] });
+        return true;
+      },
       onAdded: event(),
       onRemoved: event(),
     },
@@ -554,6 +569,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         store.set(id, { ...h, id });
       });
     },
+    permissionRequests: requested,
+    denyRequests: (v = true) => {
+      denyRequests.value = v;
+    },
+    optionsOpened: () => optionsOpened,
     grant(p) {
       perms.add(p);
       messenger.permissions.onAdded.fire({ permissions: [p], origins: [] });

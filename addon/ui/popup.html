@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP for Thunderbird</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body class="popup">
+<main>
+<h1>MCP for Thunderbird</h1>
+<p id="state" class="state" role="status" aria-live="polite"></p>
+<p><button type="button" id="pause">Pause</button></p>
+<h2>Recent activity</h2>
+<ul id="log" class="log"></ul>
+<p id="log-empty" class="hint" hidden>No activity yet.</p>
+<p><a href="#" id="open-options">Open options</a></p>
+</main>
+<script type="module" src="popup.js"></script>
+</body>
+</html>
