@@ -52,7 +52,7 @@ afterEach(() => bg.stop());
 
 const send = async (msg) => {
   const [handler] = mock.messenger.runtime.onMessage.listeners;
-  const r = handler(msg, { id: mock.messenger.runtime.id });
+  const r = handler(msg, { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") });
   if (r === undefined) throw new Error(`no route for ${msg.type}`);
   return r;
 };
@@ -351,6 +351,12 @@ test("the restart note shows only when the tool set changed", async () => {
   await flush();
   assert.equal(p.$("restart-note").hidden, false);
   assert.equal((await load()).groups.compose, true);
+});
+
+test("setup copy for the draft level says direct sending needs the options", () => {
+  const p = page("setup.html");
+  const hint = p.document.querySelector('input[value="read_organise_draft"]').parentElement.querySelector(".hint");
+  assert.equal(hint.textContent, "Also write drafts and open pre-filled messages for you to review. Nothing is sent without you unless you turn on direct sending in the options.");
 });
 
 test("TestTokenNeverPersisted", async () => {

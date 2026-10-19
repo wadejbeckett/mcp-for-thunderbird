@@ -252,11 +252,12 @@ test("UI requests through runtime messaging, and pending requests fail on discon
   const port = mock.lastPort();
   welcome(port);
   const [handler] = mock.messenger.runtime.onMessage.listeners;
-  const p = handler({ type: "requestToken" }, { id: mock.messenger.runtime.id });
+  const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/popup.html") };
+  const p = handler({ type: "requestToken" }, me);
   await flush();
   port.drop();
   await assert.rejects(p, /not connected/i);
-  const st = await handler({ type: "getState" }, { id: mock.messenger.runtime.id });
+  const st = await handler({ type: "getState" }, me);
   assert.equal(st.state, "not_connected");
   assert.equal(st.paused, false);
 });
@@ -266,7 +267,7 @@ test("message router: getState, setPaused, log and unknown types", async () => {
   const port = mock.lastPort();
   welcome(port);
   const [handler] = mock.messenger.runtime.onMessage.listeners;
-  const me = { id: mock.messenger.runtime.id };
+  const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
   assert.deepEqual(await handler({ type: "getState" }, me), { state: "connected", paused: false });
   assert.deepEqual(await handler({ type: "setPaused", paused: true }, me), { paused: true });
   assert.equal((await load()).paused, true);
@@ -288,12 +289,28 @@ test("message router: getState, setPaused, log and unknown types", async () => {
   assert.equal(handler({ type: "getState" }, { id: "other@addon" }), undefined, "other senders are ignored");
 });
 
+test("message router fails closed on a missing or foreign sender", async () => {
+  await bg.start();
+  welcome(mock.lastPort());
+  const [handler] = mock.messenger.runtime.onMessage.listeners;
+  const rt = mock.messenger.runtime;
+  const msg = { type: "getState" };
+  assert.equal(handler(msg), undefined, "no sender");
+  assert.equal(handler(msg, null), undefined, "null sender");
+  assert.equal(handler(msg, {}), undefined, "sender without an id");
+  assert.equal(handler(msg, { id: rt.id }), undefined, "sender without a url");
+  assert.equal(handler(msg, { id: rt.id, url: "https://evil.test/ui/options.html" }), undefined, "web page url");
+  assert.equal(handler(msg, { id: rt.id, url: "moz-extension://other-uuid/ui/options.html" }), undefined, "another extension's url");
+  assert.equal(handler(msg, { id: "other@addon", url: rt.getURL("ui/options.html") }), undefined, "another id");
+  assert.deepEqual(await handler(msg, { id: rt.id, url: rt.getURL("ui/popup.html") }), { state: "connected", paused: false });
+});
+
 test("message router: rotateToken, detectClients, configureClients and getEndpoint", async () => {
   await bg.start();
   const port = mock.lastPort();
   welcome(port);
   const [handler] = mock.messenger.runtime.onMessage.listeners;
-  const me = { id: mock.messenger.runtime.id };
+  const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
   assert.equal(await handler({ type: "rotateToken" }, me), true);
   assert.equal(port.sentOfType("rotate_token").length, 1);
 
@@ -308,10 +325,22 @@ test("message router: rotateToken, detectClients, configureClients and getEndpoi
   assert.equal((await d)[0].name, "codex");
   assert.equal((await c)[0].configured, true);
 
-  const e = handler({ type: "getEndpoint" }, me);
+  assert.deepEqual(await handler({ type: "getEndpoint" }, me), { url: "http://127.0.0.1:47110/mcp" }, "the endpoint reply never carries the token");
+  assert.equal(port.sentOfType("token_request").length, 0, "getEndpoint never asks the host for the token");
+});
+
+test("getEndpoint comes from the welcome port and fails while not connected", async () => {
+  await bg.start();
+  const port = mock.lastPort();
+  const [handler] = mock.messenger.runtime.onMessage.listeners;
+  const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
+  await assert.rejects(handler({ type: "getEndpoint" }, me), /not connected/);
+  welcome(port, { port: 47113 });
+  assert.deepEqual(await handler({ type: "getEndpoint" }, me), { url: "http://127.0.0.1:47113/mcp" });
+  port.drop();
   await flush();
-  port.receive({ type: "token", token: "f".repeat(64), url: "http://127.0.0.1:47110/mcp" });
-  assert.deepEqual(await e, { url: "http://127.0.0.1:47110/mcp" }, "the endpoint reply never carries the token");
+  await assert.rejects(handler({ type: "getEndpoint" }, me), /not connected/);
+  assert.equal(port.sentOfType("token_request").length, 0);
 });
 
 test("a refused call during a mismatch still frees its blobs", async () => {

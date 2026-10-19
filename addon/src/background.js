@@ -55,6 +55,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   const m = () => globalThis.messenger;
   let port = null;
   let welcomed = false;
+  let endpointPort = null; // the host's HTTP port from the last welcome
   let mismatch = false;
   let paused = false;
   let attempt = 0;
@@ -121,6 +122,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     timer = null;
     if (stopped) return;
     welcomed = false;
+    endpointPort = null;
     mismatch = false;
     helloSent = false;
     let p;
@@ -172,6 +174,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     if (port !== p) return;
     port = null;
     welcomed = false;
+    endpointPort = null;
     mismatch = false;
     blobs.clear();
     failPending(NOT_CONNECTED);
@@ -186,6 +189,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
         welcomed = true;
         attempt = 0;
         mismatch = msg.ok === false || msg.protocol !== PROTOCOL;
+        endpointPort = Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536 ? msg.port : null;
         showState();
         return;
       case "blob":
@@ -363,9 +367,11 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     return { paused: value };
   }
 
+  // getEndpoint derives the URL from the port in the host's welcome; it
+  // never asks the host for the token.
   async function getEndpoint() {
-    const { url } = await requestToken();
-    return { url };
+    if (!port || !welcomed || mismatch || endpointPort === null) throw new Error(NOT_CONNECTED);
+    return { url: `http://127.0.0.1:${endpointPort}/mcp` };
   }
 
   async function listLog(limit) {
@@ -389,8 +395,16 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     },
   };
 
+  // ourPage fails closed: only a sender that is this add-on and one of its
+  // own pages (moz-extension://<our uuid>/...) is answered.
+  function ourPage(sender) {
+    const rt = m().runtime;
+    if (!sender || typeof sender !== "object" || sender.id !== rt.id) return false;
+    return typeof sender.url === "string" && sender.url.startsWith(rt.getURL(""));
+  }
+
   function onRuntimeMessage(msg, sender) {
-    if (!msg || typeof msg !== "object" || (sender && sender.id !== m().runtime.id)) return undefined;
+    if (!msg || typeof msg !== "object" || !ourPage(sender)) return undefined;
     const route = Object.hasOwn(ROUTES, msg.type) ? ROUTES[msg.type] : null;
     return route ? route(msg) : undefined;
   }
