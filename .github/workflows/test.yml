@@ -17,6 +17,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh docs/check-docs.sh
+
   addon:
     runs-on: ubuntu-latest
     defaults:

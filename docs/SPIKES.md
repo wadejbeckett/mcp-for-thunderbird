@@ -1,4 +1,4 @@
-# Spike results (Task 2)
+# Spike results
 
 Run on 19 October 2026 on Linux Mint, Thunderbird 153.4.0esr (deb package `1:153.4.0esr+linuxmint1`), in throwaway profiles under Xvfb. The spike code is in `spikes/`. It is throwaway and never shipped.
 
@@ -9,8 +9,8 @@ Run on 19 October 2026 on Linux Mint, Thunderbird 153.4.0esr (deb package `1:153
 | Manifest version | **`MANIFEST_VERSION` 3.** An open native port kept the MV3 event page alive for 2 h 48 min, with and without pings. |
 | `messages.send` as an optional permission | **Optional, and it must be.** On 153 the permission can only be optional, and a required entry is silently dropped. A request from an options-page click works. It must be requested on its own, never from the background. |
 | Reply draft | **`messages.saveMessage` cannot make a threaded reply.** It drops `In-Reply-To` and `References`. Use `messages.import` of a hand-built RFC 5322 message into the identity's Drafts folder (recipe below). Use `saveMessage` only for new, non-reply drafts. |
-| `fullText` latency | **Median 48.1 s** to drain all 500 matches in a 100,000-message folder. A first page of 25 takes 1.8 s, and a date-scoped search over the newest 5,000 messages takes 1.6 s. Keep `limit` at 25 (max 200). Task 11 must bound every body search with a date window, run newest window first, and pass a folder hint. |
-| Native messaging | **Linux deb: works.** Snap and Flatpak are untested on this machine (ruling R5). Windows and macOS are tested in Task 21. |
+| `fullText` latency | **Median 48.1 s** to drain all 500 matches in a 100,000-message folder. A first page of 25 takes 1.8 s, and a date-scoped search over the newest 5,000 messages takes 1.6 s. Keep `limit` at 25 (max 200). `mail_search` must bound every body search with a date window, run newest window first, and pass a folder hint. |
+| Native messaging | **Linux deb: works.** Snap and Flatpak are untested on this machine: installing them was not approved for the spikes. Windows and macOS are covered in [PLATFORMS.md](PLATFORMS.md). |
 | EWS | **Untested, best effort.** No Exchange test mailbox. |
 
 ## Setup
@@ -162,13 +162,13 @@ Content-Transfer-Encoding: 7bit
 
 Body scan rate: about 2,100 messages a second for 1.5 KB messages. Real mail is larger, so expect slower.
 
-**Behaviour that Task 11 depends on.**
+**Behaviour that `mail_search` depends on.**
 - **Order.** Results come in folder storage order, oldest first. The first page of a `fullText` query was `bulk-200`, `bulk-400` and so on, from January 2024. A "first 25" without a date bound returns the oldest matches.
 - **Case.** `fullText` and `subject` are case-sensitive substring matches (`String.includes`, no case folding). The author match uses the full decoded `Name <addr>` string.
 - **Dates.** Pass `fromDate` and `toDate` as real `Date` objects. An ISO string is accepted by the schema, but the query then never settles: `getTime` is not a function inside the search. The spike hung for more than 6 minutes this way. Converting to `Date` fixed it (3.5 s for a 5,001-message date range).
 - **Abort.** `messages.abortList(listId)` after the first page returned promptly in all runs.
 
-**Decision for Task 11.**
+**Decision for `mail_search`.**
 - **Limits.** Keep `limit` at default 25 and max 200. Use `autoPaginationTimeout: 0`, `messagesPerPage = limit`, and abort the list after the first page.
 - **Date windows.** Never run an unbounded `fullText` or `body` search across a large folder. Search newest first in date windows, for example the last 30 days, then 180 days, then all, stopping when `limit` is reached or the call budget runs out. Stop after a 20 s budget per call, return what was found, and add a note that the search was cut short and how to narrow it.
 - **Folder hint.** When the result is cut short, the tool text should suggest a `folder` and a date range.
@@ -196,9 +196,9 @@ Body scan rate: about 2,100 messages a second for 1.5 KB messages. Real mail is 
 | Platform | Result |
 |---|---|
 | Linux, deb (Mint `153.4.0esr+linuxmint1`) | **Works.** <ul><li>The host manifest is read from `~/.mozilla/native-messaging-hosts/<name>.json`.</li><li>The host is started with arguments `[<manifest path>, <add-on id>]` and inherits Thunderbird's environment.</li><li>Three Thunderbird instances (separate profiles) ran at once, each starting its own host process.</li><li>Frames are 32-bit native-endian length-prefixed JSON.</li><li>The port stayed up for 2 h 48 min.</li></ul> |
-| Linux, Snap | **Untested on this machine.** Not installed; installing it is not approved (ruling R5). Bug 1940050 (native messaging in Snap) is marked resolved upstream. |
-| Linux, Flatpak | **Untested on this machine.** `flatpak` is present but no Thunderbird Flatpak is installed; installing one is not approved (R5). `flatpak override --user --filesystem=~/.mozilla/native-messaging-hosts:ro org.mozilla.Thunderbird` was therefore not tried. A Flatpak sandbox also cannot run a host binary that lives outside the sandbox, so this needs a test before Flatpak support is claimed. |
-| Windows, macOS | Task 21. |
+| Linux, Snap | **Untested on this machine.** Not installed; installing it was not approved for the spikes. Bug 1940050 (native messaging in Snap) is marked resolved upstream. |
+| Linux, Flatpak | **Untested on this machine.** `flatpak` is present but no Thunderbird Flatpak is installed; installing one was not approved for the spikes. `flatpak override --user --filesystem=~/.mozilla/native-messaging-hosts:ro org.mozilla.Thunderbird` was therefore not tried. A Flatpak sandbox also cannot run a host binary that lives outside the sandbox, so this needs a test before Flatpak support is claimed. |
+| Windows, macOS | See [PLATFORMS.md](PLATFORMS.md). |
 
 ## 6. EWS (native Exchange accounts)
 
@@ -211,7 +211,7 @@ Body scan rate: about 2,100 messages a second for 1.5 KB messages. Real mail is 
 - **Lookup by Message-ID.** `messages.query({headerMessageId})` is the lookup by `Message-ID` that the opaque id scheme needs.
 - **Marionette.** It works on 153 with `--marionette --remote-allow-system-access`. It is useful for the end-to-end harness set-up (stored logins), never in the product.
 
-# Milestone 2: end-to-end on Linux (Task 14)
+# Milestone 2: end-to-end on Linux
 
 Run on 19 October 2026 on the same machine, Thunderbird 153.4.0esr (deb), with `test/e2e/run.sh`: GreenMail (the pinned image above, container `mft-greenmail`), a throwaway profile under `$TMPDIR/mft-e2e-profile`, the add-on built with `packaging/build-xpi.mjs --e2e-settings`, the real host, and `go test` in `test/e2e` as the MCP client (go-sdk v1.8.0). Thunderbird ran under its own Xvfb with `HOME` set to a throwaway directory, so the native manifest and the connection file never touched the real home. All six tests passed: `TestE2ERead`, `TestE2EFolderSearch`, `TestE2ENullOptionals`, `TestE2EConnectStdio`, `TestE2EToolbar` and `TestE2EConnectRestart`.
 

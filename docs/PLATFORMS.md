@@ -6,7 +6,7 @@ MCP for Thunderbird is tested on Linux, Windows and macOS. This page records wha
 
 Two workflows run on every push to `v1`:
 
-- `test` (`.github/workflows/test.yml`): the add-on tests (`npm test`) and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
+- `test` (`.github/workflows/test.yml`): the documentation check (`docs/check-docs.sh`) and the add-on tests (`npm test`) on `ubuntu-latest`, and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
 - `platforms` (`.github/workflows/platforms.yml`, also started by hand with "Run workflow"):
   1. `build` (Linux): the GoReleaser snapshot with `packaging/build.sh`, then `packaging/check.sh` and its self-test.
   2. `windows-installer` (Windows): installs Inno Setup with Chocolatey (on the runner only) and compiles `packaging/windows/installer.iss` for amd64 and arm64. It then installs the amd64 build silently and checks the following:
@@ -83,7 +83,7 @@ Record the results here (date, OS version, Thunderbird version, pass or fail per
 
 Each run below found or confirmed one thing.
 
-- [39332126741](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39332126741) (`test`, before Task 21's fixes) failed on all three systems. The causes:
+- [39332126741](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39332126741) (`test`, before the cross-platform fixes) failed on all three systems. The causes:
   - Path comparisons in the tests did not resolve symlinks: macOS `/var` → `/private/var`, and Windows short names such as `RUNNER~1`.
   - The tests assumed Linux locations for the configuration folder and the manifest.
   - On Windows, the test built the host without `.exe`, and its binary path `/opt/...` is not absolute there.
