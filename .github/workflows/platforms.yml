@@ -12,6 +12,15 @@ name: platforms
 
 on:
   workflow_dispatch:
+    inputs:
+      reuse_run:
+        description: "Run id whose dist-win and dist-mac artifacts the e2e jobs reuse (skips the build jobs)"
+        default: ""
+      e2e:
+        description: "End-to-end jobs to run"
+        type: choice
+        options: [both, windows, macos]
+        default: both
   push:
     branches: [v1]
     paths:
@@ -23,6 +32,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # download-artifact from an earlier run (reuse_run)
 
 concurrency:
   group: platforms-${{ github.ref }}
@@ -38,6 +48,7 @@ env:
 
 jobs:
   build:
+    if: ${{ !inputs.reuse_run }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -209,6 +220,7 @@ jobs:
 
   e2e-windows:
     needs: windows-installer
+    if: ${{ !cancelled() && (needs.windows-installer.result == 'success' || inputs.reuse_run) && inputs.e2e != 'macos' }}
     runs-on: windows-latest
     defaults:
       run:
@@ -233,6 +245,8 @@ jobs:
         with:
           name: dist-win
           path: dist-win
+          run-id: ${{ inputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Install Thunderbird, psutil and GreenMail (runner only)
         run: |
           $ErrorActionPreference = 'Stop'
@@ -258,6 +272,7 @@ jobs:
 
   e2e-macos:
     needs: macos-pkg
+    if: ${{ !cancelled() && (needs.macos-pkg.result == 'success' || inputs.reuse_run) && inputs.e2e != 'windows' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -279,6 +294,8 @@ jobs:
         with:
           name: dist-mac
           path: dist-mac
+          run-id: ${{ inputs.reuse_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Install Thunderbird, psutil and GreenMail (runner only)
         run: |
           set -eu

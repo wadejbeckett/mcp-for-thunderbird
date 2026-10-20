@@ -255,7 +255,7 @@ def tb_stop():
     PIDFILE.unlink(missing_ok=True)
 
 
-def wait_conn(limit=120):
+def wait_conn(limit=120, fatal=True):
     d = config_dir() / "mcp-for-thunderbird"
     deadline = time.time() + limit
     while time.time() < deadline:
@@ -267,7 +267,55 @@ def wait_conn(limit=120):
             if pid and psutil.pid_exists(pid):
                 return str(f)
         time.sleep(0.5)
-    die(f"no connection file after {limit}s")
+    if fatal:
+        die(f"no connection file after {limit}s")
+    return None
+
+
+DIAG_JS = """
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const id = "ADDON_ID";
+  const out = { home: Services.env.get("HOME"), appdata: Services.env.get("APPDATA") };
+  try {
+    const { AddonManager } = ChromeUtils.importESModule("resource://gre/modules/AddonManager.sys.mjs");
+    const a = await AddonManager.getAddonByID(id);
+    out.addon = a && { active: a.isActive, userDisabled: a.userDisabled, appDisabled: a.appDisabled,
+      version: a.version, signedState: a.signedState, location: a.location && a.location.name };
+  } catch (e) { out.addonError = String(e); }
+  for (const key of ["XREUserNativeManifests", "XRESysNativeManifests"]) {
+    try { out[key] = Services.dirsvc.get(key, Ci.nsIFile).path; } catch (e) { out[key] = "error: " + e; }
+  }
+  try {
+    const { NativeManifests } = ChromeUtils.importESModule("resource://gre/modules/NativeManifests.sys.mjs");
+    const r = await NativeManifests.lookupManifest("stdio", "mcp_for_thunderbird", { id });
+    out.lookup = r ? r.path : null;
+  } catch (e) { out.lookupError = String(e); }
+  out.console = Services.console.getMessageArray().map((m) => String(m.message || m.errorMessage || m))
+    .filter((m) => /native|mcp|extension|addon|connect/i.test(m)).slice(-30);
+  return JSON.stringify(out, null, 1);
+})().then(resolve, (e) => resolve("error: " + e));
+"""
+
+
+def diagnose():
+    """Prints what the harness can see when the host did not start."""
+    log("diagnostics")
+    for root in (HOME, Path.home() / "Library" / "Application Support" / "Mozilla"):
+        if root.exists():
+            for f in sorted(root.rglob("*")):
+                print(f"  {f}", file=sys.stderr)
+    p, _ = our_process()
+    if p:
+        for q in tree(p):
+            try:
+                print(f"  process {q.pid} {q.name()}", file=sys.stderr)
+            except psutil.Error:
+                pass
+        try:
+            print(marionette(["-"], DIAG_JS.replace("ADDON_ID", ADDON_ID)), file=sys.stderr)
+        except SystemExit:
+            pass
 
 
 SYNC_JS = """
@@ -555,7 +603,11 @@ def run(goargs):
 
         log("starting Thunderbird")
         tb_start()
-        log("connection file: " + Path(wait_conn(120)).name)
+        conn = wait_conn(120, fatal=False)
+        if not conn:
+            diagnose()
+            die("no connection file after 120s")
+        log("connection file: " + Path(conn).name)
         synced = marionette(["-"], SYNC_JS.replace("WANT", str(n)))
         if not synced.isdigit():
             die(f"inbox sync failed: {synced}")
