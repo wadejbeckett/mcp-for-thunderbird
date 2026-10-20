@@ -193,11 +193,11 @@ test("toolbar shows connected, paused, not connected and mismatch", async () => 
   assert.equal(mock.actionState.badgeText, "!");
 });
 
-test("welcome ok:false shows Update needed, keeps the port and refuses calls", async () => {
+test("a welcome with another protocol shows Update needed, keeps the port and refuses calls", async () => {
   HANDLERS.mail_accounts = async () => ({});
   await bg.start();
   const port = mock.lastPort();
-  welcome(port, { ok: false, error: "protocol mismatch" });
+  welcome(port, { protocol: 2, ok: false, error: "protocol mismatch" });
   await flush();
   assert.equal(bg.state(), "mismatch");
   assert.equal(mock.actionState.title, "Update needed");
@@ -346,7 +346,7 @@ test("getEndpoint comes from the welcome port and fails while not connected", as
 test("a refused call during a mismatch still frees its blobs", async () => {
   await bg.start();
   const port = mock.lastPort();
-  welcome(port, { ok: false, error: "protocol mismatch" });
+  welcome(port, { protocol: 2, ok: false, error: "protocol mismatch" });
   port.receive({ type: "blob", blob: "b1", seq: 0, last: true, data: "AA==" });
   port.receive({ type: "call", id: "c1", tool: "mail_draft", client: "x", blobs: ["b1"], args: { attachments: [{ name: "a", blob: 0 }] } });
   await flush();
@@ -387,4 +387,70 @@ test("calls before a welcome ok:true are refused with Not connected yet", async 
   port.receive({ type: "call", id: "c1", tool: "mail_accounts", client: "x", args: {} });
   await flush();
   assert.equal(port.sentOfType("result")[1].ok, true);
+});
+
+test("Update needed survives the host closing; only a matching welcome clears it", async () => {
+  await bg.start();
+  let port = mock.lastPort();
+  welcome(port, { protocol: 2, ok: false, error: "protocol mismatch" });
+  await flush();
+  port.drop(); // an older host exits after the mismatch
+  await flush();
+  assert.equal(bg.state(), "mismatch");
+  assert.equal(mock.actionState.title, "Update needed");
+  timers.fire();
+  await flush();
+  port = mock.lastPort();
+  assert.equal(bg.state(), "mismatch");
+  welcome(port);
+  await flush();
+  assert.equal(bg.state(), "connected");
+});
+
+test("a host failure on the same protocol is not Update needed", async () => {
+  HANDLERS.mail_accounts = async () => ({});
+  await bg.start();
+  const port = mock.lastPort();
+  welcome(port, { ok: false, port: 0, error: "No free port between 47110 and 47119" });
+  await flush();
+  assert.equal(bg.state(), "host_error");
+  assert.equal(mock.actionState.title, "MCP for Thunderbird: No free port between 47110 and 47119");
+  assert.equal(mock.actionState.badgeText, "!");
+  port.receive({ type: "call", id: "c1", tool: "mail_accounts", client: "x", args: {} });
+  await flush();
+  assert.equal(port.sentOfType("result")[0].error.code, "refused");
+  const [handler] = mock.messenger.runtime.onMessage.listeners;
+  const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
+  assert.deepEqual(await handler({ type: "getState" }, me), { state: "host_error", paused: false, error: "No free port between 47110 and 47119" });
+  // The host exits after such a welcome; the add-on keeps the reason and
+  // tries again with backoff.
+  port.drop();
+  await flush();
+  assert.equal(bg.state(), "host_error");
+  assert.equal(timers.pending().length, 1);
+  timers.fire();
+  await flush();
+  welcome(mock.lastPort());
+  await flush();
+  assert.equal(bg.state(), "connected");
+});
+
+test("a host error message is kept short and printable", async () => {
+  await bg.start();
+  welcome(mock.lastPort(), { ok: false, port: 0, error: `bad\u0000\n${"x".repeat(500)}` });
+  await flush();
+  assert.equal(bg.state(), "host_error");
+  assert.ok(mock.actionState.title.length <= 21 + 120, mock.actionState.title);
+  assert.equal(/[\u0000-\u001f]/.test(mock.actionState.title), false);
+});
+
+test("token and app requests are refused while an update is needed", async () => {
+  await bg.start();
+  const port = mock.lastPort();
+  welcome(port, { protocol: 2, ok: false, error: "protocol mismatch" });
+  await flush();
+  await assert.rejects(bg.requestToken(), /updating/);
+  await assert.rejects(bg.detectClients(), /updating/);
+  assert.equal(port.sentOfType("token_request").length, 0);
+  assert.equal(port.sentOfType("clients_detect").length, 0);
 });

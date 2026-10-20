@@ -2,9 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// First-run setup: accounts, level, AI apps, finish.
+// First-run setup: accounts, level, AI apps, finish. The options page can
+// open it again; it then starts from the current choices and Finish
+// changes only what is shown here.
 
-import { save } from "../src/settings.js";
+import { save, load, LEVELS } from "../src/settings.js";
 import { byId, checkboxRow, messageOf, realDeps, inPage } from "./dom.js";
 import { levelToGroups } from "./logic.js";
 
@@ -15,23 +17,30 @@ export async function initSetup(doc, { send, m }) {
   const detectBtn = byId(doc, "detect");
   const configureBtn = byId(doc, "configure");
 
-  // 1. Accounts, all unticked.
+  const current = await load();
+  const again = current.setupDone === true;
+
+  // 1. Accounts: all unticked the first time, as they are when reopened.
   const accounts = (await m.accounts.list(false)) || [];
   const accountBoxes = [];
   for (const a of accounts) {
-    const { label, input } = checkboxRow(doc, a.name, { "data-id": a.id }, false);
+    const { label, input } = checkboxRow(doc, a.name, { "data-id": a.id }, again && current.accounts[a.id] === true);
     accountsEl.append(label);
     accountBoxes.push(input);
   }
   byId(doc, "accounts-empty").hidden = accounts.length > 0;
+  byId(doc, "accounts-first").hidden = again;
 
   // The page preselects "Read and organise" in its markup; read it into
-  // the property so the choice below always sees the same state.
-  for (const r of doc.querySelectorAll("#levels input")) r.checked = r.hasAttribute("checked");
+  // the property so the choice below always sees the same state. Reopened,
+  // the level that matches the current groups is chosen, or none.
+  const LEVEL_GROUPS = ["read", "organise", "compose"];
+  const currentLevel = Object.keys(LEVELS).find((k) => LEVEL_GROUPS.every((g) => Boolean(current.groups[g]) === LEVELS[k][g]));
+  for (const r of doc.querySelectorAll("#levels input")) r.checked = again ? r.value === currentLevel : r.hasAttribute("checked");
 
   const level = () => {
     const chosen = [...doc.querySelectorAll("#levels input")].find((r) => r.checked);
-    return chosen ? chosen.value : "read_organise";
+    return chosen ? chosen.value : again ? null : "read_organise";
   };
 
   // 3. AI apps.
@@ -79,9 +88,17 @@ export async function initSetup(doc, { send, m }) {
   byId(doc, "finish").addEventListener("click", async () => {
     const status = byId(doc, "finish-status");
     try {
-      const map = {};
+      const before = await load();
+      const map = { ...before.accounts };
       for (const b of accountBoxes) map[b.getAttribute("data-id")] = b.checked;
-      await save({ accounts: map, groups: levelToGroups(level()), setupDone: true });
+      let groups = levelToGroups(level() || "read_organise");
+      if (before.setupDone) {
+        // Reopened: only the groups a level sets change; with no level
+        // chosen they stay as they are, and contacts is never touched.
+        groups = { ...before.groups };
+        if (level()) for (const g of LEVEL_GROUPS) groups[g] = LEVELS[level()][g];
+      }
+      await save({ accounts: map, groups, setupDone: true });
       const none = !accountBoxes.some((b) => b.checked);
       status.textContent = none
         ? "Setup finished. No account is switched on yet, so AI apps cannot see any mail. Switch one on in the add-on options."

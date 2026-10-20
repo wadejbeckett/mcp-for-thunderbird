@@ -3,12 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Activity log: the last 500 calls in storage.local under "activity".
-// Entries hold only time, client, tool, targets (opaque ids or folder
-// paths, at most 20 of at most 200 characters) and outcome; never
-// subjects, bodies or addresses.
+// Entries hold only time, client (the app's self-reported name, at most 64
+// characters), tool, targets (opaque ids or folder paths, at most 20 of at
+// most 200 characters) and outcome; never subjects, bodies or addresses.
 
 export const LOG_KEY = "activity";
 export const LOG_SIZE = 500;
+export const CLIENT_CHARS = 64;
 
 let queue = Promise.resolve();
 
@@ -21,7 +22,7 @@ function serial(fn) {
 function entry({ time, client, tool, targets, outcome }) {
   return {
     time: String(time),
-    client: String(client ?? "unknown"),
+    client: Array.from(String(client ?? "unknown")).slice(0, CLIENT_CHARS).join(""),
     tool: String(tool ?? ""),
     targets: Array.isArray(targets)
       ? targets

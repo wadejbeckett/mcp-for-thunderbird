@@ -11,7 +11,7 @@ import { save, load, enabledTools, LEVELS } from "../src/settings.js";
 import { append } from "../src/log.js";
 import { HANDLERS } from "../src/rpc.js";
 import { isAllowed } from "../src/handlers/compose.js";
-import { levelToGroups, parseAllowlist, renderState, isAbsolutePath, RESTART_NOTE } from "../ui/logic.js";
+import { levelToGroups, parseAllowlist, renderState, isAbsolutePath, RESTART_NOTE, isAllMail, allMailAccounts } from "../ui/logic.js";
 import { initPopup } from "../ui/popup.js";
 import { initOptions } from "../ui/options.js";
 import { initSetup } from "../ui/setup.js";
@@ -156,6 +156,7 @@ test("TestRenderStateLabels", () => {
   assert.equal(renderState("paused").label, "Paused");
   assert.equal(renderState("not_connected").label, "Not connected");
   assert.equal(renderState("mismatch").label, "Update needed");
+  assert.equal(renderState("host_error").label, "Host program problem");
   assert.equal(renderState("anything else").label, "Not connected");
 });
 
@@ -218,6 +219,13 @@ test("popup says when the host is not connected and when an update is needed", a
   p = page("popup.html");
   await initPopup(p.document, { send, m: mock.messenger });
   assert.equal(p.$("state").textContent, "Update needed");
+  bg.stop();
+  bg = createBackground();
+  await bg.start();
+  mock.lastPort().receive({ type: "welcome", protocol: 1, version: "9", port: 0, ok: false, error: "No free port between 47110 and 47119" });
+  p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  assert.equal(p.$("state").textContent, "Host program problem: No free port between 47110 and 47119");
 });
 
 // ---- options ----
@@ -522,4 +530,101 @@ test("pages load nothing remote, run no inline script and name the product corre
     }
   }
   assert.match(readFileSync(new URL("ui.css", dir), "utf8"), /prefers-color-scheme: dark/);
+});
+
+// ---- Gmail labels (R34) ----
+
+test("isAllMail spots Gmail's All Mail by special use or by path", () => {
+  assert.equal(isAllMail({ path: "/[Gmail]/All Mail", specialUse: ["all"] }), true);
+  assert.equal(isAllMail({ path: "/Archive", specialUse: ["all"] }), true);
+  assert.equal(isAllMail({ path: "/[Gmail]/All Mail" }), true);
+  assert.equal(isAllMail({ path: "[gmail]/all mail", specialUse: [] }), true);
+  assert.equal(isAllMail({ path: "/[Google Mail]/All Mail" }), true);
+  assert.equal(isAllMail({ path: "/INBOX", specialUse: ["inbox"] }), false);
+  assert.equal(isAllMail({ path: "/Projects/All Mail" }), false);
+  assert.equal(isAllMail(null), false);
+  assert.deepEqual(
+    allMailAccounts([
+      { name: "Gmail", folders: [{ path: "/INBOX" }, { path: "/[Gmail]/All Mail", specialUse: ["all"] }] },
+      { name: "Work", folders: [{ path: "/INBOX" }] },
+      { name: "Other Gmail", folders: [{ path: "/[Gmail]/All Mail" }] },
+    ]),
+    ["Gmail", "Other Gmail"],
+  );
+});
+
+test("options warn about Gmail labels when an enabled account has All Mail", async () => {
+  const gmail = { id: "g1", name: "Gmail", type: "imap" };
+  const folders = {
+    g1: [{ accountId: "g1", path: "/INBOX", specialUse: ["inbox"] }, { accountId: "g1", path: "/[Gmail]/All Mail", specialUse: ["all"] }],
+    a1: [{ accountId: "a1", path: "/INBOX", specialUse: ["inbox"] }],
+  };
+  const m = {
+    ...mock.messenger,
+    accounts: { list: async () => [gmail, { id: "a1", name: "Work", type: "imap" }] },
+    folders: { query: async ({ accountId }) => folders[accountId] || [] },
+  };
+  await save({ accounts: { a1: true } });
+  const p = page("options.html");
+  await initOptions(p.document, { send, m, clipboard, confirm: () => true });
+  assert.equal(p.$("gmail-note").hidden, true);
+  p.tick(boxes(p.document, "#accounts input")[0]);
+  await flush();
+  assert.equal(p.$("gmail-note").hidden, false);
+  assert.match(p.$("gmail-note").textContent, /Gmail: the same message also appears in All Mail, Important and Starred/);
+  assert.match(p.$("gmail-note").textContent, /exclude those too/);
+  p.tick(boxes(p.document, "#accounts input")[0], false);
+  await flush();
+  assert.equal(p.$("gmail-note").hidden, true);
+});
+
+// ---- reopening setup ----
+
+test("options open the setup page again from the AI apps section", async () => {
+  const p = await options({ accounts: { a1: true }, setupDone: true });
+  assert.ok(p.$("open-setup"), "AI apps section has a setup button");
+  p.click(p.$("open-setup"));
+  await flush();
+  assert.deepEqual(mock.tabs, [{ url: "moz-extension://test-uuid/ui/setup.html" }]);
+});
+
+test("a reopened setup shows the current choices and Finish keeps everything else", async () => {
+  const before = await save({
+    setupDone: true,
+    accounts: { a1: true, gone: true },
+    groups: { read: true, organise: false, compose: false, contacts: true },
+    send: { enabled: true, allow: ["a@example.com"] },
+    attachmentDir: "/home/u/MCP",
+    excludedFolders: [{ accountId: "a1", path: "Private" }],
+  });
+  let p = await setup();
+  assert.deepEqual(boxes(p.document, "#accounts input").map((a) => a.checked), [true, false]);
+  assert.deepEqual(levelRadios(p).filter((r) => r.checked).map((r) => r.value), ["read_only"]);
+  assert.equal(p.$("accounts-first").hidden, true);
+  p.click(p.$("finish"));
+  await flush();
+  // An account shown unticked is recorded as off, which it already was.
+  assert.deepEqual(await load(), { ...before, accounts: { ...before.accounts, a2: false } }, "Finish with no change changes nothing");
+
+  p = await setup();
+  p.tick(boxes(p.document, "#accounts input")[1]);
+  levelRadios(p).forEach((r) => (r.checked = false));
+  p.tick(levelRadios(p).find((r) => r.value === "read_organise"));
+  p.click(p.$("finish"));
+  await flush();
+  const s = await load();
+  assert.deepEqual(s.accounts, { a1: true, gone: true, a2: true });
+  assert.deepEqual(s.groups, { read: true, organise: true, compose: false, contacts: true });
+  assert.deepEqual(s.send, before.send);
+  assert.deepEqual(s.excludedFolders, before.excludedFolders);
+  assert.equal(s.attachmentDir, "/home/u/MCP");
+});
+
+test("a reopened setup leaves groups alone when they match no level", async () => {
+  await save({ setupDone: true, accounts: { a1: true }, groups: { read: false, organise: true, compose: true, contacts: false } });
+  const p = await setup();
+  assert.deepEqual(levelRadios(p).filter((r) => r.checked), []);
+  p.click(p.$("finish"));
+  await flush();
+  assert.deepEqual((await load()).groups, { read: false, organise: true, compose: true, contacts: false });
 });

@@ -9,7 +9,7 @@
 
 import { load, save, enabledTools } from "../src/settings.js";
 import { byId, showState, showLog, checkboxRow, messageOf, realDeps, inPage } from "./dom.js";
-import { parseAllowlist, isAbsolutePath, RESTART_NOTE } from "./logic.js";
+import { parseAllowlist, isAbsolutePath, RESTART_NOTE, allMailAccounts, GMAIL_NOTE } from "./logic.js";
 
 const GROUPS = ["read", "organise", "compose", "contacts"];
 const LOG_SHOWN = 100;
@@ -35,7 +35,7 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     try {
       const s = await send({ type: "getState" });
       paused = s.paused;
-      showState(doc, $("state"), s.state);
+      showState(doc, $("state"), s.state, s.error);
       $("pause").textContent = paused ? "Resume" : "Pause";
     } catch {
       showState(doc, $("state"), "not_connected");
@@ -70,9 +70,12 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     const box = $("excluded");
     box.replaceChildren();
     let shown = 0;
+    const enabled = [];
     for (const input of accountBoxes.filter((b) => b.checked)) {
       const accountId = input.getAttribute("data-id");
-      for (const f of await foldersOf(accountId)) {
+      const folders = await foldersOf(accountId);
+      enabled.push({ name: accountName.get(accountId), folders });
+      for (const f of folders) {
         const { label, input: cb } = checkboxRow(doc, `${accountName.get(accountId)}: ${f.path}`, { "data-account": accountId, "data-path": f.path }, excluded.has(keyOf(accountId, f.path)));
         cb.addEventListener("change", () => {
           const k = keyOf(accountId, f.path);
@@ -84,6 +87,11 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
       }
     }
     $("excluded-empty").hidden = shown > 0;
+    // Folder exclusions are by path; Gmail shows one message in several
+    // folders (R34).
+    const gmail = allMailAccounts(enabled);
+    $("gmail-note").textContent = gmail.length ? `${GMAIL_NOTE} (${gmail.join(", ")})` : "";
+    $("gmail-note").hidden = gmail.length === 0;
   }
 
   for (const a of accounts) {
@@ -154,6 +162,16 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
       status.textContent = sendOn && list.entries.length === 0 ? "Saved. Sending stays off until you list at least one allowed recipient." : "Saved.";
     } catch (e) {
       status.textContent = `Nothing was saved. ${messageOf(e, "Try again.")}`;
+    }
+  });
+
+  // ---- AI apps: the setup page, opened again ----
+
+  $("open-setup").addEventListener("click", async () => {
+    try {
+      await m.tabs.create({ url: m.runtime.getURL("ui/setup.html") });
+    } catch {
+      // the page stays as it is
     }
   });
 

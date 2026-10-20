@@ -28,9 +28,10 @@ export function stripInvisible(s) {
 
 // A marker inside the content could make the text after it look like it
 // is outside the wrapper, so it is defused (ruling R31). The phrase
-// UNTRUSTED EMAIL CONTENT (any case; spaces, underscores or hyphens between
-// the words; an END directly before it is included) always becomes
-// [marker removed]. The span widens over bracket-like characters next to
+// UNTRUSTED EMAIL CONTENT (any case; any run of characters that are not
+// letters or digits between the words and between E and MAIL, so E-MAIL,
+// dots and long space runs count; an END word directly before it, after
+// up to 8 such characters, is included) always becomes [marker removed]. The span widens over bracket-like characters next to
 // it (a run of up to 8 of one punctuation or symbol character other than
 // , . ; : ! ?, after at most 8 spaces or tabs): <<<, ===, [[[, look-alike
 // angle brackets and so on. When the start widened, or a bracket-like
@@ -42,8 +43,11 @@ export function stripInvisible(s) {
 // index. The work is linear: one bounded regular expression finds the
 // phrase and each match looks at most a fixed number of characters
 // around it.
-const PHRASE = /UNTRUSTED[\s_-]{0,8}EMAIL[\s_-]{0,8}CONTENT/giu;
-const SEP = /[\s_-]/u;
+// Each [^\p{L}\p{N}]* run stops at the next letter or digit, so a match
+// attempt scans at most the separator runs after one UNTRUSTED: linear.
+const PHRASE = /UNTRUSTED[^\p{L}\p{N}]*E[^\p{L}\p{N}]*MAIL[^\p{L}\p{N}]*CONTENT/giu;
+const SEP = /[^\p{L}\p{N}]/u;
+const WORDCHAR = /[\p{L}\p{N}]/u;
 const PUNCT = /[\p{P}\p{S}]/u;
 const PLAIN = ",.;:!?";
 const TAIL = 48;
@@ -64,7 +68,8 @@ function markerSpan(f, i, j, floor) {
   let start = i;
   let k = i;
   for (let n = 0; n < RUN && k > floor && SEP.test(f[k - 1]); n++) k--;
-  if (k - 3 >= floor && f.slice(k - 3, k).toUpperCase() === "END") start = k - 3;
+  // END only as a word of its own ("weekend" is not the marker's END)
+  if (k - 3 >= floor && f.slice(k - 3, k).toUpperCase() === "END" && !(k - 4 >= 0 && WORDCHAR.test(f[k - 4]))) start = k - 3;
   k = start;
   for (let n = 0; n < RUN && k > floor && blank(f[k - 1]); n++) k--;
   // a run of one bracket-like character (<<<, ===, [[[)

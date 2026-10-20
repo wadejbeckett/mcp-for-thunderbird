@@ -9,9 +9,11 @@ import { renderState, describeEntry } from "./logic.js";
 
 export const byId = (doc, id) => doc.getElementById(id);
 
-export function showState(doc, el, state) {
+// showState shows the state; detail (the host's reason for a host
+// problem) follows the label.
+export function showState(doc, el, state, detail) {
   const r = renderState(state);
-  el.textContent = r.label;
+  el.textContent = typeof detail === "string" && detail ? `${r.label}: ${detail}` : r.label;
   el.className = `state ${r.className}`;
 }
 

@@ -18,7 +18,7 @@ export async function initPopup(doc, { send, m }) {
     try {
       const s = await send({ type: "getState" });
       paused = s.paused;
-      showState(doc, stateEl, s.state);
+      showState(doc, stateEl, s.state, s.error);
       pauseBtn.textContent = paused ? "Resume" : "Pause";
       pauseBtn.disabled = false;
       showLog(doc, byId(doc, "log"), byId(doc, "log-empty"), await send({ type: "listLog", limit: RECENT }));

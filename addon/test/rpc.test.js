@@ -183,3 +183,13 @@ test("an argument sent as null counts as absent", async () => {
   await dispatch(call("mail_search", { tags: ["a", null] }));
   assert.deepEqual(seen, { tags: ["a", null] });
 });
+
+test("the log keeps at most 64 characters of the client name", async () => {
+  HANDLERS.mail_accounts = async () => ({});
+  await dispatch(call("mail_accounts", {}, { client: `Claude ${"x".repeat(5000)}` }));
+  await append({ time: "t", client: "y".repeat(300), tool: "mail_read", targets: [], outcome: "ok" });
+  const [a, b] = await list();
+  assert.equal(a.client.length, 64);
+  assert.ok(a.client.startsWith("Claude x"));
+  assert.equal(b.client, "y".repeat(64));
+});

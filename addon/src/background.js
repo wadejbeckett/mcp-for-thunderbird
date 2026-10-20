@@ -30,7 +30,15 @@ const TOOLBAR = {
   paused: { title: "MCP for Thunderbird: paused", badge: "II", color: "#8a6d00" },
   not_connected: { title: "MCP for Thunderbird: not connected", badge: "!", color: "#b00020" },
   mismatch: { title: "Update needed", badge: "!", color: "#b00020" },
+  host_error: { title: "MCP for Thunderbird: host program problem", badge: "!", color: "#b00020" },
 };
+
+// hostMessage keeps a host-supplied welcome error to one short printable
+// line for the toolbar and the pages.
+function hostMessage(v) {
+  const text = typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim() : "";
+  return (text || "The host program could not start.").slice(0, 120);
+}
 
 const UPDATE_NEEDED = "MCP for Thunderbird and its host program need updating to matching versions.";
 const NOT_CONNECTED = "MCP for Thunderbird is not connected to its host program.";
@@ -56,7 +64,10 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   let port = null;
   let welcomed = false;
   let endpointPort = null; // the host's HTTP port from the last welcome
+  // mismatch stays set until a welcome with our protocol arrives, also
+  // across a disconnect: an update is needed either way.
   let mismatch = false;
+  let hostError = null; // the last same-protocol welcome ok:false, until a good welcome
   let paused = false;
   let attempt = 0;
   let timer = null;
@@ -77,16 +88,18 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
 
   function state() {
     if (mismatch) return "mismatch";
+    if (hostError && (!port || !welcomed)) return "host_error";
     if (!port || !welcomed) return "not_connected";
     return paused ? "paused" : "connected";
   }
 
   async function showState() {
-    const t = TOOLBAR[state()];
+    const st = state();
+    const t = TOOLBAR[st];
     const action = m().action;
     if (!action) return;
     try {
-      await action.setTitle({ title: t.title });
+      await action.setTitle({ title: st === "host_error" ? `MCP for Thunderbird: ${hostError}` : t.title });
       await action.setBadgeText({ text: t.badge });
       if (t.badge) await action.setBadgeBackgroundColor({ color: t.color });
     } catch {
@@ -123,7 +136,6 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     if (stopped) return;
     welcomed = false;
     endpointPort = null;
-    mismatch = false;
     helloSent = false;
     let p;
     try {
@@ -175,7 +187,6 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     port = null;
     welcomed = false;
     endpointPort = null;
-    mismatch = false;
     blobs.clear();
     failPending(NOT_CONNECTED);
     showState();
@@ -186,10 +197,20 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     if (port !== p || !msg || typeof msg !== "object") return;
     switch (msg.type) {
       case "welcome":
-        welcomed = true;
-        attempt = 0;
-        mismatch = msg.ok === false || msg.protocol !== PROTOCOL;
-        endpointPort = Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536 ? msg.port : null;
+        // Another protocol means an update is needed (the host stays up,
+        // serving nothing). ok:false on our protocol is a host failure,
+        // such as no free port: the host exits and is tried again.
+        mismatch = msg.protocol !== PROTOCOL;
+        if (!mismatch && msg.ok === false) {
+          hostError = hostMessage(msg.error);
+          welcomed = false;
+          endpointPort = null;
+        } else {
+          hostError = null;
+          welcomed = true;
+          attempt = 0;
+          endpointPort = !mismatch && Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536 ? msg.port : null;
+        }
         showState();
         return;
       case "blob":
@@ -317,8 +338,16 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     });
   }
 
+  // unusable says why the host cannot serve a UI request now, or null.
+  function unusable() {
+    if (mismatch) return new Error(UPDATE_NEEDED);
+    if (!port || !welcomed) return new Error(hostError ? `${NOT_CONNECTED} ${hostError}` : NOT_CONNECTED);
+    return null;
+  }
+
   function requestToken() {
-    if (!port || !welcomed) return Promise.reject(new Error(NOT_CONNECTED));
+    const bad = unusable();
+    if (bad) return Promise.reject(bad);
     let w;
     const p = waitReply(
       (x) => {
@@ -335,7 +364,8 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   }
 
   function clientsRequest(type, extra) {
-    if (!port || !welcomed) return Promise.reject(new Error(NOT_CONNECTED));
+    const bad = unusable();
+    if (bad) return Promise.reject(bad);
     const req = `r${++reqSeq}`;
     const p = waitReply(
       (x) => clientWaiters.set(req, x),
@@ -349,7 +379,8 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   const configureClients = (names) => clientsRequest("clients_configure", { clients: [...names] });
 
   function rotateToken() {
-    if (!port || !welcomed) return Promise.reject(new Error(NOT_CONNECTED));
+    const bad = unusable();
+    if (bad) return Promise.reject(bad);
     send({ type: "rotate_token" });
     return Promise.resolve(true);
   }
@@ -358,7 +389,10 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   // runtime messaging and never touch the native port. The reply is a
   // promise, or undefined for a message that is not ours.
   async function getState() {
-    return { state: state(), paused: (await load()).paused };
+    const st = state();
+    const out = { state: st, paused: (await load()).paused };
+    if (st === "host_error") out.error = hostError;
+    return out;
   }
 
   async function setPaused(value) {

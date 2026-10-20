@@ -21,6 +21,13 @@ const ACCOUNTS = [
   },
   { id: "a2", name: "Home", type: "imap", folders: ["INBOX", "Trash", "OnlyA2"], specialUse: { INBOX: ["inbox"], Trash: ["trash"] } },
   { id: "a3", name: "Bare", type: "imap", folders: ["INBOX"], specialUse: { INBOX: ["inbox"] } },
+  {
+    id: "a4",
+    name: "Local Folders",
+    type: "none",
+    folders: ["Inbox", "Unsent Messages", "Unsent Messages/Later", "Kept"],
+    specialUse: { Inbox: ["inbox"], "Unsent Messages": ["outbox"] },
+  },
 ];
 
 let mock;
@@ -315,4 +322,20 @@ test("mail_tag matches keys case-insensitively", async () => {
   const r = await call("mail_tag", { ids: [m.id], add: ["$LABEL4"] });
   assert.deepEqual(r.content.done, [m.id]);
   assert.deepEqual(mock.store.get(m.num).tags, ["$label4"]);
+});
+
+test("mail_move refuses the Outbox and folders below it as a target", async () => {
+  await save({ accounts: { a1: true, a2: true, a3: true, a4: true } });
+  const m = add("a4", "Kept", 1);
+  for (const folder of ["Unsent Messages", "Unsent Messages/Later"]) {
+    for (const copy of [false, true]) {
+      const r = await call("mail_move", { ids: [m.id], folder, copy });
+      assert.equal(r.ok, false, folder);
+      assert.equal(r.error.code, "refused", folder);
+      assert.match(r.error.message, /Outbox/);
+    }
+  }
+  noOrganiseCalls();
+  const ok = await call("mail_move", { ids: [m.id], folder: "Inbox" });
+  assert.deepEqual(ok.content, { done: [m.id], failed: [] });
 });

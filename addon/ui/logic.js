@@ -15,6 +15,7 @@ const STATES = Object.freeze({
   paused: { label: "Paused", className: "paused" },
   not_connected: { label: "Not connected", className: "not-connected" },
   mismatch: { label: "Update needed", className: "mismatch" },
+  host_error: { label: "Host program problem", className: "not-connected" },
 });
 
 // renderState maps the background's state to the words and style the
@@ -99,3 +100,24 @@ export function describeEntry(e) {
   if (!Number.isNaN(d.getTime())) when = d.toLocaleString([], { dateStyle: "short", timeStyle: "medium" });
   return { when, client: e.client || "unknown", tool: e.tool || "", outcome: OUTCOMES[e.outcome] || e.outcome || "" };
 }
+
+const ALL_MAIL_PATHS = new Set(["[gmail]/all mail", "[google mail]/all mail"]);
+
+// isAllMail reports whether a folder is Gmail's All Mail: special use
+// "all", or the [Gmail]/All Mail path (ruling R34).
+export function isAllMail(f) {
+  if (!f || typeof f !== "object") return false;
+  if (Array.isArray(f.specialUse) && f.specialUse.includes("all")) return true;
+  return typeof f.path === "string" && ALL_MAIL_PATHS.has(f.path.replace(/^\/+/, "").toLowerCase());
+}
+
+// allMailAccounts names the accounts ([{name, folders}]) that have an All
+// Mail folder, where excluding one folder does not hide a message.
+export function allMailAccounts(accounts) {
+  return accounts.filter((a) => (a.folders || []).some(isAllMail)).map((a) => a.name);
+}
+
+// GMAIL_NOTE is shown next to the excluded folders when allMailAccounts
+// finds any.
+export const GMAIL_NOTE =
+  "Gmail: the same message also appears in All Mail, Important and Starred, and under each of its labels. Excluding one folder hides only that copy, so exclude those too, or do not rely on excluded folders for this account.";

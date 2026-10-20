@@ -152,10 +152,15 @@ async function mailMove(args, ctx) {
   if (target.accountId !== accountId) fail("refused", CROSS_ACCOUNT);
   assertFolderAllowed(accountId, target.path, s);
 
-  // Trash and Junk, and anything below them, are for mail_trash.
-  const barred = (await accountFolders(run, accountId)).filter((f) => hasUse(f, "trash") || hasUse(f, "junk"));
-  const inBarred = hasUse(target, "trash") || hasUse(target, "junk") || barred.some((f) => target.path.startsWith(f.path.replace(/\/+$/, "") + "/"));
-  if (inBarred) fail("refused", "Use mail_trash to remove mail; mail_move may not target Trash or Junk.");
+  // Trash and Junk, and anything below them, are for mail_trash. The
+  // Outbox holds mail queued to be sent: moving mail there could send it.
+  const folders = await accountFolders(run, accountId);
+  const within = (uses) => {
+    const roots = folders.filter((f) => uses.some((u) => hasUse(f, u)));
+    return uses.some((u) => hasUse(target, u)) || roots.some((f) => target.path.startsWith(f.path.replace(/\/+$/, "") + "/"));
+  };
+  if (within(["outbox"])) fail("refused", "mail_move may not target the Outbox: mail there is queued to be sent.");
+  if (within(["trash", "junk"])) fail("refused", "Use mail_trash to remove mail; mail_move may not target Trash or Junk.");
 
   return forEachMessage(ids, run, s, async (h) => {
     if (h.folder.accountId !== accountId) fail("refused", CROSS_ACCOUNT);
