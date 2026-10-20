@@ -57,8 +57,11 @@ func currentUser() (*windows.SID, error) {
 	return tu.User.Sid, nil
 }
 
-// Check returns nil if path has exactly the DACL OwnerOnly sets: protected
-// from inheritance, one allow entry, for the current user. Tests use it.
+// Check returns nil if path is private the way OwnerOnly leaves it: the
+// DACL is protected from inheritance and every entry allows the current
+// user only. (On a folder Windows stores OwnerOnly's one inheritable entry
+// as two: one for the folder itself and one inherit-only entry for its
+// contents.) Tests use it.
 func Check(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -75,22 +78,24 @@ func Check(path string) error {
 	if err != nil || dacl == nil {
 		return fmt.Errorf("no DACL: %v", err)
 	}
-	if dacl.AceCount != 1 {
-		return fmt.Errorf("want 1 ACE, got %d", dacl.AceCount)
-	}
-	var ace *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, 0, &ace); err != nil {
-		return err
-	}
-	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-		return fmt.Errorf("ACE type %d is not allow", ace.Header.AceType)
+	if dacl.AceCount == 0 {
+		return errors.New("empty DACL")
 	}
 	me, err := currentUser()
 	if err != nil {
 		return err
 	}
-	if sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)); !sid.Equals(me) {
-		return fmt.Errorf("ACE SID %s is not the current user %s", sid, me)
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return fmt.Errorf("ACE %d type %d is not allow", i, ace.Header.AceType)
+		}
+		if sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)); !sid.Equals(me) {
+			return fmt.Errorf("ACE %d SID %s is not the current user %s", i, sid, me)
+		}
 	}
 	return nil
 }

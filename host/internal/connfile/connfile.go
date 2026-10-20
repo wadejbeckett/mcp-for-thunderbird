@@ -75,7 +75,7 @@ func Load(instance string) (*Conn, error) {
 }
 
 func read(path string) (*Conn, error) {
-	b, err := os.ReadFile(path)
+	b, err := readFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func Save(c *Conn) error {
 		os.Remove(name)
 		return err
 	}
-	if err := os.Rename(name, p); err != nil {
+	if err := replace(name, p); err != nil {
 		os.Remove(name)
 		return err
 	}
