@@ -7,7 +7,7 @@ MCP for Thunderbird has two parts, and you need both:
 
 Install the host first. When the add-on is installed, it opens a setup page that needs the host to find your AI apps.
 
-You need Thunderbird 153 or later. To check, open Thunderbird's Help menu and choose About Thunderbird. If your version is older, update Thunderbird first.
+You need Thunderbird 153 or later. To check, open Thunderbird's ≡ menu (top right), choose **Help**, then **About Thunderbird**. If your version is older, update Thunderbird first.
 
 The steps below take about five minutes.
 
@@ -53,6 +53,12 @@ The package puts the host in `~/Library/Application Support/MCP for Thunderbird`
 
 ### Linux
 
+Open a terminal and go to the folder you downloaded the file into, usually Downloads:
+
+```
+cd ~/Downloads
+```
+
 **Debian, Ubuntu, Linux Mint and similar** (the `.deb`):
 
 ```
@@ -62,14 +68,14 @@ mcp-for-thunderbird setup
 
 The package installs the program for everyone on the computer. The second command registers it with Thunderbird for your user, so each person who uses MCP for Thunderbird runs it once, as themselves, without `sudo`.
 
-**Any other distribution** (the `.tar.gz`):
+**Any other distribution** (the `.tar.gz`): unpack the archive, move the program to a folder where it can stay (here `~/.local/bin`), and run it once from there:
 
-1. Unpack the archive and move the `mcp-for-thunderbird` program to a folder where it can stay, for example `~/.local/bin`.
-2. Run it once from there:
-
-   ```
-   ~/.local/bin/mcp-for-thunderbird setup
-   ```
+```
+tar -xzf mcp-for-thunderbird-<version>-linux-amd64.tar.gz
+mkdir -p ~/.local/bin
+mv mcp-for-thunderbird-<version>-linux-amd64/mcp-for-thunderbird ~/.local/bin/
+~/.local/bin/mcp-for-thunderbird setup
+```
 
 Thunderbird finds the host through the full path recorded by `setup`. If you move the program later, run `setup` again from its new place.
 
@@ -82,11 +88,11 @@ The `.deb` Thunderbird from your distribution, or Thunderbird downloaded from th
 
 ## 3. Install the add-on
 
-Install MCP for Thunderbird from addons.thunderbird.net (link added when listed): in Thunderbird, open the menu, choose **Add-ons and Themes**, search for "MCP for Thunderbird", and choose **Add to Thunderbird**. Thunderbird shows the permissions the add-on asks for; [PRIVACY.md](PRIVACY.md) explains each one.
+Install MCP for Thunderbird from addons.thunderbird.net (link added when listed): in Thunderbird, open the ≡ menu (top right), choose **Add-ons and Themes**, search for "MCP for Thunderbird", and choose **Add to Thunderbird**. Thunderbird shows the permissions the add-on asks for; [PRIVACY.md](PRIVACY.md) explains each one.
 
 <!-- screenshot: docs/images/addon-permissions.png -->
 
-Testing builds of the add-on are on the [GitHub releases page](https://github.com/wadejbeckett/mcp-for-thunderbird/releases) as `mcp-for-thunderbird-<version>.xpi`. They are for testing only and are not updated automatically. To install one, open **Add-ons and Themes**, choose the gear button, then **Install Add-on From File…**, and pick the `.xpi` file.
+Testing builds of the add-on are on the [GitHub releases page](https://github.com/wadejbeckett/mcp-for-thunderbird/releases) as `mcp-for-thunderbird-<version>.xpi`. They are for testing only and are not updated automatically. To install one, open **Add-ons and Themes** from the ≡ menu, choose the gear button, then **Install Add-on From File…**, and pick the `.xpi` file.
 
 ## 4. The setup page
 
@@ -111,12 +117,13 @@ The **MCP for Thunderbird** button on Thunderbird's toolbar shows the state:
 - **connected:** AI apps can use the tools;
 - **paused** (badge "II"): you paused it, and every request is refused until you resume;
 - **not connected** (badge "!"): the add-on cannot reach the host. Check that the host is installed, then restart Thunderbird.
+- **Update needed** (badge "!"): the add-on and the host are too far apart in version to work together, and every request is refused. Update the older one; see [Upgrading](#upgrading).
 
 <!-- screenshot: docs/images/toolbar-connected.png -->
 
 Everything on the setup page can be changed later in the add-on's options: open **Add-ons and Themes**, find MCP for Thunderbird, and choose **Options** (or choose **Open options** from the toolbar button). The options also hold the contacts switch, direct sending, the attachment folder, folders to hide from AI apps, the pause switch, the access key and the activity log.
 
-**Attachment folder.** Before an AI app can save an attachment, or attach a file to a draft, choose a folder for this in the options. AI apps can save files only into that folder, and can attach only files you put there.
+**Attachment folder.** Before an AI app can save an attachment, or attach a file to a draft, choose a folder for this in the options. AI apps can save files only into that folder, and can attach any file in it to a draft, so keep in it only files you are willing to send. Attachments over 50 MiB are not saved, and a draft takes at most 20 files and 50 MiB from the folder.
 
 ## 5. Connecting AI apps
 
@@ -167,7 +174,7 @@ Each Thunderbird profile with the add-on runs its own host. `connect` uses the o
 ## Upgrading
 
 - **The add-on** from addons.thunderbird.net updates itself with Thunderbird's other add-ons.
-- **The host:** install the newer installer, package or archive over the old one. The add-on and the host check each other's version when they connect. If they do not match, the toolbar button says that MCP for Thunderbird and its host program need updating to matching versions.
+- **The host:** install the newer installer, package or archive over the old one. When they connect, the add-on and the host check that they speak the same version of the protocol between them, so a newer add-on usually works with an older host and the other way round. When they do not, the toolbar button shows "Update needed", AI apps are told that MCP for Thunderbird and its host program need updating to matching versions, and every request is refused until you update the older one.
 
 ### Upgrading from a versioned folder
 
@@ -186,7 +193,7 @@ First remove the add-on: in Thunderbird, open **Add-ons and Themes**, find MCP f
 
   then delete the folder `~/Library/Application Support/MCP for Thunderbird`.
 - **Linux (`.deb`):** run `mcp-for-thunderbird setup --uninstall` as each user who ran setup, then `sudo apt remove mcp-for-thunderbird`.
-- **Linux (`.tar.gz`):** run `mcp-for-thunderbird setup --uninstall`, then delete the program.
+- **Linux (`.tar.gz`):** run `~/.local/bin/mcp-for-thunderbird setup --uninstall`, then delete the program with `rm ~/.local/bin/mcp-for-thunderbird`.
 
 `setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry from each AI app, keeping a backup of each file it changes.
 

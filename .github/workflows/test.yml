@@ -21,7 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sh docs/check-docs.sh
+      - run: bash docs/check-docs.sh
+      - run: bash docs/check-docs-selftest.sh
 
   addon:
     runs-on: ubuntu-latest

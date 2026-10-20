@@ -12,7 +12,7 @@ MCP for Thunderbird moves mail data only between Thunderbird and AI apps on your
 
 MCP for Thunderbird has two parts. The add-on runs in Thunderbird. The host is a separate program on the same computer, started by Thunderbird through its native messaging channel; this policy calls it "the native program". AI apps talk to the native program, and the native program passes their requests to the add-on.
 
-- The add-on sends the native program only tool results: the names and addresses of the accounts you enabled and their folders, message headers, the text of messages the assistant asks to read, the bytes of attachments it asks to save, and contacts when the contacts group is turned on.
+- MCP for Thunderbird sends the native program mail data only as tool results: the names and addresses of the accounts you enabled, their folders and tags, message headers, the text of messages the assistant asks to read, the bytes of attachments it asks to save, and contacts when the contacts group is turned on.
 - The native program passes those results only to AI apps on the same computer that hold its access key.
 - The AI app sends what it reads to its vendor, under that vendor's own terms and privacy policy.
 - Nothing goes to Noiz or to the authors of MCP for Thunderbird.
@@ -20,12 +20,12 @@ MCP for Thunderbird has two parts. The add-on runs in Thunderbird. The host is a
 
 Some more detail on each point:
 
-- **Only what is asked for, within your settings.** A tool result exists only because an AI app asked for it, and only for the accounts you ticked, outside the folders you excluded, and in the tool groups you turned on. Message headers here means sender, recipients, subject, date, folder, flags and tags. Search results never include message text. The text of a message is sent only when an AI app asks to read that one message.
-- **Attachments.** When an AI app saves an attachment, its bytes go to the native program, which writes them into the attachment folder you chose in the options. A plain-text attachment can instead be returned as text.
+- **Only what is asked for, within your settings.** A tool result exists only because an AI app asked for it, and only for the accounts you ticked, outside the folders you excluded, and in the tool groups you turned on. Message headers here means sender, recipients, Reply-To, subject, date, folder, flags and tags, the names, sizes and types of attachments, and the sender authentication results (SPF, DKIM and DMARC) your mail server recorded. Search results never include message text. The text of a message is sent only when an AI app asks to read that one message.
+- **Attachments.** When an AI app saves an attachment, its bytes go to the native program, which writes them into the attachment folder you chose in the options. A plain-text attachment can instead be returned as text. Attachments over 50 MiB are refused.
 - **Contacts.** Address book entries (names, email addresses and organisation) are sent only when you have turned on the contacts group.
 - **The other direction.** The native program sends the add-on the AI app's requests: for example search terms, message ids, and the recipients and text of a draft. When a draft has attachments, the native program reads those files from your attachment folder and passes them to the add-on.
-- **Settings.** The add-on also tells the native program which tools are turned on and where your attachment folder is, and the native program tells the add-on the name each AI app gives itself, for the activity log. On the setup page, the native program reports which supported AI apps it found on the computer.
-- **The access key.** The native program makes a random access key and keeps it, with its port number, in a file in your user's configuration folder that only your user can read. AI apps set up by MCP for Thunderbird read the key from that file. An app you set up by hand gets the key only if you copy it from the options.
+- **Settings.** Besides tool results, the add-on sends the native program two settings: which tools are turned on, and the path of your attachment folder. The native program tells the add-on the name each AI app gives itself, for the activity log. On the setup page, the native program reports which supported AI apps it found on the computer.
+- **The access key.** The native program makes a random access key and keeps it, with its port number, in a file in your user's configuration folder that only your user can read. AI apps that start the native program with its `connect` command, whether MCP for Thunderbird set them up or you did, read the key from that file. An app that connects over HTTP gets the key only if you copy it from the options.
 - **AI app vendors.** What an AI app's vendor receives, keeps and uses is set by that vendor, not by MCP for Thunderbird. Read your AI app's privacy policy before connecting it to your mail.
 - **Noiz and the authors.** Neither receives any of your data: MCP for Thunderbird has no server, no account and no update service of its own. It makes no network connections beyond your own computer (`127.0.0.1`); Thunderbird keeps talking to your mail servers as it always does.
 - **Sending mail.** If you turn on direct sending, a message an AI app sends goes through your own mail account in Thunderbird, to the recipients you allowed, as if you had sent it yourself. Direct sending is off unless you turn it on.
@@ -64,7 +64,7 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 - Choose which accounts AI apps may use, and turn tool groups on or off, in the add-on's options.
 - Exclude folders that AI apps must never see.
 - Pause every request from the toolbar button.
-- Rotate the access key from the options, which disconnects any app that has the old key.
+- Rotate the access key from the options. From then on, requests that use the old key are refused.
 - Remove the add-on and the native program at any time.
 
 ## Changes to this policy

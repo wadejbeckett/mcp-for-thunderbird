@@ -12,13 +12,14 @@ For a security problem, do not open a public issue or pull request; follow [SECU
 | `host/` | The host program, in Go: `cmd/mcp-for-thunderbird` and the packages under `internal/`. |
 | `test/e2e/` | End-to-end tests: a real Thunderbird, a local test mail server and the real host. |
 | `packaging/` | Release builds: the XPI, archives, `.deb`, Windows installer, macOS package and Claude Desktop extension. |
-| `docs/` | [PLATFORMS.md](docs/PLATFORMS.md) (what is tested where), [SPIKES.md](docs/SPIKES.md) (experiments that shaped the design) and `check-docs.sh`. |
+| `docs/` | [PLATFORMS.md](docs/PLATFORMS.md) (what is tested where), [SPIKES.md](docs/SPIKES.md) (experiments that shaped the design) and `check-docs.sh` with its self-test. |
 
 ## Tools you need
 
 - Node.js 22 or later, for the add-on tests and the XPI build.
 - Go 1.25 or later. With `GOTOOLCHAIN=auto`, Go fetches the exact version named in `host/go.mod`.
 - For the end-to-end tests on Linux: Thunderbird 153 or later, Docker, `xvfb-run`, `curl` and Python 3.
+- For the documentation check: bash.
 - For release builds: Python 3.9 or later, `sha256sum`, and `dpkg-deb` to check the `.deb`.
 
 ## Build and test
@@ -45,8 +46,11 @@ go vet ./...
 Documentation check (product name, privacy statements, no internal references):
 
 ```
-sh docs/check-docs.sh
+bash docs/check-docs.sh
+bash docs/check-docs-selftest.sh
 ```
+
+The second command proves the first catches every fault it claims to.
 
 End-to-end tests on Linux:
 

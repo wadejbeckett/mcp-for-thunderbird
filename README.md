@@ -29,7 +29,7 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 
 ## What it cannot do
 
-- **Delete mail for good.** "Bin" means moving to Trash. There is no tool to empty Trash or Junk, delete a folder or change account settings.
+- **Delete mail for good.** The organise tools can move mail to Trash, but no tool empties Trash or Junk, deletes a folder or changes account settings.
 - **Edit Thunderbird's message filters.** Thunderbird gives add-ons no way to change filters, so `mail_filter_suggest` writes out the steps for you to follow in Thunderbird's Message Filters window.
 - **Calendar and tasks.** Thunderbird has no stable add-on interface for them.
 - **Work with AI apps in a web browser**, such as ChatGPT or claude.ai in a browser tab. Those reach tools through a server on the internet, and MCP for Thunderbird only listens on your own computer.

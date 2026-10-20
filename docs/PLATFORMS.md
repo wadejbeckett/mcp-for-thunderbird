@@ -6,7 +6,7 @@ MCP for Thunderbird is tested on Linux, Windows and macOS. This page records wha
 
 Two workflows run on every push to `v1`:
 
-- `test` (`.github/workflows/test.yml`): the documentation check (`docs/check-docs.sh`) and the add-on tests (`npm test`) on `ubuntu-latest`, and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
+- `test` (`.github/workflows/test.yml`): the documentation check (`docs/check-docs.sh` and its self-test) and the add-on tests (`npm test`) on `ubuntu-latest`, and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
 - `platforms` (`.github/workflows/platforms.yml`, also started by hand with "Run workflow"):
   1. `build` (Linux): the GoReleaser snapshot with `packaging/build.sh`, then `packaging/check.sh` and its self-test.
   2. `windows-installer` (Windows): installs Inno Setup with Chocolatey (on the runner only) and compiles `packaging/windows/installer.iss` for amd64 and arm64. It then installs the amd64 build silently and checks the following:
