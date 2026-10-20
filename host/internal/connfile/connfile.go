@@ -75,7 +75,7 @@ func Load(instance string) (*Conn, error) {
 }
 
 func read(path string) (*Conn, error) {
-	b, err := readFile(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}

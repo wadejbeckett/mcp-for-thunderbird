@@ -9,6 +9,3 @@ import "os"
 
 // replace renames tmp over path.
 func replace(tmp, path string) error { return os.Rename(tmp, path) }
-
-// readFile reads path.
-func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
