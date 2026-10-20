@@ -400,6 +400,12 @@ BASE_PREFS = [
     ("mail.server.server2.userName", '"nobody"'),
     ("mail.server.server2.name", '"Local Folders"'),
     ("mail.server.server2.directory-rel", '"[ProfD]Mail/Local Folders"'),
+    # No macOS system address book: opening it asks for Contacts access,
+    # and on a CI runner that request blocks Thunderbird's main thread for
+    # ever (seen in a main-thread sample, +[ABAddressBook sharedAddressBook]).
+    # dirType -1 is what Thunderbird's deleteAddressBook writes for it.
+    ("ldap_2.servers.osx.dirType", "-1"),
+    ("ldap_2.servers.osx.position", "0"),
 ]
 
 ACCOUNT_PREFS = """
