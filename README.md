@@ -43,7 +43,7 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 - **No sending.** With the default settings, nothing an AI app does can send mail or delete anything for good. Drafts and the compose window leave the decision to send with you. Direct sending stays off unless you turn it on in the options, list the addresses or domains it may send to, and allow it in Thunderbird's own permission prompt.
 - **Search never returns message text.** Search results are pointers: sender, subject, date, folder, flags. An AI app reads the text of a message only by asking for that one message.
 - **Message text is marked as untrusted.** Hidden text, scripts and invisible characters are removed as far as practical, and what remains is wrapped in a block that tells the AI app it is data from the sender, never instructions.
-- **Local only, with an access key.** The host listens only on 127.0.0.1 and answers only requests that carry its access key. Setup gives the key to the AI apps you choose, so you never copy it by hand.
+- **Local only, with an access key.** The host listens only on 127.0.0.1 and answers only requests that carry its access key. The AI apps that setup connects read the key by themselves, so you never copy it by hand.
 - **You can see and stop it.** The toolbar button shows whether MCP for Thunderbird is connected, paused or not connected, and its menu has a Pause button that refuses every request until you resume. The activity log in the options lists the last 500 requests (time, app, tool and outcome), without message text or addresses.
 
 [SECURITY.md](SECURITY.md) describes the threats and the protections in detail, including their limits.

@@ -20,7 +20,7 @@ For a security problem, do not open a public issue or pull request; follow [SECU
 - Go 1.25 or later. With `GOTOOLCHAIN=auto`, Go fetches the exact version named in `host/go.mod`.
 - For the end-to-end tests on Linux: Thunderbird 153 or later, Docker, `xvfb-run`, `curl` and Python 3.
 - For the documentation check: bash.
-- For release builds: Python 3.9 or later, `sha256sum`, and `dpkg-deb` to check the `.deb`.
+- For release builds: Python 3.9 or later (`packaging/check.sh` and its self-test use features added in Python 3.9), `sha256sum`, and `dpkg-deb` to check the `.deb`.
 
 ## Build and test
 
@@ -67,7 +67,11 @@ sh packaging/build.sh
 
 It builds every archive, the `.deb` packages, the XPI and the Claude Desktop extensions into `dist/`, then runs `packaging/check.sh`, which checks the artefacts and `SHA256SUMS`, and `packaging/check-selftest.sh`, which proves `check.sh` catches the faults it claims to. The Windows installer and macOS package are built on those systems in CI; [PLATFORMS.md](docs/PLATFORMS.md) describes how.
 
-Release versions are plain `X.Y.Z` numbers. Pre-release suffixes such as `-rc1` are refused, because Thunderbird add-on versions are dotted numbers and a suffixed build would clash with the final release on addons.thunderbird.net.
+Release tags must be plain numbers, `vX.Y.Z` (for example `v1.0.0`), giving the version `X.Y.Z`. Pre-release suffixes such as `-rc1` are refused, because Thunderbird add-on versions are dotted numbers and a suffixed build would clash with the final release on addons.thunderbird.net.
+
+Release archives are not yet byte-for-byte reproducible: two builds of the same tag can differ in archive details such as timestamps. Until they are, a release is vouched for by its CI build log, `SHA256SUMS` and the software bill of materials for each archive, not by rebuilding it.
+
+Every GitHub Actions step is pinned to a full commit SHA, with the version in a comment, and the Windows installer tool (Inno Setup) to an exact Chocolatey version (`INNOSETUP_VERSION` in `.github/workflows/platforms.yml`). Update a pin by replacing both the SHA and its comment; the `docs` job fails if any step is not pinned.
 
 GitHub Actions runs the add-on tests and the documentation check on Linux, and the host tests on Linux, Windows and macOS, for every push and pull request (`.github/workflows/test.yml`). A second workflow (`.github/workflows/platforms.yml`) builds the installers and runs end-to-end tests on Windows and macOS.
 

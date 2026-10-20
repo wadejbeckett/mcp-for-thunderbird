@@ -68,12 +68,21 @@ mcp-for-thunderbird setup
 
 The package installs the program for everyone on the computer. The second command registers it with Thunderbird for your user, so each person who uses MCP for Thunderbird runs it once, as themselves, without `sudo`.
 
-**Any other distribution** (the `.tar.gz`): unpack the archive, move the program to a folder where it can stay (here `~/.local/bin`), and run it once from there:
+**Any other distribution** (the `.tar.gz`): first check which file you need. Run `uname -m`: `x86_64` means the `-linux-amd64.tar.gz` file, and `aarch64` (or `arm64`) means the `-linux-arm64.tar.gz` file. Then unpack the archive, move the program to a folder where it can stay (here `~/.local/bin`), and run it once from there. For `x86_64`:
 
 ```
 tar -xzf mcp-for-thunderbird-<version>-linux-amd64.tar.gz
 mkdir -p ~/.local/bin
 mv mcp-for-thunderbird-<version>-linux-amd64/mcp-for-thunderbird ~/.local/bin/
+~/.local/bin/mcp-for-thunderbird setup
+```
+
+For `aarch64`, use `arm64` in place of `amd64` in the first and third lines:
+
+```
+tar -xzf mcp-for-thunderbird-<version>-linux-arm64.tar.gz
+mkdir -p ~/.local/bin
+mv mcp-for-thunderbird-<version>-linux-arm64/mcp-for-thunderbird ~/.local/bin/
 ~/.local/bin/mcp-for-thunderbird setup
 ```
 
@@ -118,10 +127,15 @@ The **MCP for Thunderbird** button on Thunderbird's toolbar shows the state:
 - **paused** (badge "II"): you paused it, and every request is refused until you resume;
 - **not connected** (badge "!"): the add-on cannot reach the host. Check that the host is installed, then restart Thunderbird.
 - **Update needed** (badge "!"): the add-on and the host are too far apart in version to work together, and every request is refused. Update the older one; see [Upgrading](#upgrading).
+- **Host program problem** (badge "!"): the host started but could not serve AI apps, and the button names the reason, such as no free port between 47110 and 47119. The add-on tries again by itself; if the reason is a busy port, close the program using it or restart the computer.
 
 <!-- screenshot: docs/images/toolbar-connected.png -->
 
-Everything on the setup page can be changed later in the add-on's options: open **Add-ons and Themes**, find MCP for Thunderbird, and choose **Options** (or choose **Open options** from the toolbar button). The options also hold the contacts switch, direct sending, the attachment folder, folders to hide from AI apps, the pause switch, the access key and the activity log.
+Everything on the setup page can be changed later in the add-on's options: open **Add-ons and Themes**, find MCP for Thunderbird, and choose **Options** (or choose **Open options** from the toolbar button). The options also hold the contacts switch, direct sending, the attachment folder, folders to hide from AI apps, the pause switch, the access key and the activity log. To find and set up AI apps again, choose **Open the setup page** under **AI apps** in the options; it starts from your current choices, and **Finish** changes only what that page shows.
+
+**Excluded folders on Gmail.** Gmail shows the same message in several folders: All Mail, Important and Starred, and one folder for each label. Excluding one folder hides only that copy, so for a Gmail account exclude All Mail, Important and Starred too, or do not rely on excluded folders. The options page reminds you of this when an enabled account has an All Mail folder.
+
+**Searching message text.** A search for words in messages finds only mail whose text Thunderbird has stored on this computer. For an IMAP account, open the account's settings in Thunderbird, choose **Synchronization & Storage**, and tick **Keep messages for this account on this computer**. Searches by sender, recipient and subject work either way.
 
 **Attachment folder.** Before an AI app can save an attachment, or attach a file to a draft, choose a folder for this in the options. AI apps can save files only into that folder, and can attach any file in it to a draft, so keep in it only files you are willing to send. Attachments over 50 MiB are not saved, and a draft takes at most 20 files and 50 MiB from the folder.
 
@@ -155,7 +169,7 @@ Where the program is not on your command path, use its full path:
 
 **macOS: Claude Code and Codex may not be found from the setup page.** Claude Code and Codex are command-line programs, found through your shell's command path. Thunderbird started from the Dock or Finder does not get that path, so the setup page may say they are not installed. Use the Terminal command above instead.
 
-**If you installed the add-on before the host**, the setup page could not reach the host and found no apps. Use the command line as above.
+**If you installed the add-on before the host**, the setup page could not reach the host and found no apps. Install the host, restart Thunderbird, then choose **Open the setup page** under **AI apps** in the add-on's options, or use the command line as above.
 
 ### Claude Desktop extension
 
@@ -165,7 +179,7 @@ Each release also has a Claude Desktop extension: `mcp-for-thunderbird-<version>
 
 Any AI app that can start an MCP server over standard input and output can use the command `<path to the host> connect`, with no other settings.
 
-An app that connects over HTTP instead needs the address and the access key. Both are under **Connection details** in the add-on's options. Send the key in an `Authorization: Bearer <key>` header. If you rotate the key in the options, give such apps the new key; apps that use `connect` pick it up by themselves.
+An app that connects over HTTP instead needs the address and the access key. Both are under **Connection details** in the add-on's options. Send the key in an `Authorization: Bearer <key>` header. The host makes a new key each time Thunderbird starts it, so copy the key into such apps again after every Thunderbird start, and after you rotate the key in the options. Apps that use `connect` pick up the new key by themselves.
 
 ### More than one Thunderbird profile
 
@@ -174,7 +188,7 @@ Each Thunderbird profile with the add-on runs its own host. `connect` uses the o
 ## Upgrading
 
 - **The add-on** from addons.thunderbird.net updates itself with Thunderbird's other add-ons.
-- **The host:** install the newer installer, package or archive over the old one. When they connect, the add-on and the host check that they speak the same version of the protocol between them, so a newer add-on usually works with an older host and the other way round. When they do not, the toolbar button shows "Update needed", AI apps are told that MCP for Thunderbird and its host program need updating to matching versions, and every request is refused until you update the older one.
+- **The host:** install the newer installer, package or archive over the old one. When they connect, the add-on and the host check that they speak the same version of the protocol between them, so a newer add-on usually works with an older host and the other way round. When they do not, the toolbar button shows "Update needed", and AI apps get no mail tools until you update the older one.
 
 ### Upgrading from a versioned folder
 
@@ -197,7 +211,7 @@ First remove the add-on: in Thunderbird, open **Add-ons and Themes**, find MCP f
 
 `setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry from each AI app, keeping a backup of each file it changes.
 
-The host also keeps a small connection file, holding its port and access key, in a folder you can delete afterwards:
+The host also keeps a small connection file, holding its port and access key while Thunderbird runs, in a folder you can delete afterwards:
 
 - Windows: `%APPDATA%\mcp-for-thunderbird`
 - macOS: `~/Library/Application Support/mcp-for-thunderbird`

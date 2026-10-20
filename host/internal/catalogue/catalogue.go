@@ -69,7 +69,7 @@ var tools = []Tool{
 		Description: "Lists folders of an account with unread and total counts, leaving out folders the user has excluded.",
 		Input:       schema(nil, m{"account": account()})},
 	{Name: "mail_search", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search. hasAttachments is null when it could not be checked in time. text finds words in a message body only for mail whose body Thunderbird has stored offline (the account's Synchronisation & Storage settings); other messages can still be found by from, to and subject.",
+		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search. hasAttachments is null when it could not be checked in time. text finds words in a message body only for mail whose body Thunderbird has stored offline (the account's Synchronization & Storage settings); other messages can still be found by from, to and subject.",
 		Input: schema(nil, m{
 			"account": account(), "text": str("Text to find in the message."), "from": str("Sender contains."),
 			"to": str("Recipient contains."), "subject": str("Subject contains."),
