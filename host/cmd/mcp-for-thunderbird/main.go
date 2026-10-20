@@ -44,7 +44,12 @@ var logger = log.New(os.Stderr, "mcp-for-thunderbird: ", log.LstdFlags)
 func main() {
 	if len(os.Args) >= 3 && os.Args[2] == AddonID {
 		ignoreSIGPIPE()
-		if err := RunNative(os.Stdin, os.Stdout); err != nil {
+		// Thunderbird may end the host with SIGTERM when it quits; the
+		// host then stops as on end of input, clearing its connection file.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := RunNative(ctx, os.Stdin, os.Stdout)
+		stop()
+		if err != nil {
 			logger.Printf("stopped: %v", err)
 			os.Exit(1)
 		}
@@ -156,8 +161,9 @@ func runSetup(args []string, out io.Writer) int {
 }
 
 // RunNative serves MCP for the add-on that started the host, until the
-// add-on closes stdin. It writes nothing to stdout except framed messages.
-func RunNative(stdin io.Reader, stdout io.Writer) error {
+// add-on closes stdin or ctx ends (a signal). It writes nothing to stdout
+// except framed messages.
+func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	server.Version = Version
 	b := bridge.New(stdin, stdout, Version)
 
@@ -217,13 +223,16 @@ func RunNative(stdin io.Reader, stdout io.Writer) error {
 		return setup.Configure(names, bin)
 	})
 
-	hello, err := b.WaitHello(context.Background())
+	hello, err := b.WaitHello(ctx)
 	if errors.Is(err, bridge.ErrProtocol) {
 		// The welcome ok:false is sent. Stay up, serving nothing, until
 		// Thunderbird closes the pipe: exiting would make the add-on
 		// reconnect every 25 s and lose its "Update needed" state.
 		logger.Printf("add-on speaks another protocol; waiting for Thunderbird to close")
-		<-b.Done()
+		select {
+		case <-b.Done():
+		case <-ctx.Done():
+		}
 		return nil
 	}
 	if err != nil {
@@ -278,18 +287,19 @@ func RunNative(stdin io.Reader, stdout io.Writer) error {
 	var failed error
 	select {
 	case <-b.Done():
+	case <-ctx.Done():
 	case err := <-serveErr:
 		failed = fmt.Errorf("HTTP server failed: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	if err := hs.Shutdown(ctx); err != nil {
-		hs.Close()
-	}
-	// Clear the port and token so no proxy sends the token to whatever
-	// binds the port next (R33).
+	// Clear the port and token first, so no proxy sends the token to
+	// whatever binds the port next (R33), even if the stop is cut short.
 	if err := srv.Clear(); err != nil {
 		logger.Printf("could not clear the connection file: %v", err)
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	if err := hs.Shutdown(sctx); err != nil {
+		hs.Close()
 	}
 	if failed != nil {
 		return failed // main logs it and exits 1

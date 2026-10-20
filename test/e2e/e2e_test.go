@@ -22,8 +22,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1379,7 +1379,10 @@ func TestE2EConnectRestart(t *testing.T) {
 	restart := func(name string, callWhileClosed bool, between func(old connFile, oldPath string)) connFile {
 		old, oldPath := loadConn(t)
 		tb(t, "stop")
-		if raw, err := os.ReadFile(oldPath); err == nil {
+		// On Windows Thunderbird may end the host without notice, so the
+		// file can keep its values there; connect then skips it because
+		// its process is gone.
+		if raw, err := os.ReadFile(oldPath); err == nil && runtime.GOOS != "windows" {
 			var cleared connFile
 			if json.Unmarshal(raw, &cleared) == nil && (cleared.Port != 0 || cleared.Token != "") {
 				t.Fatalf("%s: after a clean stop the file still has port %d and a token: %v", name, cleared.Port, cleared.Token != "")
