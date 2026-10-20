@@ -187,6 +187,7 @@ jobs:
         run: |
           set -eu
           mv artefacts/dist dist
+          chmod +x dist/host_*/mcp-for-thunderbird* # artifacts lose the execute bit
           cp artefacts/dist-win/*.exe artefacts/dist-mac/*.pkg dist/
           sh packaging/add-sums.sh dist dist/*-setup.exe dist/*-macos.pkg
           sh packaging/check.sh dist
@@ -278,10 +279,12 @@ jobs:
         with:
           name: dist-mac
           path: dist-mac
-      - name: Install Thunderbird ESR, psutil and GreenMail (runner only)
+      - name: Install Thunderbird, psutil and GreenMail (runner only)
         run: |
           set -eu
-          brew install --cask thunderbird@esr || brew install --cask thunderbird
+          # The thunderbird@esr cask is still on ESR 140; the release
+          # channel is 153 or later, like Chocolatey's thunderbird.
+          brew install --cask thunderbird
           app=$(ls -d /Applications/Thunderbird*.app | head -1)
           v=$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString)
           echo "Thunderbird $v at $app"
