@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"regexp"
 	"sort"
 	"strings"
@@ -163,7 +164,13 @@ func stdioSession(t *testing.T) *mcp.ClientSession {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.Command(bin, "connect")
-	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+configHome(t))
+	// The connection file is under the throwaway config folder: Go's
+	// os.UserConfigDir is XDG_CONFIG_HOME on Linux, APPDATA on Windows and
+	// $HOME/Library/Application Support on macOS (MFT_E2E_HOME).
+	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+configHome(t), "APPDATA="+configHome(t))
+	if h := os.Getenv("MFT_E2E_HOME"); h != "" && runtime.GOOS == "darwin" {
+		cmd.Env = append(cmd.Env, "HOME="+h)
+	}
 	// connect mode logs connection changes only (never mail content).
 	var stderr lockedBuffer
 	cmd.Stderr = &stderr
@@ -368,7 +375,12 @@ func TestE2ERead(t *testing.T) {
 		Saved string `json:"saved"`
 	}
 	callOK(t, cs, "mail_attachment", map[string]any{"id": inv.ID, "name": invoicePDF}, &att)
-	dir := os.Getenv("MFT_E2E_ATTACHMENTS")
+	// The host reports the resolved path (macOS /var -> /private/var,
+	// Windows short names).
+	dir, err := filepath.EvalSymlinks(os.Getenv("MFT_E2E_ATTACHMENTS"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if filepath.Dir(att.Saved) != dir {
 		t.Fatalf("saved %q, want a file in %q", att.Saved, dir)
 	}

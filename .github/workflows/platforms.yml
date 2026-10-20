@@ -1,0 +1,301 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Windows and macOS validation (docs/PLATFORMS.md): build the release
+# artefacts, build and exercise the Windows installer and the macOS pkg on
+# their own runners, add both to SHA256SUMS, and run the end-to-end tests
+# against Thunderbird with the host installed by those installers.
+# Everything installed here is installed on the throwaway runner only.
+
+name: platforms
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v1]
+    paths:
+      - host/**
+      - addon/**
+      - packaging/**
+      - test/e2e/**
+      - .github/workflows/platforms.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platforms-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # GreenMail standalone 2.1.14 from Maven Central (com.icegreen), the
+  # version of the Docker image the Linux e2e uses; SHA-256 as Maven
+  # Central publishes it.
+  GREENMAIL_URL: https://repo1.maven.org/maven2/com/icegreen/greenmail-standalone/2.1.14/greenmail-standalone-2.1.14.jar
+  GREENMAIL_SHA256: 0381392f3a44e4d8ae78051778440f58820d01acaf5757c3f43649deda8c1d23
+  PSUTIL_VERSION: "7.0.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: host/go.mod
+          cache-dependency-path: host/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: GoReleaser snapshot, check.sh and its self-test
+        run: sh packaging/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  windows-installer:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Install Inno Setup (runner only)
+        run: choco install innosetup -y --no-progress
+      - name: Compile installer.iss (amd64 and arm64)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          $version = (Get-Content dist/metadata.json | ConvertFrom-Json).version
+          foreach ($arch in 'amd64', 'arm64') {
+            $src = (Get-ChildItem dist -Directory -Filter "host_windows_${arch}*" | Select-Object -First 1).FullName
+            & $iscc /Q "/DAppVersion=$version" "/DArch=$arch" "/DSourceDir=$src" "/DDocDir=$pwd" "/DOutputDir=$pwd\dist-win" packaging\windows\installer.iss
+            if ($LASTEXITCODE -ne 0) { throw "iscc $arch exited $LASTEXITCODE" }
+          }
+          Get-ChildItem dist-win | Format-Table Name, Length
+      - name: Silent install registers the host; uninstall removes it
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem dist-win -Filter '*-windows-amd64-setup.exe').FullName
+          $app = "$env:LOCALAPPDATA\Programs\MCP for Thunderbird"
+          $exe = "$app\mcp-for-thunderbird.exe"
+          $manifest = "$app\mcp_for_thunderbird.json"
+          $key = 'HKCU:\Software\Mozilla\NativeMessagingHosts\mcp_for_thunderbird'
+
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/LOG=install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log; throw "setup exited $($p.ExitCode)" }
+          & $exe version
+          $value = (Get-Item $key).GetValue('')
+          "HKCU key: $value"
+          if ($value -ne $manifest) { throw "registry value '$value', want '$manifest'" }
+          $m = Get-Content $manifest -Raw | ConvertFrom-Json
+          "manifest: $($m | ConvertTo-Json -Compress)"
+          if ($m.path -ne $exe -or $m.name -ne 'mcp_for_thunderbird' -or $m.allowed_extensions[0] -ne 'mcp-for-thunderbird@wadejbeckett.github.io') { throw "manifest content" }
+
+          # The uninstaller hands over to a copy of itself; wait for the files to go.
+          Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          for ($i = 0; $i -lt 120 -and (Test-Path $exe); $i++) { Start-Sleep 1 }
+          if (Test-Path $exe) { throw "uninstall left $exe" }
+          if (Test-Path $manifest) { throw "uninstall left the manifest" }
+          if (Test-Path $key) { throw "uninstall left the registry key" }
+          "uninstall: program, manifest and HKCU key removed"
+      - name: A registration failure makes Setup exit 100
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem dist-win -Filter '*-windows-amd64-setup.exe').FullName
+          $app = "$env:LOCALAPPDATA\Programs\MCP for Thunderbird"
+          # A folder where the manifest goes makes `setup --native-only` fail.
+          New-Item -ItemType Directory -Force "$app\mcp_for_thunderbird.json\block" | Out-Null
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/LOG=fail.log' -Wait -PassThru
+          "exit code: $($p.ExitCode)"
+          Select-String -Path fail.log -Pattern 'setup --native-only failed'
+          if ($p.ExitCode -ne 100) { Get-Content fail.log; throw "want exit code 100, got $($p.ExitCode)" }
+          Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          for ($i = 0; $i -lt 120 -and (Test-Path "$app\mcp-for-thunderbird.exe"); $i++) { Start-Sleep 1 }
+          Remove-Item -Recurse -Force $app -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-win
+          path: dist-win/
+          retention-days: 7
+
+  macos-pkg:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Build the pkg
+        run: |
+          set -eu
+          version=$(python3 -c 'import json; print(json.load(open("dist/metadata.json"))["version"])')
+          bin=$(ls dist/*darwin_all/mcp-for-thunderbird)
+          chmod +x "$bin" # artifacts lose the execute bit
+          lipo -archs "$bin"
+          sh packaging/macos/build-pkg.sh "$version" "$bin" dist-mac
+          pkgutil --payload-files dist-mac/*.pkg
+      - name: Install for the current user; check ownership and registration
+        run: |
+          set -eu
+          installer -pkg dist-mac/*.pkg -target CurrentUserHomeDirectory
+          me=$(id -un)
+          app="$HOME/Library/Application Support/MCP for Thunderbird"
+          manifest="$HOME/Library/Application Support/Mozilla/NativeMessagingHosts/mcp_for_thunderbird.json"
+          ls -la "$app" "$manifest"
+          for f in "$app" "$app"/* "$manifest"; do
+            owner=$(stat -f %Su "$f")
+            [ "$owner" = "$me" ] || { echo "$f is owned by $owner, not $me"; exit 1; }
+          done
+          python3 - "$manifest" "$app/mcp-for-thunderbird" <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          print("manifest:", json.dumps(m))
+          assert m["path"] == sys.argv[2], m["path"]
+          assert m["allowed_extensions"] == ["mcp-for-thunderbird@wadejbeckett.github.io"]
+          PY
+          "$app/mcp-for-thunderbird" version
+          echo "installed for $me, payload and manifest owned by $me"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-mac
+          path: dist-mac/
+          retention-days: 7
+
+  sums:
+    needs: [windows-installer, macos-pkg]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: Add the installers and the pkg to SHA256SUMS
+        run: |
+          set -eu
+          mv artefacts/dist dist
+          cp artefacts/dist-win/*.exe artefacts/dist-mac/*.pkg dist/
+          sh packaging/add-sums.sh dist dist/*-setup.exe dist/*-macos.pkg
+          sh packaging/check.sh dist
+          grep -E 'setup\.exe|macos\.pkg' dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate
+          path: |
+            dist/SHA256SUMS
+            dist/*.exe
+            dist/*.pkg
+            dist/*.xpi
+            dist/*.deb
+            dist/*.mcpb
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.spdx.json
+          retention-days: 7
+
+  e2e-windows:
+    needs: windows-installer
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/e2e/go.mod
+          cache-dependency-path: test/e2e/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-win
+          path: dist-win
+      - name: Install Thunderbird, psutil and GreenMail (runner only)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install thunderbird -y --no-progress
+          $tb = "$env:ProgramFiles\Mozilla Thunderbird\thunderbird.exe"
+          $v = (Get-Item $tb).VersionInfo.ProductVersion
+          "Thunderbird $v"
+          if ([int]($v.Split('.')[0]) -lt 153) { throw "Thunderbird $v is older than 153" }
+          "MFT_E2E_THUNDERBIRD=$tb" >> $env:GITHUB_ENV
+          python -m pip install --disable-pip-version-check "psutil==$env:PSUTIL_VERSION"
+          $jar = "$env:RUNNER_TEMP\greenmail-standalone.jar"
+          curl.exe -fsSL -o $jar $env:GREENMAIL_URL
+          if ((Get-FileHash $jar -Algorithm SHA256).Hash -ne $env:GREENMAIL_SHA256) { throw "GreenMail checksum mismatch" }
+          "MFT_E2E_GREENMAIL=$jar" >> $env:GITHUB_ENV
+      - name: Install the host with the installer
+        run: |
+          $setup = (Get-ChildItem dist-win -Filter '*-windows-amd64-setup.exe').FullName
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "setup exited $($p.ExitCode)" }
+          "MFT_E2E_BIN=$env:LOCALAPPDATA\Programs\MCP for Thunderbird\mcp-for-thunderbird.exe" >> $env:GITHUB_ENV
+      - name: End-to-end tests
+        run: python test/e2e/platform/e2e.py run -v
+
+  e2e-macos:
+    needs: macos-pkg
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/e2e/go.mod
+          cache-dependency-path: test/e2e/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-mac
+          path: dist-mac
+      - name: Install Thunderbird ESR, psutil and GreenMail (runner only)
+        run: |
+          set -eu
+          brew install --cask thunderbird@esr || brew install --cask thunderbird
+          app=$(ls -d /Applications/Thunderbird*.app | head -1)
+          v=$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString)
+          echo "Thunderbird $v at $app"
+          [ "${v%%.*}" -ge 153 ] || { echo "Thunderbird $v is older than 153"; exit 1; }
+          echo "MFT_E2E_THUNDERBIRD=$app/Contents/MacOS/thunderbird" >>"$GITHUB_ENV"
+          python -m pip install --disable-pip-version-check "psutil==$PSUTIL_VERSION"
+          jar="$RUNNER_TEMP/greenmail-standalone.jar"
+          curl -fsSL -o "$jar" "$GREENMAIL_URL"
+          echo "$GREENMAIL_SHA256  $jar" | shasum -a 256 -c -
+          echo "MFT_E2E_GREENMAIL=$jar" >>"$GITHUB_ENV"
+      - name: Install the host with the pkg
+        run: |
+          set -eu
+          installer -pkg dist-mac/*.pkg -target CurrentUserHomeDirectory
+          echo "MFT_E2E_BIN=$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird" >>"$GITHUB_ENV"
+      - name: End-to-end tests
+        run: python test/e2e/platform/e2e.py run -v
