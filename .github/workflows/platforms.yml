@@ -93,9 +93,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "ISCC.exe not found" }
-          $isccVersion = (Get-Item $iscc).VersionInfo.ProductVersion
-          "ISCC $isccVersion"
-          if (-not $isccVersion.StartsWith($env:INNOSETUP_VERSION)) { throw "ISCC $isccVersion, want $env:INNOSETUP_VERSION" }
+          # ISCC.exe carries no file version, so ask Chocolatey what it installed.
+          $installed = choco list --exact innosetup --limit-output
+          "installed: $installed"
+          if ($installed -ne "innosetup|$env:INNOSETUP_VERSION") { throw "Inno Setup '$installed', want $env:INNOSETUP_VERSION" }
           $version = (Get-Content dist/metadata.json | ConvertFrom-Json).version
           foreach ($arch in 'amd64', 'arm64') {
             $src = (Get-ChildItem dist -Directory -Filter "host_windows_${arch}*" | Select-Object -First 1).FullName
