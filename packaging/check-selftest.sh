@@ -99,6 +99,19 @@ printf x >>"$work/d/$N-$version.xpi"
 expect_fail "XPI changed after SHA256SUMS"
 
 fresh
+python3 -I - "$work/d/$N-$version.xpi" <<'PY'
+import sys, zipfile
+path = sys.argv[1]
+with zipfile.ZipFile(path) as z:
+    items = [(i, z.read(i)) for i in z.infolist() if i.filename != "LICENSE"]
+with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+    for i, d in items:
+        z.writestr(i, d)
+PY
+resign
+expect_fail "XPI without LICENSE"
+
+fresh
 grep -v '\.xpi$' "$work/d/SHA256SUMS" >"$work/sums" && mv "$work/sums" "$work/d/SHA256SUMS"
 expect_fail "XPI missing from SHA256SUMS"
 

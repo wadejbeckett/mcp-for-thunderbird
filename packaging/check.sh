@@ -11,12 +11,12 @@
 #   - no artefact carries .superpowers, spikes/, tests, node_modules or
 #     e2e-settings.json (ruling R2);
 #   - the XPI's manifest has no experiment_apis, the add-on id, and the
-#     release version's X.Y.Z core;
+#     release version's X.Y.Z core, and the XPI carries LICENSE and NOTICE;
 #   - every host binary contains the native host name and the add-on id,
 #     and the linux/amd64 one reports `mcp-for-thunderbird <version>`;
 #   - the .deb installs to /usr/lib/mcp-for-thunderbird/ and the .mcpb
 #     manifests run the bundled binary with `connect`.
-# Needs sh, python3 and sha256sum; dpkg-deb when present.
+# Needs sh, python3 (3.9 or later) and sha256sum; dpkg-deb when present.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -96,6 +96,9 @@ for f in files:
     if f.endswith(".deb") and "./usr/lib/mcp-for-thunderbird/mcp-for-thunderbird" not in n:
         fail(f"{f} does not install /usr/lib/mcp-for-thunderbird/mcp-for-thunderbird")
     if f.endswith(".xpi"):
+        for licence in ("LICENSE", "NOTICE"):
+            if licence not in n:
+                fail(f"{f} lacks {licence}")
         with zipfile.ZipFile(path) as z:
             m = json.loads(z.read("manifest.json"))
         if "experiment_apis" in m:

@@ -65,6 +65,15 @@ test("build-xpi zips the add-on without tests or package files", () => {
   assert.ok(!e.has("e2e-settings.json"), "release builds never carry e2e settings");
 });
 
+test("build-xpi includes the licence and the third-party notice", () => {
+  // MPL-2.0 and the MIT licence of the code derived from thunderbird-cli
+  // both expect their text to travel with the add-on.
+  const e = build(() => []);
+  const repo = join(here, "..", "..");
+  assert.equal(e.get("LICENSE")?.toString(), readFileSync(join(repo, "LICENSE"), "utf8"));
+  assert.equal(e.get("NOTICE")?.toString(), readFileSync(join(repo, "NOTICE"), "utf8"));
+});
+
 test("build-xpi --e2e-settings embeds the file as e2e-settings.json", () => {
   const settings = { accounts: { account1: true }, setupDone: true };
   const e = build((dir) => {

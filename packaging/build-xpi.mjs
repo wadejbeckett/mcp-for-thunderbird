@@ -4,7 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // build-xpi zips addon/ (minus tests, node_modules and the npm package
-// files) into dist/mcp-for-thunderbird-<version>.xpi. No dependencies.
+// files), plus the repository's LICENSE and NOTICE, into
+// dist/mcp-for-thunderbird-<version>.xpi. No dependencies.
 //
 //   node packaging/build-xpi.mjs [--version <v>] [--dist <dir> | --out <file>]
 //   node packaging/build-xpi.mjs --e2e-settings <file> [--out <file>]
@@ -73,6 +74,9 @@ const opts = parseArgs(process.argv.slice(2));
 const manifest = JSON.parse(readFileSync(join(addon, "manifest.json"), "utf8"));
 const version = opts.version ?? manifest.version;
 const files = walk(addon).map((p) => ({ name: relative(addon, p).split(sep).join("/"), data: readFileSync(p) }));
+// The MPL-2.0 text and the notice for the MIT-licensed code derived from
+// thunderbird-cli travel with the add-on.
+for (const name of ["LICENSE", "NOTICE"]) files.push({ name, data: readFileSync(join(root, name)) });
 if (opts.version !== null) {
   manifest.version = opts.version.split("-")[0];
   const m = files.find((f) => f.name === "manifest.json");
