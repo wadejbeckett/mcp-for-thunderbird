@@ -165,7 +165,8 @@ jobs:
           installer -pkg dist-mac/*.pkg -target CurrentUserHomeDirectory
           me=$(id -un)
           app="$HOME/Library/Application Support/MCP for Thunderbird"
-          manifest="$HOME/Library/Application Support/Mozilla/NativeMessagingHosts/mcp_for_thunderbird.json"
+          # Thunderbird's per-user folder (not Firefox's Application Support one).
+          manifest="$HOME/Library/Mozilla/NativeMessagingHosts/mcp_for_thunderbird.json"
           ls -la "$app" "$manifest"
           for f in "$app" "$app"/* "$manifest"; do
             owner=$(stat -f %Su "$f")

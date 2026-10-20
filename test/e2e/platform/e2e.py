@@ -25,7 +25,10 @@ Environment:
 
 Safety: Thunderbird runs only with --profile <throwaway> --no-remote, with
 HOME (macOS) or APPDATA (Windows) pointing at a throwaway folder so the
-connection file stays out of the real one. Every process this script
+connection file stays out of the real one. Thunderbird finds the native
+manifest the installer registered: the HKCU key on Windows, and on macOS
+~/Library/Mozilla of the real user (it does not follow HOME there), so run
+this only on a machine where installing the host is wanted. Every process this script
 signals is one it started: Thunderbird is found by its command line naming
 the throwaway profile and checked against the pid file's start time, and
 it is stopped with its own child processes only. Mail goes only to
@@ -305,7 +308,7 @@ const resolve = arguments[arguments.length - 1];
 def diagnose():
     """Prints what the harness can see when the host did not start."""
     log("diagnostics")
-    for root in (HOME, Path.home() / "Library" / "Application Support" / "Mozilla"):
+    for root in (HOME, Path.home() / "Library" / "Mozilla"):
         if root.exists():
             for f in sorted(root.rglob("*")):
                 print(f"  {f}", file=sys.stderr)
@@ -589,13 +592,6 @@ def run(goargs):
         gm = greenmail_start(jar)
         log("seeding fixtures")
         n = seed()
-
-        if MAC:
-            # The installer's postinstall registered the host in the real
-            # home. Register it in the throwaway HOME too, in case
-            # Thunderbird looks there.
-            subprocess.run([host, "setup", "--native-only"], env=tb_env(), check=True,
-                           stdout=subprocess.DEVNULL)
 
         log("building the add-on")
         attachments = WORK / "attachments"

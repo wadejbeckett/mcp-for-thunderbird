@@ -174,6 +174,37 @@ func TestRegisterLinuxPath(t *testing.T) {
 	}
 }
 
+// Thunderbird on macOS reads per-user manifests from ~/Library/Mozilla,
+// not Firefox's ~/Library/Application Support/Mozilla. Unregistering also
+// removes a manifest an earlier build left in the Firefox folder.
+func TestRegisterMacPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS path")
+	}
+	home, _ := sandbox(t)
+	if err := RegisterNative(binPath); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(home, "Library", "Mozilla", "NativeMessagingHosts", "mcp_for_thunderbird.json")
+	if b, err := os.ReadFile(p); err != nil || string(b) != string(ManifestJSON(binPath)) {
+		t.Fatalf("manifest: %s %v", b, err)
+	}
+	legacy := filepath.Join(home, "Library", "Application Support", "Mozilla", "NativeMessagingHosts", "mcp_for_thunderbird.json")
+	if _, err := os.Stat(legacy); err == nil {
+		t.Fatal("manifest written to the Firefox folder")
+	}
+	os.MkdirAll(filepath.Dir(legacy), 0o755)
+	os.WriteFile(legacy, ManifestJSON(binPath), 0o644)
+	if err := UnregisterNative(); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{p, legacy} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Fatalf("%s not removed: %v", f, err)
+		}
+	}
+}
+
 func TestRegisterRelativePathRefused(t *testing.T) {
 	sandbox(t)
 	if err := RegisterNative("mcp-for-thunderbird"); err == nil {

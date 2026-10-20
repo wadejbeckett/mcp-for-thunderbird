@@ -5,8 +5,8 @@
 #
 # macOS Installer postinstall: registers the host with Thunderbird for the
 # user who installed it (`mcp-for-thunderbird setup --native-only` writes
-# ~/Library/Application Support/Mozilla/NativeMessagingHosts/
-# mcp_for_thunderbird.json). Installer passes the install location as $2.
+# ~/Library/Mozilla/NativeMessagingHosts/mcp_for_thunderbird.json, where
+# Thunderbird looks). Installer passes the install location as $2.
 set -u
 
 # A current-user install normally runs as that user. If Installer runs the

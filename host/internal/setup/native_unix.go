@@ -13,19 +13,36 @@ import (
 	"runtime"
 )
 
-// manifestPath is where Thunderbird looks for a per-user native manifest:
-// ~/.mozilla/native-messaging-hosts on Linux, the Mozilla folder under
-// Application Support on macOS.
+// manifestDir is where Thunderbird looks for a per-user native manifest:
+// ~/.mozilla/native-messaging-hosts on Linux, and on macOS
+// ~/Library/Mozilla/NativeMessagingHosts. That is not Firefox's macOS
+// folder (~/Library/Application Support/Mozilla/NativeMessagingHosts):
+// Thunderbird keeps its user data in ~/Library, not in Application Support.
+// Thunderbird 157 on macOS reported ~/Library/Mozilla as its
+// XREUserNativeManifests folder and did not find a manifest in the Firefox
+// folder (CI run 39360260848).
+func manifestDir(home string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Mozilla", "NativeMessagingHosts")
+	}
+	return filepath.Join(home, ".mozilla", "native-messaging-hosts")
+}
+
+// legacyManifestDirs are folders earlier builds wrote to; unregistering
+// cleans them up.
+func legacyManifestDirs(home string) []string {
+	if runtime.GOOS == "darwin" {
+		return []string{filepath.Join(home, "Library", "Application Support", "Mozilla", "NativeMessagingHosts")}
+	}
+	return nil
+}
+
 func manifestPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".mozilla", "native-messaging-hosts")
-	if runtime.GOOS == "darwin" {
-		dir = filepath.Join(home, "Library", "Application Support", "Mozilla", "NativeMessagingHosts")
-	}
-	return filepath.Join(dir, HostName+".json"), nil
+	return filepath.Join(manifestDir(home), HostName+".json"), nil
 }
 
 func registerNative(binPath string) error {
@@ -41,12 +58,14 @@ func registerNative(binPath string) error {
 }
 
 func unregisterNative() error {
-	p, err := manifestPath()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+	for _, dir := range append([]string{manifestDir(home)}, legacyManifestDirs(home)...) {
+		if err := os.Remove(filepath.Join(dir, HostName+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }

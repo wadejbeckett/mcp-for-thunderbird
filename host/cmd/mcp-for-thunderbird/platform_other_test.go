@@ -16,7 +16,7 @@ func sandboxRegistry(*testing.T) {}
 // nativeManifest is where setup writes the per-user manifest.
 func nativeManifest(t *testing.T, home string) string {
 	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support", "Mozilla", "NativeMessagingHosts", "mcp_for_thunderbird.json")
+		return filepath.Join(home, "Library", "Mozilla", "NativeMessagingHosts", "mcp_for_thunderbird.json")
 	}
 	return filepath.Join(home, ".mozilla", "native-messaging-hosts", "mcp_for_thunderbird.json")
 }
