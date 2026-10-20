@@ -21,6 +21,7 @@ Environment:
                        must start mft-e2e (default under the temp dir)
   MFT_E2E_RUN          go test -run pattern (default TestE2ERead$|TestE2EOrganise$)
   MFT_E2E_KEEP=1       keep the work dir and profile
+  MFT_E2E_HEADLESS=0   show Thunderbird's window instead of running headless
 
 Safety: Thunderbird runs only with --profile <throwaway> --no-remote, with
 HOME (macOS) or APPDATA (Windows) pointing at a throwaway folder so the
@@ -57,6 +58,7 @@ WORK = Path(os.environ.get("MFT_E2E_DIR") or TMP / "mft-e2e")
 PROFILE = Path(os.environ.get("MFT_E2E_PROFILE") or TMP / "mft-e2e-profile")
 HOME = WORK / "home"
 PIDFILE = WORK / "tb.pid"
+HEADLESS = os.environ.get("MFT_E2E_HEADLESS", "1") != "0"
 
 
 def log(msg):
@@ -98,7 +100,8 @@ def config_dir():
 
 def tb_env():
     env = dict(os.environ)
-    env["MOZ_HEADLESS"] = "1"
+    if HEADLESS:
+        env["MOZ_HEADLESS"] = "1"
     env["MOZ_CRASHREPORTER_DISABLE"] = "1"
     env["XDG_CONFIG_HOME"] = str(HOME / ".config")
     if WIN:
@@ -169,7 +172,8 @@ def tb_start(extra=()):
     config_dir().mkdir(parents=True, exist_ok=True)
     out = open(WORK / "tb.out", "ab")
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if WIN else 0
-    proc = subprocess.Popen([exe, "--profile", str(PROFILE), "--no-remote", "--headless",
+    headless = ["--headless"] if HEADLESS else []
+    proc = subprocess.Popen([exe, "--profile", str(PROFILE), "--no-remote", *headless,
                              "--marionette", "--remote-allow-system-access", *extra],
                             env=tb_env(), stdin=subprocess.DEVNULL, stdout=out, stderr=out,
                             creationflags=flags, start_new_session=not WIN)
@@ -312,6 +316,12 @@ def diagnose():
                 print(f"  process {q.pid} {q.name()}", file=sys.stderr)
             except psutil.Error:
                 pass
+        if MAC:
+            # Where the main thread is (sample needs no root for our own process).
+            r = subprocess.run(["sample", str(p.pid), "2"], capture_output=True, text=True)
+            lines = r.stdout.splitlines()
+            start = next((i for i, l in enumerate(lines) if "Call graph:" in l), 0)
+            print("\n".join(lines[start:start + 120]), file=sys.stderr)
         try:
             print(marionette(["-"], DIAG_JS.replace("ADDON_ID", ADDON_ID)), file=sys.stderr)
         except SystemExit:
