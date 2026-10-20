@@ -83,12 +83,15 @@ sboms:
     documents:
       - "{{ .ArtifactName }}.spdx.json"
     # syft v1.44.0 is the newest release whose go.mod needs at most Go 1.25;
-    # it runs through `go run`, so nothing is installed.
+    # it runs through `go run`, so nothing is installed. -X main.version
+    # gives the SPDX creator line syft's version, as its release builds do;
+    # keep it equal to the version after the @.
     cmd: go
     env:
       - GOTOOLCHAIN=go1.25.14
     args:
       - run
+      - -ldflags=-X main.version=1.44.0
       - github.com/anchore/syft/cmd/syft@v1.44.0
       - scan
       - "file:$artifact"

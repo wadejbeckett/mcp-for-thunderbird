@@ -15,7 +15,9 @@
 #   - every host binary contains the native host name and the add-on id,
 #     and the linux/amd64 one reports `mcp-for-thunderbird <version>`;
 #   - the .deb installs to /usr/lib/mcp-for-thunderbird/ and the .mcpb
-#     manifests run the bundled binary with `connect`.
+#     manifests run the bundled binary with `connect`;
+#   - every SBOM is SPDX JSON whose creators name syft with a version
+#     (never "[not provided]").
 # Needs sh, python3 (3.9 or later) and sha256sum; dpkg-deb when present.
 set -eu
 
@@ -84,8 +86,18 @@ def names(path):
             return t.getnames()
     return []
 
+TOOL = re.compile(r"^Tool: syft-v?[0-9]+\.[0-9]+\.[0-9]+$")
 for f in files:
     path = f"{dist}/{f}"
+    if f.endswith(".spdx.json"):
+        try:
+            with open(path) as fh:
+                creators = json.load(fh)["creationInfo"]["creators"]
+        except (OSError, ValueError, KeyError, TypeError):
+            fail(f"{f} is not an SPDX JSON document with creators")
+        if not any(isinstance(c, str) and TOOL.match(c) for c in creators):
+            fail(f"{f} does not name the syft version that made it: {creators}")
+        continue
     n = names(path)
     if n is None:
         print(f"check: dpkg-deb not found; {f} contents not checked", file=sys.stderr)

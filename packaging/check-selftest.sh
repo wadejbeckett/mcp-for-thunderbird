@@ -118,6 +118,17 @@ grep -v '\.xpi$' "$work/d/SHA256SUMS" >"$work/sums" && mv "$work/sums" "$work/d/
 expect_fail "XPI missing from SHA256SUMS"
 
 fresh
+python3 -I - "$work/d/$N-$version-linux-amd64.tar.gz.spdx.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+d = json.load(open(path))
+d["creationInfo"]["creators"] = ["Organization: Anchore, Inc", "Tool: syft-[not provided]"]
+json.dump(d, open(path, "w"))
+PY
+resign
+expect_fail "SBOM creator without a syft version"
+
+fresh
 rm "$work/d/${N}_${debver}_arm64.deb"
 expect_fail "missing arm64 .deb"
 
