@@ -241,3 +241,37 @@ func TestSaveShortensLongNames(t *testing.T) {
 		t.Errorf("long extension: %q (%d bytes)", b, len(b))
 	}
 }
+
+// Windows reserved device names, with any extension and in any case, are
+// prefixed on every platform so a saved file never opens a device.
+func TestSaveReservedNames(t *testing.T) {
+	cases := map[string]string{
+		"CON":         "_CON",
+		"con.txt":     "_con.txt",
+		"Prn.tar.gz":  "_Prn.tar.gz",
+		"aux":         "_aux",
+		"NUL.pdf":     "_NUL.pdf",
+		"com1":        "_com1",
+		"COM9.log":    "_COM9.log",
+		"lpt1.txt":    "_lpt1.txt",
+		"LPT9":        "_LPT9",
+		"nul .txt":    "_nul .txt",
+		"CONSOLE.txt": "CONSOLE.txt",
+		"com10.txt":   "com10.txt",
+		"com0.txt":    "com0.txt",
+		"icon.png":    "icon.png",
+		"x/AUX.doc":   "_AUX.doc",
+		"lpt.txt":     "lpt.txt",
+		"notes.con":   "notes.con",
+	}
+	for in, want := range cases {
+		dir := t.TempDir()
+		p, err := files.Save(dir, in, []byte("x"))
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if filepath.Base(p) != want {
+			t.Errorf("%q saved as %s, want %s", in, filepath.Base(p), want)
+		}
+	}
+}

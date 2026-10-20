@@ -16,9 +16,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,13 +28,22 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/catalogue"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connfile"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/server"
 )
 
-// ClosedMessage is shown while Thunderbird (the upstream server) is not
-// reachable: as the server instructions and as the error of any tool call.
+// ClosedMessage is the error of any tool call while Thunderbird (the
+// upstream server) is not reachable.
 const ClosedMessage = "Thunderbird is not running. Start Thunderbird to use MCP for Thunderbird."
+
+// Instructions are the server instructions. A client may read them once
+// and keep them, so they stay true whether or not Thunderbird is running.
+const Instructions = "MCP for Thunderbird gives access to mail in Thunderbird. If no mail tools are listed, start Thunderbird; they appear automatically."
+
+// LostMessage is the tool error when a call that changes mail was sent but
+// its reply was lost; it is not repeated.
+const LostMessage = "thunderbird_error: Connection lost; the action may or may not have happened"
 
 // PollInterval is how often the proxy checks whether the upstream server has
 // appeared, gone away or rotated its token.
@@ -47,6 +58,10 @@ const (
 var (
 	errUnavailable = errors.New("upstream unavailable")
 	errRejected    = errors.New("upstream rejected the access key")
+	errLost        = errors.New("connection lost after the call was sent")
+	// errStale refuses a request whose address is no longer the live
+	// host's; it is reported as a dial failure, since nothing was sent.
+	errStale = errors.New("the connection file no longer names a running host at this address")
 )
 
 // RejectedMessage is the tool error when the upstream refuses the token even
@@ -87,6 +102,7 @@ func (p *proxy) serve(ctx context.Context, stdin io.Reader, stdout io.Writer) er
 
 	p.srv = mcp.NewServer(&mcp.Implementation{Name: server.Name, Title: "MCP for Thunderbird", Version: server.Version},
 		&mcp.ServerOptions{
+			Instructions: Instructions,
 			// Advertise list_changed even with no tools, so clients learn
 			// when Thunderbird starts and tools appear.
 			Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
@@ -123,8 +139,8 @@ type proxy struct {
 }
 
 // middleware answers the two methods whose behaviour depends on upstream
-// availability: initialize (connect, then set the instructions) and
-// tools/call (closed copy when there is no upstream).
+// availability: initialize (connect first, so the first tools/list is
+// already mirrored) and tools/call (closed copy when there is no upstream).
 func (p *proxy) middleware(ctx context.Context) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(c context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -141,16 +157,7 @@ func (p *proxy) middleware(ctx context.Context) mcp.Middleware {
 				p.tryConnect(c)
 				p.sync(c)
 				p.startPolling(ctx)
-				res, err := next(c, method, req)
-				if p.session() == nil {
-					switch r := res.(type) {
-					case *mcp.InitializeResult:
-						r.Instructions = ClosedMessage
-					case *mcp.DiscoverResult:
-						r.Instructions = ClosedMessage
-					}
-				}
-				return res, err
+				return next(c, method, req)
 			case "tools/call":
 				if p.session() == nil {
 					p.tryConnect(c)
@@ -237,21 +244,23 @@ func (p *proxy) session() *mcp.ClientSession {
 	return p.sess
 }
 
-func (p *proxy) token() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.conn == nil {
-		return ""
-	}
-	return p.conn.Token
-}
-
-// authRT adds the bearer token current at each request and notes a 401.
+// authRT adds the bearer token and notes a 401. Before every request it
+// re-reads the session's connection file: the token goes only to the
+// address a live host's file names right now. If the host has gone, its
+// port may belong to another program (ruling R33), so the request is
+// refused as a dial failure and nothing is sent.
 type authRT struct{ p *proxy }
 
 func (a authRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	tok, ok := a.p.liveToken(r.URL)
+	if !ok {
+		if r.Body != nil {
+			r.Body.Close()
+		}
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errStale}
+	}
 	r = r.Clone(r.Context())
-	r.Header.Set("Authorization", "Bearer "+a.p.token())
+	r.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := http.DefaultTransport.RoundTrip(r)
 	if err == nil && resp.StatusCode == http.StatusUnauthorized {
 		a.p.saw401.Store(true)
@@ -259,11 +268,44 @@ func (a authRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-func (p *proxy) loadConn() (*connfile.Conn, error) {
-	if p.instance != "" {
-		return connfile.Load(p.instance)
+// liveToken re-reads the current session's connection file and returns its
+// token if the file is usable (live host, port in range) and names exactly
+// the address u points at.
+func (p *proxy) liveToken(u *url.URL) (string, bool) {
+	p.mu.Lock()
+	cur := p.conn
+	p.mu.Unlock()
+	if cur == nil {
+		return "", false
 	}
-	return connfile.Newest()
+	c, err := connfile.Load(cur.Instance)
+	if err != nil || connfile.Usable(c) != nil ||
+		u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() != strconv.Itoa(c.Port) {
+		return "", false
+	}
+	p.mu.Lock()
+	if p.conn == cur {
+		p.conn = c
+	}
+	p.mu.Unlock()
+	return c.Token, true
+}
+
+// loadConn returns the usable connection file to connect to: the named
+// instance's, or the newest usable one. A file whose host has gone or
+// whose port is outside 47110-47119 is never used.
+func (p *proxy) loadConn() (*connfile.Conn, error) {
+	if p.instance == "" {
+		return connfile.Newest()
+	}
+	c, err := connfile.Load(p.instance)
+	if err != nil {
+		return nil, err
+	}
+	if err := connfile.Usable(c); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // tryConnect connects upstream if there is no session, with a short timeout.
@@ -397,14 +439,18 @@ func (p *proxy) handler(tool string) mcp.ToolHandler {
 			return closedResult(), nil
 		case errors.Is(err, errRejected):
 			return rejectedResult(), nil
+		case errors.Is(err, errLost):
+			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: LostMessage}}}, nil
 		}
 		return res, err
 	}
 }
 
-// callUpstream forwards one call. After a 401 it re-reads the connection
-// file, reconnects and retries once; any other transport failure marks the
-// upstream as gone.
+// callUpstream forwards one call. After a transport failure it drops the
+// session, re-reads the connection file, reconnects and retries once, but
+// only when repeating the call is safe: the request was refused unsent (a
+// dial failure or a 401), or the tool only reads. A call that changes mail
+// and may have reached Thunderbird is never repeated (errLost).
 func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMessage) (*mcp.CallToolResult, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		cs := p.session()
@@ -427,14 +473,17 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 			return res, nil
 		}
 		var je *jsonrpc.Error
-		if ctx.Err() != nil || (errors.As(err, &je) && !unsent(err)) {
+		if ctx.Err() != nil || (errors.As(err, &je) && !transportFailed(err)) {
 			return nil, err
 		}
 		// Transport failure: the old session may belong to a Thunderbird
 		// that restarted (new port or token). Drop it, re-read the
-		// connection file and retry once.
+		// connection file and retry once if that is safe.
 		was401 := p.saw401.Swap(false)
 		p.drop(cs)
+		if !was401 && !dialFailed(err) && !readOnly(tool) {
+			return nil, errLost
+		}
 		if attempt == 1 {
 			if was401 {
 				return nil, errRejected
@@ -445,13 +494,36 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 	return nil, errUnavailable
 }
 
-// unsent reports whether err means the request never reached the
-// upstream (no connection could be made). The SDK wraps such failures in a
-// JSON-RPC "rejected by transport" error so the session survives; for the
-// proxy they mean the upstream has gone, like any other transport failure.
-func unsent(err error) bool {
+// transportFailed reports whether err is an HTTP transport failure. The
+// SDK wraps those in a JSON-RPC "rejected by transport" error so the
+// session survives; for the proxy they mean the upstream may have gone,
+// unlike a JSON-RPC error the upstream itself answered.
+func transportFailed(err error) bool {
 	var ue *url.Error
 	return errors.As(err, &ue)
+}
+
+// dialFailed reports whether err means no connection was made, so the
+// request was never sent: only then is any call safe to repeat.
+func dialFailed(err error) bool {
+	var oe *net.OpError
+	for e := err; errors.As(e, &oe); e = oe.Err {
+		if oe.Op == "dial" {
+			return true
+		}
+	}
+	return false
+}
+
+// readOnly reports whether tool only reads, so repeating it is harmless.
+// Unknown names count as changing mail.
+func readOnly(tool string) bool {
+	for _, t := range catalogue.All() {
+		if t.Name == tool {
+			return t.ReadOnly
+		}
+	}
+	return false
 }
 
 func (p *proxy) startPolling(ctx context.Context) {

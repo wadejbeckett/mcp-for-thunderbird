@@ -506,3 +506,42 @@ func TestClientLogBounded(t *testing.T) {
 		t.Fatal("logged a name after the table was full")
 	}
 }
+
+// Switching a group off in the add-on removes its tools from the list.
+func TestSetToolsRemovesDisabledGroup(t *testing.T) {
+	h := newHarness(t, []string{"mail_search", "mail_read", "mail_mark", "mail_move", "mail_draft"})
+	changed := make(chan struct{}, 4)
+	cs := h.connect(t, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { changed <- struct{}{} },
+	})
+	if got := strings.Join(toolNames(t, cs), ","); got != "mail_draft,mail_mark,mail_move,mail_read,mail_search" {
+		t.Fatalf("before: %s", got)
+	}
+	// organise and compose switched off
+	h.addon.send(map[string]any{"type": "tools", "tools": []string{"mail_search", "mail_read"}})
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notifications/tools/list_changed within 5 s")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := strings.Join(toolNames(t, cs), ",")
+		if got == "mail_read,mail_search" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after: %s", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// An empty list removes everything.
+	h.addon.send(map[string]any{"type": "tools", "tools": []string{}})
+	deadline = time.Now().Add(3 * time.Second)
+	for len(toolNames(t, cs)) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("tools left: %v", toolNames(t, cs))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

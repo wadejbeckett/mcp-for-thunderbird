@@ -8,11 +8,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +39,8 @@ func isolate(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", d)
 	t.Setenv("HOME", d)
 	t.Setenv("AppData", d)
+	// Test upstreams serve on ephemeral ports, outside 47110-47119.
+	t.Cleanup(connfile.AllowPortsForTesting(func(p int) bool { return p > 0 && p < 65536 }))
 }
 
 // upstream is a Task 8 server with a fake add-on behind it.
@@ -41,8 +50,51 @@ type upstream struct {
 
 	mu      sync.Mutex
 	clients []string
-	failing bool // answer calls with an add-on error
+	tools   []string // tool of each call that reached the add-on
+	failing bool     // answer calls with an add-on error
 	pipes   []io.Closer
+	// cut, when set, picks POSTs whose connection is closed after the
+	// call has run, before any response is written.
+	cut func(body []byte) bool
+}
+
+func (u *upstream) calls(tool string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for _, t := range u.tools {
+		if t == tool {
+			n++
+		}
+	}
+	return n
+}
+
+func (u *upstream) setCut(f func([]byte) bool) { u.mu.Lock(); u.cut = f; u.mu.Unlock() }
+
+// handler serves s, but for a request cut picks it runs the request to
+// completion and then drops the connection without an answer: to the
+// client the request was sent and the reply lost (a non-dial failure).
+func (u *upstream) handler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u.mu.Lock()
+		cut := u.cut
+		u.mu.Unlock()
+		if cut == nil || r.Method != http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if !cut(body) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(httptest.NewRecorder(), r)
+		if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			c.Close()
+		}
+	})
 }
 
 func (u *upstream) setFailing(v bool) { u.mu.Lock(); u.failing = v; u.mu.Unlock() }
@@ -86,6 +138,7 @@ func startUpstream(t *testing.T, instance string, tools []string) *upstream {
 			}
 			u.mu.Lock()
 			u.clients = append(u.clients, m["client"].(string))
+			u.tools = append(u.tools, m["tool"].(string))
 			failing := u.failing
 			u.mu.Unlock()
 			reply := map[string]any{"type": "result", "id": m["id"], "ok": true,
@@ -105,7 +158,7 @@ func startUpstream(t *testing.T, instance string, tools []string) *upstream {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	conn := &connfile.Conn{Instance: instance, Port: port, Token: connfile.NewToken()}
+	conn := &connfile.Conn{Instance: instance, Port: port, Token: connfile.NewToken(), PID: os.Getpid()}
 	if err := connfile.Save(conn); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +166,7 @@ func startUpstream(t *testing.T, instance string, tools []string) *upstream {
 	s.Log = log.New(io.Discard, "", 0)
 	s.SetTools(tools)
 	u.srv = s
-	hs := httptest.NewUnstartedServer(s.Handler())
+	hs := httptest.NewUnstartedServer(u.handler(s.Handler()))
 	hs.Listener.Close()
 	hs.Listener = ln
 	hs.Start()
@@ -231,7 +284,7 @@ func resultText(res *mcp.CallToolResult) string {
 func TestNotRunningMessage(t *testing.T) {
 	isolate(t)
 	cs := stdioClient(t, "", time.Hour, nil)
-	if got := cs.InitializeResult().Instructions; got != "Thunderbird is not running. Start Thunderbird to use MCP for Thunderbird." {
+	if got := cs.InitializeResult().Instructions; got != "MCP for Thunderbird gives access to mail in Thunderbird. If no mail tools are listed, start Thunderbird; they appear automatically." {
 		t.Fatalf("instructions = %q", got)
 	}
 	if names := listNames(t, cs); len(names) != 0 {
@@ -247,8 +300,9 @@ func TestProxiesTools(t *testing.T) {
 	isolate(t)
 	u := startUpstream(t, "inst1", []string{"mail_accounts", "mail_search"})
 	cs := stdioClient(t, "", time.Hour, nil)
-	if got := cs.InitializeResult().Instructions; got != "" {
-		t.Fatalf("instructions = %q, want empty", got)
+	// The instructions stay true once tools appear.
+	if got := cs.InitializeResult().Instructions; got != Instructions {
+		t.Fatalf("instructions = %q", got)
 	}
 	names := listNames(t, cs)
 	if len(names) != 2 {
@@ -350,7 +404,7 @@ func TestTokenRotationRecovers(t *testing.T) {
 func TestLegacyInitializeHandshake(t *testing.T) {
 	isolate(t)
 	cs := stdioClientVersion(t, "", time.Hour, nil, "2025-06-18")
-	if got := cs.InitializeResult().Instructions; got != ClosedMessage {
+	if got := cs.InitializeResult().Instructions; got != Instructions {
 		t.Fatalf("instructions = %q", got)
 	}
 	u := startUpstream(t, "legacy", []string{"mail_accounts"})
@@ -550,5 +604,242 @@ func TestNoGoroutineLeakAcrossReconnects(t *testing.T) {
 	}
 	if got := settle(); got > base+10 {
 		t.Fatalf("proxy goroutines grew from %d to %d over 20 reconnects", base, got)
+	}
+}
+
+// deadPID is the PID of a child process that has already exited.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd.Process.Pid
+}
+
+// squatter is a server another local user could run on a port the
+// connection file names. It records every request's Authorization header.
+type squatter struct {
+	hs   *httptest.Server
+	mu   sync.Mutex
+	auth []string
+}
+
+func newSquatter(t *testing.T, ln net.Listener) *squatter {
+	t.Helper()
+	sq := &squatter{}
+	sq.hs = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sq.mu.Lock()
+		sq.auth = append(sq.auth, r.Header.Get("Authorization"))
+		sq.mu.Unlock()
+		http.Error(w, "nothing here", http.StatusNotFound)
+	}))
+	if ln != nil {
+		sq.hs.Listener.Close()
+		sq.hs.Listener = ln
+	}
+	sq.hs.Start()
+	t.Cleanup(sq.hs.Close)
+	return sq
+}
+
+func (sq *squatter) port() int { return sq.hs.Listener.Addr().(*net.TCPAddr).Port }
+
+// tokenSeen reports whether any request carried tok (or any request at
+// all, for tok == "").
+func (sq *squatter) tokenSeen(tok string) bool {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+	for _, a := range sq.auth {
+		if tok == "" || strings.Contains(a, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// I1/R33: Thunderbird exited without clearing its file (a crash), and
+// another program now listens on its port. The proxy, polling every
+// 50 ms, must never send that program a request.
+func TestStaleFileNeverReachesSquatter(t *testing.T) {
+	isolate(t)
+	sq := newSquatter(t, nil)
+	tok := connfile.NewToken()
+	if err := connfile.Save(&connfile.Conn{Instance: "stale", Port: sq.port(), Token: tok, PID: deadPID(t)}); err != nil {
+		t.Fatal(err)
+	}
+	cs := stdioClient(t, "", 50*time.Millisecond, nil)
+	if res := callTool(t, cs, "mail_accounts"); !res.IsError || resultText(res) != ClosedMessage {
+		t.Fatalf("call = %v %q", res.IsError, resultText(res))
+	}
+	time.Sleep(500 * time.Millisecond) // about ten polls
+	if sq.tokenSeen("") {
+		t.Fatal("the proxy sent a request to the stale port")
+	}
+	// The same with --instance naming the stale file.
+	cs2 := stdioClient(t, "stale", 50*time.Millisecond, nil)
+	callTool(t, cs2, "mail_accounts")
+	time.Sleep(300 * time.Millisecond)
+	if sq.tokenSeen("") {
+		t.Fatal("the proxy sent a request to the stale port (--instance)")
+	}
+}
+
+// A live session whose host has gone: the next requests must not follow
+// the session's old port to the program that took it over.
+func TestLiveSessionNeverReachesSquatter(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "takeover", []string{"mail_accounts"})
+	cs := stdioClient(t, "", 50*time.Millisecond, nil)
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first call: %q", resultText(res))
+	}
+	tok := u.srv.Token()
+	port := u.hs.Listener.Addr().(*net.TCPAddr).Port
+	// The host dies without clearing its file; the file still names the
+	// port and token, with a PID that is gone.
+	conn, err := connfile.Load("takeover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.PID = deadPID(t)
+	if err := connfile.Save(conn); err != nil {
+		t.Fatal(err)
+	}
+	u.stop()
+	var ln net.Listener
+	for i := 0; i < 50; i++ {
+		if ln, err = net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ln == nil {
+		t.Skipf("could not take over port %d: %v", port, err)
+	}
+	sq := newSquatter(t, ln)
+	callTool(t, cs, "mail_accounts")
+	time.Sleep(500 * time.Millisecond)
+	if sq.tokenSeen(tok) {
+		t.Fatal("the token was sent to the program that took over the port")
+	}
+}
+
+// With the real port rule, a live file naming a port outside 47110-47119
+// is never used.
+func TestPortOutsideRangeRefused(t *testing.T) {
+	isolate(t)
+	restore := connfile.AllowPortsForTesting(func(p int) bool { return p >= connfile.PortMin && p <= connfile.PortMax })
+	defer restore()
+	sq := newSquatter(t, nil)
+	if err := connfile.Save(&connfile.Conn{Instance: "far", Port: sq.port(), Token: connfile.NewToken(), PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	cs := stdioClient(t, "far", 50*time.Millisecond, nil)
+	if res := callTool(t, cs, "mail_accounts"); !res.IsError || resultText(res) != ClosedMessage {
+		t.Fatalf("call = %v %q", res.IsError, resultText(res))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if sq.tokenSeen("") {
+		t.Fatal("the proxy sent a request to a port outside 47110-47119")
+	}
+}
+
+// The token goes to the connection file's address only: a redirect is
+// never followed.
+func TestRedirectNotFollowed(t *testing.T) {
+	isolate(t)
+	target := newSquatter(t, nil)
+	tok := connfile.NewToken()
+	redir := httptest.NewServer(http.RedirectHandler(target.hs.URL+"/mcp", http.StatusTemporaryRedirect))
+	t.Cleanup(redir.Close)
+	port := redir.Listener.Addr().(*net.TCPAddr).Port
+	if err := connfile.Save(&connfile.Conn{Instance: "redir", Port: port, Token: tok, PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	cs := stdioClient(t, "", 50*time.Millisecond, nil)
+	callTool(t, cs, "mail_accounts")
+	time.Sleep(300 * time.Millisecond)
+	if target.tokenSeen("") {
+		t.Fatal("the proxy followed a redirect")
+	}
+}
+
+// Connect mode forwards any tool name; the upstream refuses one it has
+// not registered, and the add-on is never asked.
+func TestUnregisteredToolRefusedUpstream(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "unreg", []string{"mail_accounts"})
+	cs := stdioClient(t, "", time.Hour, nil)
+	for _, name := range []string{"mail_send", "mail_bogus"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: map[string]any{}})
+		cancel()
+		if err == nil && !res.IsError {
+			t.Fatalf("%s: call succeeded: %q", name, resultText(res))
+		}
+		if n := u.calls(name); n != 0 {
+			t.Fatalf("%s reached the add-on %d times", name, n)
+		}
+	}
+}
+
+func isCall(tool string) func([]byte) bool {
+	return func(b []byte) bool {
+		return bytes.Contains(b, []byte(`"tools/call"`)) && bytes.Contains(b, []byte(`"`+tool+`"`))
+	}
+}
+
+// A write whose reply is lost after it was sent is never retried: it may
+// have happened.
+func TestWriteNotRetriedAfterLostReply(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "lost", []string{"mail_accounts", "mail_move"})
+	cs := stdioClient(t, "", time.Hour, nil)
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first call: %q", resultText(res))
+	}
+	u.setCut(isCall("mail_move"))
+	res := callTool(t, cs, "mail_move")
+	if !res.IsError || resultText(res) != "thunderbird_error: Connection lost; the action may or may not have happened" {
+		t.Fatalf("call = %v %q", res.IsError, resultText(res))
+	}
+	if n := u.calls("mail_move"); n != 1 {
+		t.Fatalf("mail_move reached the add-on %d times, want 1", n)
+	}
+}
+
+// A read whose reply is lost is safe to repeat and is retried once.
+func TestReadRetriedAfterLostReply(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "lostread", []string{"mail_accounts"})
+	cs := stdioClient(t, "", time.Hour, nil)
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first call: %q", resultText(res))
+	}
+	var once sync.Once
+	u.setCut(func(b []byte) bool {
+		hit := false
+		if isCall("mail_accounts")(b) {
+			once.Do(func() { hit = true })
+		}
+		return hit
+	})
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("retried read: %q", resultText(res))
+	}
+	if n := u.calls("mail_accounts"); n != 3 {
+		t.Fatalf("mail_accounts reached the add-on %d times, want 3", n)
+	}
+}
+
+func TestDialErrorDetection(t *testing.T) {
+	dial := &url.Error{Op: "Post", URL: "http://127.0.0.1:1/mcp", Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("refused")}}
+	read := &url.Error{Op: "Post", URL: "http://127.0.0.1:1/mcp", Err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("reset")}}
+	if !dialFailed(fmt.Errorf("wrapped: %w", dial)) {
+		t.Fatal("dial error not detected")
+	}
+	if dialFailed(read) || dialFailed(io.EOF) || dialFailed(&url.Error{Op: "Post", URL: "x", Err: io.ErrUnexpectedEOF}) {
+		t.Fatal("non-dial error taken as dial")
 	}
 }

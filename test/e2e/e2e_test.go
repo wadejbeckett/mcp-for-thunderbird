@@ -1365,8 +1365,9 @@ func TestE2EInjectionDefaults(t *testing.T) {
 }
 
 // TestE2EConnectRestart checks that one connect-mode session survives
-// Thunderbird restarts: same port and token, same port with a new token,
-// and a new port; and a quick restart the proxy's 5 s poll may not notice.
+// Thunderbird restarts: a plain restart (new token, R33), a removed
+// connection file, and a new port; and a quick restart the proxy's 5 s
+// poll may not notice. A clean stop clears the port and token in the file.
 // The first call once the new connection file exists must succeed. It
 // restarts the e2e Thunderbird, so it runs last.
 func TestE2EConnectRestart(t *testing.T) {
@@ -1378,6 +1379,12 @@ func TestE2EConnectRestart(t *testing.T) {
 	restart := func(name string, callWhileClosed bool, between func(old connFile, oldPath string)) connFile {
 		old, oldPath := loadConn(t)
 		tb(t, "stop")
+		if raw, err := os.ReadFile(oldPath); err == nil {
+			var cleared connFile
+			if json.Unmarshal(raw, &cleared) == nil && (cleared.Port != 0 || cleared.Token != "") {
+				t.Fatalf("%s: after a clean stop the file still has port %d and a token: %v", name, cleared.Port, cleared.Token != "")
+			}
+		}
 		if callWhileClosed {
 			text, isErr := call(t, cs, "mail_accounts", map[string]any{})
 			if !isErr || text != closedMessage {
@@ -1396,19 +1403,19 @@ func TestE2EConnectRestart(t *testing.T) {
 	}
 
 	old, _ := loadConn(t)
-	c := restart("same port, same token", true, func(connFile, string) {})
-	if c.Port != old.Port || c.Token != old.Token {
-		t.Fatalf("plain restart changed port or token: %d -> %d", old.Port, c.Port)
+	c := restart("plain restart", true, func(connFile, string) {})
+	if c.Token == old.Token {
+		t.Fatal("plain restart kept the token; every start must mint a new one (R33)")
 	}
 
 	old = c
-	c = restart("same port, new token", true, func(_ connFile, path string) {
+	c = restart("connection file removed", true, func(_ connFile, path string) {
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if c.Port != old.Port || c.Token == old.Token {
-		t.Fatalf("want same port and a new token: %d -> %d, token changed %v", old.Port, c.Port, c.Token != old.Token)
+	if c.Token == old.Token {
+		t.Fatal("want a new token")
 	}
 
 	old = c

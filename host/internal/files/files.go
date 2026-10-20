@@ -62,7 +62,30 @@ func sanitise(name string) string {
 	if name == "" {
 		return "attachment"
 	}
+	if reserved(name) {
+		name = "_" + name
+	}
 	return name
+}
+
+// reserved reports whether Windows would open a device for name: CON,
+// PRN, AUX, NUL, COM1-9 or LPT1-9 (also with superscript 1-3), in any
+// case, alone or before any extension, ignoring trailing spaces. Such names
+// are prefixed on every platform, so a folder synced to Windows is safe too.
+func reserved(name string) bool {
+	stem := name
+	if i := strings.IndexByte(stem, '.'); i >= 0 {
+		stem = stem[:i]
+	}
+	stem = strings.ToUpper(strings.TrimRight(stem, " "))
+	switch stem {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if r := []rune(stem); len(r) == 4 && (string(r[:3]) == "COM" || string(r[:3]) == "LPT") {
+		return (r[3] >= '1' && r[3] <= '9') || r[3] == '¹' || r[3] == '²' || r[3] == '³'
+	}
+	return false
 }
 
 // cut shortens s to at most n bytes without splitting a UTF-8 sequence.

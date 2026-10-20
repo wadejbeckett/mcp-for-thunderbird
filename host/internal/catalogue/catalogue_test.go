@@ -199,3 +199,17 @@ func TestAttachmentAndFilterSuggestDescriptions(t *testing.T) {
 		t.Errorf("mail_filter_suggest actions minItems = %v, want 1", acts["minItems"])
 	}
 }
+
+func TestSearchBodyOfflineAndMoveTrashResults(t *testing.T) {
+	if d := byName(t, "mail_search").Description; !strings.Contains(d, "stored offline") {
+		t.Errorf("mail_search must say body text is found only in mail stored offline: %s", d)
+	}
+	for _, n := range []string{"mail_move", "mail_trash"} {
+		if d := byName(t, n).Description; !strings.Contains(d, "{done: ids changed, failed: [{id, code}]}") {
+			t.Errorf("%s must describe its {done, failed} result: %s", n, d)
+		}
+	}
+	if d := byName(t, "mail_move").Description; !strings.Contains(d, "Outbox") {
+		t.Errorf("mail_move must say it refuses the Outbox: %s", d)
+	}
+}

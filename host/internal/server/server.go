@@ -160,6 +160,16 @@ func (s *Server) Rotate() error {
 	return connfile.Rotate(s.conn)
 }
 
+// Clear forgets the port and token and saves the connection file, so
+// nothing can use them once the host stops (ruling R33). The guard then
+// authorises nothing.
+func (s *Server) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conn.Port, s.conn.Token = 0, ""
+	return connfile.Save(s.conn)
+}
+
 // maxClientNames bounds the client names logged.
 const maxClientNames = 256
 

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -30,6 +31,10 @@ const ProtocolVersion = 1
 const blobChunk = 760 * 1024
 
 const defaultCallTimeout = 60 * time.Second
+
+// ErrProtocol is wrapped by WaitHello's error when the add-on speaks
+// another protocol version; the welcome ok:false has already been sent.
+var ErrProtocol = errors.New("protocol mismatch")
 
 // Hello is the add-on's opening message.
 type Hello struct {
@@ -117,6 +122,7 @@ type Bridge struct {
 	mu          sync.Mutex
 	pending     map[string]chan outcome
 	closed      bool
+	mismatched  bool // the add-on speaks another protocol: serve nothing
 	callTimeout time.Duration
 	onTools     func([]string)
 	onConfig    func(string)
@@ -328,14 +334,24 @@ func (b *Bridge) shutdown() {
 func (b *Bridge) dispatch(f frame) {
 	b.mu.Lock()
 	onTools, onConfig, onRotate, onToken, onClients := b.onTools, b.onConfig, b.onRotate, b.onToken, b.onClients
+	if b.mismatched {
+		// After a protocol mismatch only token and clients requests are
+		// answered, empty, so the add-on's pages do not wait for nothing.
+		onTools, onConfig, onRotate = nil, nil, nil
+		onToken = func() (string, string) { return "", "" }
+		onClients = func([]string) []ClientStatus { return nil }
+	}
 	b.mu.Unlock()
 
 	switch f.Type {
 	case "hello":
 		if f.Protocol != ProtocolVersion {
+			b.mu.Lock()
+			b.mismatched = true
+			b.mu.Unlock()
 			msg := fmt.Sprintf("Unsupported protocol %d; this host speaks protocol %d. Update MCP for Thunderbird.", f.Protocol, ProtocolVersion)
 			_ = b.SendWelcome(0, msg)
-			b.deliverHello(helloOutcome{err: fmt.Errorf("%s", msg)})
+			b.deliverHello(helloOutcome{err: fmt.Errorf("%w: %s", ErrProtocol, msg)})
 			return
 		}
 		b.deliverHello(helloOutcome{h: Hello{Protocol: f.Protocol, Version: f.Version,

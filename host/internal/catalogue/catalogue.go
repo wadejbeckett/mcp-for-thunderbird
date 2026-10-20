@@ -69,7 +69,7 @@ var tools = []Tool{
 		Description: "Lists folders of an account with unread and total counts, leaving out folders the user has excluded.",
 		Input:       schema(nil, m{"account": account()})},
 	{Name: "mail_search", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search. hasAttachments is null when it could not be checked in time.",
+		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search. hasAttachments is null when it could not be checked in time. text finds words in a message body only for mail whose body Thunderbird has stored offline (the account's Synchronisation & Storage settings); other messages can still be found by from, to and subject.",
 		Input: schema(nil, m{
 			"account": account(), "text": str("Text to find in the message."), "from": str("Sender contains."),
 			"to": str("Recipient contains."), "subject": str("Subject contains."),
@@ -126,7 +126,7 @@ var tools = []Tool{
 			"account": account(), "ids": strs("Message ids."), "add": strs("Tags to add."), "remove": strs("Tags to remove."),
 		})},
 	{Name: "mail_move", Group: "organise",
-		Description: "Moves or copies messages to another folder of the same account; refuses other accounts and excluded folders.",
+		Description: "Moves or copies messages to another folder of the same account; refuses other accounts, excluded folders, Trash, Junk and the Outbox (use mail_trash to bin mail). Returns {done: ids changed, failed: [{id, code}]}.",
 		Input: schema([]string{"ids", "folder"}, m{
 			"account": account(), "ids": strs("Message ids."), "folder": str("Target folder path."),
 			"copy": boolean("Copy instead of move."),
@@ -135,7 +135,7 @@ var tools = []Tool{
 		Description: "Archives messages; Thunderbird picks the destination under the account's archive folder. Returns {done, failed: [{id, code}]}.",
 		Input:       schema([]string{"ids"}, m{"account": account(), "ids": strs("Message ids.")})},
 	{Name: "mail_trash", Group: "organise", Destructive: true,
-		Description: "Moves messages to the account's Trash folder.",
+		Description: "Moves messages to the account's Trash folder. Returns {done: ids changed, failed: [{id, code}]}.",
 		Input:       schema([]string{"ids"}, m{"account": account(), "ids": strs("Message ids.")})},
 	{Name: "mail_draft", Group: "compose",
 		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards are saved to Drafts with threading kept. Returns draftId, the saved draft's message id; draftId may be null when Thunderbird has not yet shown the saved draft in Drafts (the draft is still saved; do not save it again).",

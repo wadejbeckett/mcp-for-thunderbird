@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -156,8 +155,6 @@ func runSetup(args []string, out io.Writer) int {
 	return code
 }
 
-var tokenRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 // RunNative serves MCP for the add-on that started the host, until the
 // add-on closes stdin. It writes nothing to stdout except framed messages.
 func RunNative(stdin io.Reader, stdout io.Writer) error {
@@ -221,19 +218,29 @@ func RunNative(stdin io.Reader, stdout io.Writer) error {
 	})
 
 	hello, err := b.WaitHello(context.Background())
+	if errors.Is(err, bridge.ErrProtocol) {
+		// The welcome ok:false is sent. Stay up, serving nothing, until
+		// Thunderbird closes the pipe: exiting would make the add-on
+		// reconnect every 25 s and lose its "Update needed" state.
+		logger.Printf("add-on speaks another protocol; waiting for Thunderbird to close")
+		<-b.Done()
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	logger.Printf("started, add-on %s, protocol %d", safe(hello.Version), hello.Protocol)
 
-	conn, err := connfile.Load(hello.Instance)
-	if err != nil || !tokenRE.MatchString(conn.Token) {
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			logger.Printf("connection file unreadable; creating a new one")
-		}
-		conn = &connfile.Conn{Instance: hello.Instance, Token: connfile.NewToken()}
+	// Every start mints a new token (R33). The old file only suggests the
+	// port to try first, after a crash left it set.
+	preferred := 0
+	if old, err := connfile.Load(hello.Instance); err == nil {
+		preferred = old.Port
+	} else if !errors.Is(err, os.ErrNotExist) {
+		logger.Printf("connection file unreadable; creating a new one")
 	}
-	ln, port, err := connfile.PickPort(conn.Port)
+	conn := &connfile.Conn{Instance: hello.Instance, Token: connfile.NewToken()}
+	ln, port, err := connfile.PickPort(preferred)
 	if err != nil {
 		_ = b.SendWelcome(0, "No free port between 47110 and 47119")
 		return err
@@ -278,6 +285,11 @@ func RunNative(stdin io.Reader, stdout io.Writer) error {
 	defer cancel()
 	if err := hs.Shutdown(ctx); err != nil {
 		hs.Close()
+	}
+	// Clear the port and token so no proxy sends the token to whatever
+	// binds the port next (R33).
+	if err := srv.Clear(); err != nil {
+		logger.Printf("could not clear the connection file: %v", err)
 	}
 	if failed != nil {
 		return failed // main logs it and exits 1

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/acl"
@@ -27,7 +28,52 @@ const (
 	PortMax = 47119
 )
 
-var instanceRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var (
+	instanceRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	tokenRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// portCheck holds the port rule Usable applies; only tests in other
+// packages change it, through AllowPortsForTesting.
+var portCheck atomic.Pointer[func(int) bool]
+
+func inRange(p int) bool { return p >= PortMin && p <= PortMax }
+
+func portAllowed(p int) bool {
+	if f := portCheck.Load(); f != nil {
+		return (*f)(p)
+	}
+	return inRange(p)
+}
+
+// AllowPortsForTesting replaces the port rule of Usable so tests in other
+// packages can serve on ephemeral ports; it returns a function that
+// restores the 47110-47119 rule. Never call it outside tests.
+func AllowPortsForTesting(allow func(port int) bool) (restore func()) {
+	portCheck.Store(&allow)
+	return func() { portCheck.Store(nil) }
+}
+
+// Usable reports why c must not be used to reach a host, or nil. A file is
+// usable only while the host that wrote it is alive (it clears its port on
+// a clean exit) and names a port in 47110-47119 and a well-formed token;
+// otherwise the port may now belong to another program, which must never
+// be sent the token (ruling R33).
+func Usable(c *Conn) error {
+	switch {
+	case c == nil:
+		return errors.New("connfile: no connection")
+	case c.Port == 0:
+		return errors.New("connfile: MCP for Thunderbird is not running")
+	case !portAllowed(c.Port):
+		return fmt.Errorf("connfile: port %d is outside %d-%d", c.Port, PortMin, PortMax)
+	case !tokenRE.MatchString(c.Token):
+		return errors.New("connfile: no valid token")
+	case !pidAlive(c.PID):
+		return errors.New("connfile: MCP for Thunderbird is not running")
+	}
+	return nil
+}
 
 // Conn is the content of one connection file.
 type Conn struct {
@@ -181,7 +227,8 @@ func PickPort(preferred int) (net.Listener, int, error) {
 	return nil, 0, fmt.Errorf("connfile: no free port in %d-%d", PortMin, PortMax)
 }
 
-// Newest returns the most recently updated connection file.
+// Newest returns the most recently updated usable connection file (see
+// Usable); files of hosts that have gone are skipped.
 func Newest() (*Conn, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -198,7 +245,7 @@ func Newest() (*Conn, error) {
 			continue
 		}
 		c, err := read(filepath.Join(dir, n))
-		if err != nil {
+		if err != nil || Usable(c) != nil {
 			continue
 		}
 		if best == nil || c.UpdatedAt.After(best.UpdatedAt) {

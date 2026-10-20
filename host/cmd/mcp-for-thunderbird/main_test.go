@@ -249,6 +249,153 @@ func TestNativeModeLifecycle(t *testing.T) {
 	if bytes.Contains(stderr.Bytes(), []byte(conn.Token)) {
 		t.Fatal("token appears in stderr")
 	}
+	// A clean exit clears the port and token from the connection file, so
+	// no proxy sends the token to whatever binds that port next (R33).
+	raw, err = os.ReadFile(filepath.Join(userConfigDir(home, cfg), "mcp-for-thunderbird", "connection-lifecycle.json"))
+	if err != nil {
+		t.Fatalf("connection file after exit: %v", err)
+	}
+	conn.Port, conn.Token = -1, "x"
+	if err := json.Unmarshal(raw, &conn); err != nil {
+		t.Fatal(err)
+	}
+	if conn.Port != 0 || conn.Token != "" {
+		t.Fatalf("after exit: port %d token len %d, want port 0 and no token", conn.Port, len(conn.Token))
+	}
+}
+
+// hostProc is the built binary running in native mode.
+type hostProc struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.Reader
+	stderr *bytes.Buffer
+}
+
+// buildHost builds the binary into dir.
+func buildHost(t *testing.T, dir string) string {
+	t.Helper()
+	bin := filepath.Join(dir, "mcp-for-thunderbird")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// startHost starts bin as Thunderbird would, sandboxed under dir (R24).
+func startHost(t *testing.T, bin, dir string) *hostProc {
+	t.Helper()
+	home, cfg := filepath.Join(dir, "home"), filepath.Join(dir, "config")
+	emptyPath := filepath.Join(dir, "path")
+	os.MkdirAll(emptyPath, 0o755)
+	cmd := exec.Command(bin, filepath.Join(dir, "mcp_for_thunderbird.json"), AddonID)
+	cmd.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "XDG_CONFIG_HOME="+cfg,
+		"APPDATA="+cfg, "LOCALAPPDATA="+cfg, "CODEX_HOME=", "CLAUDE_CONFIG_DIR=", "PATH="+emptyPath)
+	h := &hostProc{cmd: cmd, stderr: &bytes.Buffer{}}
+	var err error
+	if h.stdin, err = cmd.StdinPipe(); err != nil {
+		t.Fatal(err)
+	}
+	if h.stdout, err = cmd.StdoutPipe(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = h.stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return h
+}
+
+func (h *hostProc) send(t *testing.T, m map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(m)
+	if err := nativemsg.Write(h.stdin, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stop closes stdin and waits up to 2 s for exit code 0.
+func (h *hostProc) stop(t *testing.T) {
+	t.Helper()
+	h.stdin.Close()
+	done := make(chan error, 1)
+	go func() { _, _ = io.Copy(io.Discard, h.stdout); done <- h.cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("exit: %v\nstderr:\n%s", err, h.stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("host still running 2 s after stdin closed\nstderr:\n%s", h.stderr.String())
+	}
+}
+
+func hello(instance string, protocol int) map[string]any {
+	return map[string]any{"type": "hello", "protocol": protocol, "version": "1.0.0",
+		"instance": instance, "tools": []string{"mail_search"}, "attachmentDir": ""}
+}
+
+// R33: every start mints a new token; a token copied before a restart no
+// longer works after it.
+func TestFreshTokenEveryStart(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	tokens := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		h := startHost(t, bin, dir)
+		h.send(t, hello("fresh", 1))
+		if w := readFrame(t, h.stdout); w["ok"] != true {
+			t.Fatalf("welcome = %v", w)
+		}
+		h.send(t, map[string]any{"type": "token_request"})
+		tok := readFrame(t, h.stdout)
+		token, _ := tok["token"].(string)
+		if len(token) != 64 {
+			t.Fatalf("token reply = %v", tok)
+		}
+		tokens[token] = true
+		h.stop(t)
+	}
+	if len(tokens) != 2 {
+		t.Fatal("the second start reused the first start's token")
+	}
+}
+
+// After a protocol mismatch the host refuses everything but stays running
+// until Thunderbird closes the pipe, so the add-on keeps showing "Update
+// needed" instead of reconnecting every 25 s.
+func TestProtocolMismatchWaitsForEOF(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	h := startHost(t, bin, dir)
+	h.send(t, hello("mismatch", 2))
+	w := readFrame(t, h.stdout)
+	if w["type"] != "welcome" || w["ok"] != false || w["protocol"] != float64(1) {
+		t.Fatalf("welcome = %v", w)
+	}
+	h.send(t, hello("mismatch", 1)) // a second hello is not served
+	h.send(t, map[string]any{"type": "token_request"})
+	if tok := readFrame(t, h.stdout); tok["type"] != "token" || (tok["token"] != nil && tok["token"] != "") {
+		t.Fatalf("token reply after a mismatch = %v", tok)
+	}
+	h.send(t, map[string]any{"type": "clients_detect", "req": "r1"})
+	if cr := readFrame(t, h.stdout); cr["type"] != "clients_result" || len(cr["clients"].([]any)) != 0 {
+		t.Fatalf("clients_result after a mismatch = %v", cr)
+	}
+	time.Sleep(300 * time.Millisecond)
+	h.send(t, map[string]any{"type": "token_request"}) // still running and answering
+	if tok := readFrame(t, h.stdout); tok["type"] != "token" || (tok["token"] != nil && tok["token"] != "") {
+		t.Fatalf("second token reply = %v", tok)
+	}
+	if _, err := os.Stat(filepath.Join(userConfigDir(filepath.Join(dir, "home"), filepath.Join(dir, "config")),
+		"mcp-for-thunderbird", "connection-mismatch.json")); err == nil {
+		t.Fatal("a connection file was written after a mismatch")
+	}
+	h.stop(t)
 }
 
 // userConfigDir is os.UserConfigDir under the test's HOME, APPDATA and
