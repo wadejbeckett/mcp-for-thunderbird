@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,9 +76,18 @@ func readFrame(t *testing.T, r io.Reader) map[string]any {
 func TestNativeModeLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "mcp-for-thunderbird")
+	if runtime.GOOS == "windows" {
+		bin += ".exe" // without it exec cannot start the file
+	}
 	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	// The host records its own resolved path (macOS /var -> /private/var,
+	// Windows short names such as RUNNER~1).
+	realBin, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	home := filepath.Join(dir, "home")
@@ -118,7 +128,7 @@ func TestNativeModeLifecycle(t *testing.T) {
 		t.Fatalf("port %d outside 47110-47119", port)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(cfg, "mcp-for-thunderbird", "connection-lifecycle.json"))
+	raw, err := os.ReadFile(filepath.Join(userConfigDir(home, cfg), "mcp-for-thunderbird", "connection-lifecycle.json"))
 	if err != nil {
 		t.Fatalf("connection file: %v", err)
 	}
@@ -183,8 +193,8 @@ func TestNativeModeLifecycle(t *testing.T) {
 	if err != nil || json.Unmarshal(raw, &cursor) != nil {
 		t.Fatalf("mcp.json: %s %v", raw, err)
 	}
-	if e := cursor.MCPServers["mcp-for-thunderbird"]; e.Command != bin || !reflect.DeepEqual(e.Args, []string{"connect"}) {
-		t.Fatalf("cursor entry %+v, want command %s", e, bin)
+	if e := cursor.MCPServers["mcp-for-thunderbird"]; e.Command != realBin || !reflect.DeepEqual(e.Args, []string{"connect"}) {
+		t.Fatalf("cursor entry %+v, want command %s", e, realBin)
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "lifecycle-test", Version: "1"}, nil)
@@ -241,10 +251,23 @@ func TestNativeModeLifecycle(t *testing.T) {
 	}
 }
 
+// userConfigDir is os.UserConfigDir under the test's HOME, APPDATA and
+// XDG_CONFIG_HOME: the connection file lives there.
+func userConfigDir(home, cfg string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support")
+	default: // XDG_CONFIG_HOME on Linux, APPDATA on Windows
+		return cfg
+	}
+}
+
 // setupEnv sandboxes every home and config directory and PATH for an
-// in-process run of the setup subcommand (R24).
+// in-process run of the setup subcommand (R24), and on Windows the HKCU
+// registration key.
 func setupEnv(t *testing.T) string {
 	t.Helper()
+	sandboxRegistry(t)
 	home := t.TempDir()
 	for k, v := range map[string]string{"HOME": home, "USERPROFILE": home,
 		"XDG_CONFIG_HOME": filepath.Join(home, ".config"), "APPDATA": filepath.Join(home, "AppData"),
@@ -262,7 +285,8 @@ func TestSetupNativeOnly(t *testing.T) {
 	if code := run([]string{"setup", "--native-only"}, &out); code != 0 {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
-	m := filepath.Join(home, ".mozilla", "native-messaging-hosts", "mcp_for_thunderbird.json")
+	m := nativeManifest(t, home)
+	checkRegistered(t, m)
 	raw, err := os.ReadFile(m)
 	if err != nil {
 		t.Fatal(err)
@@ -315,9 +339,10 @@ func TestSetupDetectsAndConfiguresOnlyNamedClients(t *testing.T) {
 	if code := run([]string{"setup", "--uninstall"}, &out); code != 0 {
 		t.Fatalf("uninstall exit %d: %s", code, out.String())
 	}
-	if _, err := os.Stat(filepath.Join(home, ".mozilla", "native-messaging-hosts", "mcp_for_thunderbird.json")); err == nil {
+	if _, err := os.Stat(nativeManifest(t, home)); err == nil {
 		t.Fatal("manifest left after uninstall")
 	}
+	checkRegistered(t, "")
 	raw, _ := os.ReadFile(filepath.Join(home, ".cursor", "mcp.json"))
 	if strings.Contains(string(raw), "mcp-for-thunderbird") {
 		t.Fatalf("cursor entry left: %s", raw)

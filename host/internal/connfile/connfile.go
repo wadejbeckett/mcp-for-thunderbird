@@ -17,6 +17,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/acl"
 )
 
 const (
@@ -113,7 +115,7 @@ func Save(c *Conn) error {
 		os.Remove(name)
 		return err
 	}
-	if err := restrict(name); err != nil {
+	if err := acl.OwnerOnly(name); err != nil {
 		return fail(err)
 	}
 	if _, err := tmp.Write(b); err != nil {

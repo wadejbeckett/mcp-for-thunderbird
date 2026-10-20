@@ -97,10 +97,25 @@ func status(t *testing.T, st []bridge.ClientStatus, name string) bridge.ClientSt
 	return bridge.ClientStatus{}
 }
 
-const binPath = "/opt/mft/mcp-for-thunderbird"
+// binPath is an absolute path on this OS (Configure refuses a relative
+// one, and "/opt/..." is relative on Windows); binJSON and binTOML are
+// how it is written in the JSON and TOML files.
+var binPath, binJSON, binTOML = "/opt/mft/mcp-for-thunderbird", `"/opt/mft/mcp-for-thunderbird"`, `"/opt/mft/mcp-for-thunderbird"`
+
+func init() {
+	if runtime.GOOS == "windows" {
+		binPath, binJSON, binTOML = `C:\mft\mcp-for-thunderbird.exe`, `"C:\\mft\\mcp-for-thunderbird.exe"`, `"C:\\mft\\mcp-for-thunderbird.exe"`
+	}
+}
+
+func TestBinPathIsAbsolute(t *testing.T) {
+	if !filepath.IsAbs(binPath) {
+		t.Fatalf("test binary path %q is not absolute on %s", binPath, runtime.GOOS)
+	}
+}
 
 func TestNativeManifestContent(t *testing.T) {
-	got := ManifestJSON(binPath)
+	got := ManifestJSON("/opt/mft/mcp-for-thunderbird")
 	want := `{
   "name": "mcp_for_thunderbird",
   "description": "MCP for Thunderbird host",
@@ -368,7 +383,7 @@ func TestCodexAppendOnce(t *testing.T) {
 		t.Fatalf("configure: %+v", s)
 	}
 	b, _ := os.ReadFile(p)
-	want := orig + "\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/opt/mft/mcp-for-thunderbird\"\nargs = [\"connect\"]\n"
+	want := orig + "\n[mcp_servers.mcp-for-thunderbird]\ncommand = " + binTOML + "\nargs = [\"connect\"]\n"
 	if string(b) != want {
 		t.Fatalf("config.toml:\n%s\nwant:\n%s", b, want)
 	}
@@ -555,7 +570,7 @@ func TestJSONMergeExactBytesWithKeyAfterServers(t *testing.T) {
       "command": "x"
     },
     "mcp-for-thunderbird": {
-      "command": "/opt/mft/mcp-for-thunderbird",
+      "command": ` + binJSON + `,
       "args": [
         "connect"
       ]

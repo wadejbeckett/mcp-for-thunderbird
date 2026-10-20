@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -31,7 +32,10 @@ func TestSaveSanitises(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", in, err)
 		}
-		if filepath.Base(p) != want || filepath.Dir(p) != dir {
+		// Save returns the resolved path: macOS temp folders live under the
+		// /var -> /private/var symlink, and Windows ones may use a short
+		// (8.3) name such as RUNNER~1.
+		if filepath.Base(p) != want || filepath.Dir(p) != resolved(t, dir) {
 			t.Errorf("%q saved as %s, want %s in dir", in, p, want)
 		}
 	}
@@ -57,9 +61,57 @@ func TestSaveNoOverwrite(t *testing.T) {
 	if !bytes.Equal(b, []byte{0}) {
 		t.Fatal("original overwritten")
 	}
-	st, _ := os.Stat(dir)
-	if st.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode %o", st.Mode().Perm())
+	// Unix modes; on Windows (no modes) TestSavePrivateWindows checks the DACL.
+	if runtime.GOOS != "windows" {
+		for _, d := range []string{dir, filepath.Dir(dir)} {
+			if st, _ := os.Stat(d); st.Mode().Perm() != 0o700 {
+				t.Fatalf("%s mode %o", d, st.Mode().Perm())
+			}
+		}
+		if st, _ := os.Stat(filepath.Join(dir, "report.pdf")); st.Mode().Perm() != 0o600 {
+			t.Fatalf("file mode %o", st.Mode().Perm())
+		}
+	}
+}
+
+// resolved is dir with symlinks (and Windows short names) resolved.
+func resolved(t *testing.T, dir string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestSaveReturnsResolvedPath(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	p, err := files.Save(link, "a.txt", []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(resolved(t, real), "a.txt"); p != want {
+		t.Fatalf("saved as %s, want %s", p, want)
+	}
+}
+
+func TestSaveLeavesExistingDirMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix modes")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := files.Save(dir, "a.txt", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(dir); st.Mode().Perm() != 0o755 {
+		t.Fatalf("existing folder changed to %o", st.Mode().Perm())
 	}
 }
 

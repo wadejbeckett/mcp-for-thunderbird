@@ -150,10 +150,19 @@ func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(
 // to its log.
 func stdioClientCapture(t *testing.T, instance string, poll time.Duration, opts *mcp.ClientOptions, version string) (*mcp.ClientSession, *syncBuf, *syncBuf) {
 	t.Helper()
+	cs, _, stdout, logs := stdioProxy(t, instance, poll, opts, version)
+	return cs, stdout, logs
+}
+
+// stdioProxy also returns the proxy itself, for tests that reach into its
+// state.
+func stdioProxy(t *testing.T, instance string, poll time.Duration, opts *mcp.ClientOptions, version string) (*mcp.ClientSession, *proxy, *syncBuf, *syncBuf) {
+	t.Helper()
 	stdout, logs := &syncBuf{}, &syncBuf{}
 	old := logOutput
 	logOutput = logs
 	t.Cleanup(func() { logOutput = old })
+	p := newProxy(instance, poll)
 	cr, sw0 := io.Pipe() // proxy -> client
 	sw := io.MultiWriter(sw0, stdout)
 	sr, cw := io.Pipe() // client -> proxy
@@ -161,7 +170,7 @@ func stdioClientCapture(t *testing.T, instance string, poll time.Duration, opts 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = run(ctx, sr, sw, instance, poll)
+		_ = p.serve(ctx, sr, sw)
 	}()
 	c := mcp.NewClient(&mcp.Implementation{Name: "Claude Desktop", Version: "1"}, opts)
 	cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -180,7 +189,7 @@ func stdioClientCapture(t *testing.T, instance string, poll time.Duration, opts 
 			t.Error("Run did not return")
 		}
 	})
-	return cs, stdout, logs
+	return cs, p, stdout, logs
 }
 
 func listNames(t *testing.T, cs *mcp.ClientSession) []string {
@@ -400,6 +409,61 @@ func TestTokenNeverOnStdoutOrLogs(t *testing.T) {
 		if strings.Contains(stdout.String(), tok) || strings.Contains(logs.String(), tok) {
 			t.Fatal("token leaked to stdout or logs")
 		}
+	}
+}
+
+// A tool the proxy has not (or no longer) mirrored is still forwarded
+// while an upstream session exists. A background re-sync can remove the
+// mirrored tools just before the upstream goes away (seen on CI after a
+// token rotation): the call must then get the upstream's answer or the
+// closed copy, never an unknown-tool protocol error.
+func TestCallForwardedWhenToolNotMirrored(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "unmirrored", []string{"mail_accounts"})
+	cs, p, _, _ := stdioProxy(t, "", time.Hour, nil, "")
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first call: %q", resultText(res))
+	}
+	unmirror := func() {
+		p.syncMu.Lock()
+		defer p.syncMu.Unlock()
+		p.mu.Lock()
+		delete(p.registered, "mail_accounts")
+		p.mu.Unlock()
+		p.srv.RemoveTools("mail_accounts")
+	}
+	unmirror()
+	res := callTool(t, cs, "mail_accounts")
+	if res.IsError || !strings.Contains(resultText(res), `"echo":"mail_accounts"`) {
+		t.Fatalf("unmirrored call: %v %q", res.IsError, resultText(res))
+	}
+	// Upstream gone with the mirror empty: the closed copy.
+	unmirror()
+	u.stop()
+	if res := callTool(t, cs, "mail_accounts"); !res.IsError || resultText(res) != ClosedMessage {
+		t.Fatalf("after stop: %v %q", res.IsError, resultText(res))
+	}
+}
+
+// A call on a session whose upstream stopped listening fails to dial. The
+// SDK reports that as a JSON-RPC "rejected by transport" error; it is a
+// transport failure (drop, re-read, retry once, then the closed copy), not
+// an upstream answer to pass through.
+func TestDialFailureOnLiveSessionGivesClosedCopy(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "refused", []string{"mail_accounts"})
+	// Every request after its response closes its connection, so no
+	// pooled connection can carry the call below.
+	u.hs.Config.SetKeepAlivesEnabled(false)
+	cs := stdioClient(t, "", time.Hour, nil)
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first call: %q", resultText(res))
+	}
+	// Stop accepting connections but keep the open event stream, so the
+	// session stays up; the next request must dial and is refused.
+	u.hs.Listener.Close()
+	if res := callTool(t, cs, "mail_accounts"); !res.IsError || resultText(res) != ClosedMessage {
+		t.Fatalf("call to a refused port: %v %q", res.IsError, resultText(res))
 	}
 }
 

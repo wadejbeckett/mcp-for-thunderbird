@@ -327,7 +327,13 @@ func TestSaveWritesFile(t *testing.T) {
 	if err := json.Unmarshal([]byte(text(res)), &content); err != nil {
 		t.Fatalf("content %q: %v", text(res), err)
 	}
-	want := filepath.Join(h.attDir, "report.pdf")
+	// The saved path is the resolved one (macOS /var -> /private/var,
+	// Windows short names).
+	real, err := filepath.EvalSymlinks(h.attDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(real, "report.pdf")
 	if content["saved"] != want || content["name"] != "report.pdf" {
 		t.Fatalf("content = %v, want saved %s", content, want)
 	}

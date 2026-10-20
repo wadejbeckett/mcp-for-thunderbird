@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -66,16 +67,24 @@ type nopWriteCloser struct{ io.Writer }
 func (nopWriteCloser) Close() error { return nil }
 
 func run(ctx context.Context, stdin io.Reader, stdout io.Writer, instance string, poll time.Duration) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	return newProxy(instance, poll).serve(ctx, stdin, stdout)
+}
 
-	p := &proxy{
+func newProxy(instance string, poll time.Duration) *proxy {
+	return &proxy{
 		instance:   instance,
 		poll:       poll,
 		logger:     log.New(logOutput, "mcp-for-thunderbird: ", log.LstdFlags),
 		registered: map[string][]byte{},
 		name:       "unknown",
 	}
+}
+
+// serve runs the stdio server until stdin closes or ctx ends.
+func (p *proxy) serve(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	p.srv = mcp.NewServer(&mcp.Implementation{Name: server.Name, Title: "MCP for Thunderbird", Version: server.Version},
 		&mcp.ServerOptions{
 			// Advertise list_changed even with no tools, so clients learn
@@ -153,12 +162,22 @@ func (p *proxy) middleware(ctx context.Context) mcp.Middleware {
 					}
 					return closedResult(), nil
 				}
-				// The upstream may vanish (and its tools be removed) between
-				// the check above and the dispatch: answer with the copy
-				// rather than an unknown-tool protocol error.
-				res, err := next(c, method, req)
-				if err != nil && p.session() == nil {
-					return closedResult(), nil
+				// Every call is forwarded by name, mirrored or not: the mirror
+				// only answers tools/list and can lag the upstream (a
+				// background re-sync may remove the tools just before a
+				// reconnect, or between this check and a dispatch). The
+				// upstream answers for the tool, or the call gets the closed
+				// copy if the upstream has gone.
+				r, ok := req.(*mcp.CallToolRequest)
+				if !ok || r.Params == nil {
+					return next(c, method, req)
+				}
+				res, err := p.handler(r.Params.Name)(c, r)
+				if err != nil {
+					return nil, err
+				}
+				if res != nil && res.Content == nil {
+					res.Content = []mcp.Content{} // never "content": null
 				}
 				return res, err
 			}
@@ -408,7 +427,7 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 			return res, nil
 		}
 		var je *jsonrpc.Error
-		if errors.As(err, &je) || ctx.Err() != nil {
+		if ctx.Err() != nil || (errors.As(err, &je) && !unsent(err)) {
 			return nil, err
 		}
 		// Transport failure: the old session may belong to a Thunderbird
@@ -424,6 +443,15 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 		}
 	}
 	return nil, errUnavailable
+}
+
+// unsent reports whether err means the request never reached the
+// upstream (no connection could be made). The SDK wraps such failures in a
+// JSON-RPC "rejected by transport" error so the session survives; for the
+// proxy they mean the upstream has gone, like any other transport failure.
+func unsent(err error) bool {
+	var ue *url.Error
+	return errors.As(err, &ue)
 }
 
 func (p *proxy) startPolling(ctx context.Context) {

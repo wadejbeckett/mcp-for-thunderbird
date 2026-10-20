@@ -9,11 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/acl"
 )
 
 // MaxSize is the largest attachment accepted, 50 MiB.
@@ -89,8 +92,37 @@ func fit(stem, suffix, ext string) string {
 	return short + suffix + ext
 }
 
+// mkdirPrivate creates dir and any missing parents, each private to the
+// current user (0700, or an owner-only DACL on Windows, where the mode has
+// no effect). Folders that already exist are left as they are.
+func mkdirPrivate(dir string) error {
+	var missing []string
+	for p := filepath.Clean(dir); ; p = filepath.Dir(p) {
+		if _, err := os.Lstat(p); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		missing = append(missing, p)
+		if filepath.Dir(p) == p {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := acl.OwnerOnly(missing[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Save writes data into dir under a sanitised name, never overwriting an
-// existing file, and returns the absolute path. dir is created with 0700.
+// existing file, and returns its absolute path with symlinks resolved. A
+// missing dir is created private to the user; the file is too (0600, or an
+// owner-only DACL on Windows).
 func Save(dir, name string, data []byte) (string, error) {
 	if err := checkDir(dir); err != nil {
 		return "", err
@@ -98,7 +130,7 @@ func Save(dir, name string, data []byte) (string, error) {
 	if len(data) > MaxSize {
 		return "", ErrTooLarge
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := mkdirPrivate(dir); err != nil {
 		return "", err
 	}
 	real, err := filepath.EvalSymlinks(dir)
@@ -122,6 +154,11 @@ func Save(dir, name string, data []byte) (string, error) {
 			continue
 		}
 		if err != nil {
+			return "", err
+		}
+		if err := acl.OwnerOnly(p); err != nil { // 0600 is a no-op on Windows
+			f.Close()
+			os.Remove(p)
 			return "", err
 		}
 		_, werr := f.Write(data)

@@ -57,3 +57,24 @@ func unregisterNative() error {
 	}
 	return nil
 }
+
+// SetRegistryBaseForTest points registration at another HKCU key and
+// returns a function that restores the real one, so tests outside this
+// package never touch HKCU\Software\Mozilla.
+func SetRegistryBaseForTest(base string) (restore func()) {
+	old := regBase
+	regBase = base
+	return func() { regBase = old }
+}
+
+// RegistryValueForTest returns the manifest path registered under the
+// current base, or "" if there is none.
+func RegistryValueForTest() string {
+	k, err := registry.OpenKey(registry.CURRENT_USER, regBase+`\`+HostName, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer k.Close()
+	v, _, _ := k.GetStringValue("")
+	return v
+}
