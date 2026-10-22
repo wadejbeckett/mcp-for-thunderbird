@@ -82,6 +82,16 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and contributing
 - [docs/PLATFORMS.md](docs/PLATFORMS.md): what has been tested on each system
 
+## Support this project
+
+MCP for Thunderbird is free software from Noiz. If it is useful to you, the main way to support its development is a donation in Monero (XMR):
+
+```text
+44BtMn9izxH8mK2yFbSdY6Di7TNobkLbnHdZ6gZQjukCME5vsNhtPRtH4TcVkDHKHLhSpAJbsjv8gCdYuSZVMpXgMkUC1hV
+```
+
+You can also help by reporting bugs, sending fixes or starring the repository.
+
 ## Licence and credits
 
 MCP for Thunderbird is published by Wade J. Beckett ([wadejbeckett](https://github.com/wadejbeckett) on GitHub) under the Mozilla Public License 2.0 ([LICENSE](LICENSE)).
