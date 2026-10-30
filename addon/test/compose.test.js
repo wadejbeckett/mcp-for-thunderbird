@@ -470,7 +470,11 @@ test("TestComposeOpensWindow", async () => {
   assert.deepEqual(r.content, { opened: true });
   const [fn, args] = mock.calls.compose[0];
   assert.equal(fn, "beginNew");
-  assert.deepEqual(args[0], { identityId: "id1", to: ["x@example.test"], cc: [], bcc: [], subject: "S", body: "<p>Hello<br>there</p>" });
+  // No body goes to beginNew (it would replace the document and lose the
+  // signature); the text is put at the top of the open window instead.
+  assert.deepEqual(args[0], { identityId: "id1", to: ["x@example.test"], cc: [], bcc: [], subject: "S" });
+  const setNew = mock.calls.compose.find(([f]) => f === "setComposeDetails");
+  assert.match(setNew[1][1].body, /^<html><head><\/head><body><p>Hello<br>there<\/p>/);
 
   const o = original();
   r = await call("mail_compose", { kind: "reply_all", id: o.id, body: "Yes" });
@@ -479,7 +483,8 @@ test("TestComposeOpensWindow", async () => {
   assert.equal(reply[1][0], o.num);
   assert.equal(reply[1][1], "replyToAll");
   assert.deepEqual(reply[1][2], { identityId: "id1" });
-  const set = mock.calls.compose.find(([f]) => f === "setComposeDetails");
+  const replyAt = mock.calls.compose.findIndex(([f]) => f === "beginReply");
+  const set = mock.calls.compose.slice(replyAt).find(([f]) => f === "setComposeDetails");
   assert.match(set[1][1].body, /<body><p>Yes<\/p><div class="moz-cite-prefix">/);
 
   r = await call("mail_compose", { kind: "forward", id: o.id, to: ["y@example.test"], body: "FYI" });

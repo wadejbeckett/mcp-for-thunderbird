@@ -500,24 +500,29 @@ async function mailCompose(args, ctx) {
   const html = textToHtml(a.body);
   const subject = a.subject === undefined ? undefined : oneLine(a.subject);
 
-  if (kind === "new") {
-    const details = { identityId: identity.id, to: a.to || [], cc: a.cc || [], bcc: a.bcc || [], subject: subject ?? "", body: html };
-    if (a.attachments.length) details.attachments = files(a.attachments);
-    answered(await call(run, () => tb().compose.beginNew(details)));
-    return { opened: true };
-  }
-
-  // Thunderbird fills in recipients, subject and the quote; only what the
-  // client gave is passed, and the body goes above the quote.
+  // The body is never passed to beginNew, beginReply or beginForward: a
+  // body given there replaces the whole document, so the window would open
+  // without the identity's signature (and a reply without its quote). The
+  // window is opened with recipients, subject and attachments only,
+  // Thunderbird lays out the signature and the quote, and the text is then
+  // put at the top of the document, above both. For a new message every
+  // field is passed; for a reply or forward only what the client gave, so
+  // Thunderbird fills in the rest from the original.
   const details = { identityId: identity.id };
-  for (const k of ["to", "cc", "bcc"]) if (a[k] !== undefined) details[k] = a[k];
-  if (subject !== undefined) details.subject = subject;
+  if (kind === "new") {
+    Object.assign(details, { to: a.to || [], cc: a.cc || [], bcc: a.bcc || [], subject: subject ?? "" });
+  } else {
+    for (const k of ["to", "cc", "bcc"]) if (a[k] !== undefined) details[k] = a[k];
+    if (subject !== undefined) details.subject = subject;
+  }
   if (a.attachments.length) details.attachments = files(a.attachments);
   const tab = answered(
     await call(run, () =>
-      kind === "forward"
-        ? tb().compose.beginForward(h.id, "forwardInline", details)
-        : tb().compose.beginReply(h.id, kind === "reply_all" ? "replyToAll" : "replyToSender", details),
+      kind === "new"
+        ? tb().compose.beginNew(details)
+        : kind === "forward"
+          ? tb().compose.beginForward(h.id, "forwardInline", details)
+          : tb().compose.beginReply(h.id, kind === "reply_all" ? "replyToAll" : "replyToSender", details),
     ),
   );
   if (html && tab && tab.id !== undefined) {
