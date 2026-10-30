@@ -4,7 +4,7 @@ MCP for Thunderbird is tested on Linux, Windows and macOS. This page records wha
 
 ## Automated checks (GitHub Actions)
 
-Two workflows run on every push to `v1`:
+Two workflows run on every push to `v1`, and `platforms` also runs on a push of a release tag (`vX.Y.Z`), when it creates a draft release instead of a snapshot (CONTRIBUTING.md, Releasing):
 
 - `test` (`.github/workflows/test.yml`): the documentation check (`docs/check-docs.sh` and its self-test) and the add-on tests (`npm test`) on `ubuntu-latest`, and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
 - `platforms` (`.github/workflows/platforms.yml`, also started by hand with "Run workflow"):
@@ -57,9 +57,9 @@ MFT_E2E_GREENMAIL=<greenmail-standalone-2.1.14.jar> python3 test/e2e/platform/e2
 
 These results are from 20 October 2026, at commit `688d076` on `v1`: `test` run [39360856956](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39360856956) and `platforms` run [39360856999](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39360856999). The Linux end-to-end suite ran locally on Thunderbird 153.4.0esr. On Windows and macOS only `TestE2ERead` and `TestE2EOrganise` run. The other end-to-end tests (drafts and sending, the injection defaults, connect-mode restarts, the toolbar) have run on Linux only.
 
-## Manual check (Wade)
+## Manual check (maintainer)
 
-The steps below are left for Wade, or a machine he names, on Windows 11 and on macOS. Use a release candidate: the `release-candidate` artifact of a green `platforms` run, or a draft release.
+The steps below are left for the maintainer, on Windows 11 and on macOS. Use a release candidate: the `release-candidate` artifact of a green `platforms` run, or a draft release.
 
 1. Install Thunderbird 153 or later, if it is not installed already.
 2. Install the add-on: in Thunderbird, open Add-ons and Themes, choose "Install Add-on From File…" from the gear menu, and pick `mcp-for-thunderbird-<version>.xpi`. Take a screenshot of the permission prompt.
@@ -71,7 +71,7 @@ The steps below are left for Wade, or a machine he names, on Windows 11 and on m
 6. Open Claude Desktop and ask: "what needs my attention in my inbox today?" Check that Claude calls the MCP for Thunderbird tools and answers from the inbox. Take a screenshot.
 7. Uninstall:
    - **Windows:** use Settings, then Apps, then MCP for Thunderbird, then Uninstall. Check that Claude Desktop's configuration no longer lists `mcp-for-thunderbird`.
-   - **macOS:** run `~/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird setup --uninstall`, then delete that folder.
+   - **macOS:** run `"$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird" setup --uninstall`, then delete that folder.
 
 Record the results here (date, OS version, Thunderbird version, pass or fail per step), and put the screenshots in INSTALL.md.
 

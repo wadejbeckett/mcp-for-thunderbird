@@ -69,6 +69,13 @@ It builds every archive, the `.deb` packages, the XPI and the Claude Desktop ext
 
 Release tags must be plain numbers, `vX.Y.Z` (for example `v1.0.0`), giving the version `X.Y.Z`. Pre-release suffixes such as `-rc1` are refused, because Thunderbird add-on versions are dotted numbers and a suffixed build would clash with the final release on addons.thunderbird.net.
 
+## Releasing
+
+1. On `v1`, at the commit to release, check that the `test` and `platforms` workflows are green.
+2. Tag it `vX.Y.Z` and push the tag. The `platforms` workflow runs in release mode: GoReleaser creates a draft GitHub release with the archives, `.deb` packages, the `.xpi`, the `.mcpb` bundles, the SBOMs and `SHA256SUMS`; the Windows installers and the macOS pkg are built on their runners, added to `SHA256SUMS`, and uploaded to the draft by the `sums` job.
+3. When the end-to-end jobs are green, run the manual check in [PLATFORMS.md](docs/PLATFORMS.md) from the draft, then publish the draft release.
+4. Submit the `.xpi` to addons.thunderbird.net, and link the listing from README.md and INSTALL.md once it is live.
+
 Release archives are not yet byte-for-byte reproducible: two builds of the same tag can differ in archive details such as timestamps. Until they are, a release is vouched for by its CI build log, `SHA256SUMS` and the software bill of materials for each archive, not by rebuilding it.
 
 Every GitHub Actions step is pinned to a full commit SHA, with the version in a comment, and the Windows installer tool (Inno Setup) to an exact Chocolatey version (`INNOSETUP_VERSION` in `.github/workflows/platforms.yml`). Update a pin by replacing both the SHA and its comment; the `docs` job fails if any step is not pinned.

@@ -51,14 +51,14 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 ## Supported versions
 
 - Thunderbird 153 or later, on Windows, macOS and Linux. Earlier versions lack the add-on interfaces MCP for Thunderbird needs to save drafts without opening a window.
-- Tested on Thunderbird ESR 153.4 on Linux, Thunderbird 158 on Windows and Thunderbird 157 on macOS.
+- Tested on Thunderbird ESR 153.4 on Linux; Thunderbird 158 on Windows and Thunderbird 157 on macOS are covered by the end-to-end tests that run in CI.
 - Account types: tested with IMAP. MCP for Thunderbird uses only Thunderbird's general mail interfaces, so other account types Thunderbird supports, such as Gmail and Microsoft 365 over IMAP, should behave the same. Exchange accounts added with Thunderbird's built-in Exchange support have not been tested.
-- Linux: the `.deb` Thunderbird and Mozilla's own download are expected to work. The Snap and Flatpak packages of Thunderbird have not been tested; see [INSTALL.md](INSTALL.md).
+- Linux: Thunderbird downloaded from thunderbird.net, and distribution packages that are not a Snap or Flatpak, work. The Snap (what `apt install thunderbird` gives you on current Ubuntu) has not been tested, and the Flatpak is not supported; see [INSTALL.md](INSTALL.md).
 
 ## Quick start
 
-1. Install the host for your system from the [GitHub releases page](https://github.com/wadejbeckett/mcp-for-thunderbird/releases). Windows and macOS warn that it comes from an unknown publisher; [INSTALL.md](INSTALL.md) shows how to continue.
-2. Install the add-on in Thunderbird from addons.thunderbird.net (link added when listed).
+1. Install the host for your system from the [GitHub releases page](https://github.com/wadejbeckett/mcp-for-thunderbird/releases). Windows and macOS warn that it comes from an unknown publisher; [INSTALL.md](INSTALL.md) shows how to continue. On Linux, then run `mcp-for-thunderbird setup` as your own user.
+2. Install the add-on in Thunderbird from the same releases page: download `mcp-for-thunderbird-<version>.xpi`, open the ≡ menu, choose **Add-ons and Themes**, then the gear button, then **Install Add-on From File…**, and pick the file. (A listing on addons.thunderbird.net, which updates the add-on by itself, is to follow.)
 3. The add-on opens its setup page: tick the accounts AI apps may use, choose what they may do, and tick the AI apps to set up.
 4. Restart your AI app and ask it, for example, "What needs my attention in my inbox today?"
 
@@ -72,7 +72,7 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 - **One time budget per request.** A request that changes many messages at once (marking, tagging, moving) reports which messages were done and which failed if Thunderbird is slow.
 - **Reply and forward drafts** are saved to Drafts with their threading kept. When you send one, Thunderbird files the sent copy according to the account's own settings; this has not been tested on every account type.
 - **Direct sending accepts only simple addresses**: letters, digits and `. _ + -` before the `@`, and a plain domain. Write a draft for any other address. [SECURITY.md](SECURITY.md) explains why.
-- **The host is not code-signed yet**, so Windows and macOS warn when you install it. The add-on is signed by addons.thunderbird.net once listed.
+- **The host is not code-signed yet**, so Windows and macOS warn when you install it. The add-on on the releases page is unsigned too; Thunderbird installs an unsigned add-on from a file, and it will be signed by addons.thunderbird.net once listed there.
 
 ## Links
 

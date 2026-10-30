@@ -23,7 +23,7 @@ All downloads are on the [GitHub releases page](https://github.com/wadejbeckett/
 | Linux, Debian or Ubuntu family | `mcp-for-thunderbird_<version>_amd64.deb` (or `_arm64.deb`) |
 | Linux, any other | `mcp-for-thunderbird-<version>-linux-amd64.tar.gz` (or `-linux-arm64.tar.gz`) |
 
-`<version>` is the release number, such as `1.0.0`. You can check that a download is complete and unchanged; see [Checking a download](#checking-a-download).
+`<version>` is the release number, such as `1.0.0`. You can check that a download is complete and unchanged; see [Checking a download](#checking-a-download). The Windows `.zip` files hold the program alone, for a PC where the installer cannot be run: unpack one and run `mcp-for-thunderbird.exe setup` from the folder you keep it in.
 
 ## 2. Install the host
 
@@ -88,20 +88,20 @@ mv mcp-for-thunderbird-<version>-linux-arm64/mcp-for-thunderbird ~/.local/bin/
 
 Thunderbird finds the host through the full path recorded by `setup`. If you move the program later, run `setup` again from its new place.
 
-**Snap and Flatpak.** If your Thunderbird came from the Snap Store or Flathub, MCP for Thunderbird may not work. Both packages run Thunderbird in a sandbox, and neither has been tested:
+**Snap and Flatpak.** Both run Thunderbird in a sandbox:
 
-- Snap: native messaging, which the add-on uses to start the host, was fixed in Thunderbird's Snap package upstream (Mozilla bug 1940050), but MCP for Thunderbird has not been tried with it.
-- Flatpak: the sandbox stops Thunderbird from starting programs installed outside it, so expect the add-on to show "not connected".
+- Snap, which is what `apt install thunderbird` gives you on current Ubuntu: native messaging, which the add-on uses to start the host, was fixed in Thunderbird's Snap package upstream (Mozilla bug 1940050), but MCP for Thunderbird has not been tried with it. If the toolbar button stays on "not connected", install Thunderbird from thunderbird.net instead.
+- Flatpak: not supported. The sandbox stops Thunderbird from starting programs installed outside it, so the add-on shows "not connected".
 
-The `.deb` Thunderbird from your distribution, or Thunderbird downloaded from thunderbird.net, avoids both sandboxes.
+Thunderbird downloaded from thunderbird.net, or a distribution package that is not a Snap or Flatpak (Debian's `.deb`, for example), avoids both sandboxes.
 
 ## 3. Install the add-on
 
-Install MCP for Thunderbird from addons.thunderbird.net (link added when listed): in Thunderbird, open the ≡ menu (top right), choose **Add-ons and Themes**, search for "MCP for Thunderbird", and choose **Add to Thunderbird**. Thunderbird shows the permissions the add-on asks for; [PRIVACY.md](PRIVACY.md) explains each one.
+Download `mcp-for-thunderbird-<version>.xpi` from the [GitHub releases page](https://github.com/wadejbeckett/mcp-for-thunderbird/releases). In Thunderbird, open the ≡ menu (top right), choose **Add-ons and Themes**, then the gear button, then **Install Add-on From File…**, and pick the file. Thunderbird shows the permissions the add-on asks for; [PRIVACY.md](PRIVACY.md) explains each one.
 
 <!-- screenshot: docs/images/addon-permissions.png -->
 
-Testing builds of the add-on are on the [GitHub releases page](https://github.com/wadejbeckett/mcp-for-thunderbird/releases) as `mcp-for-thunderbird-<version>.xpi`. They are for testing only and are not updated automatically. To install one, open **Add-ons and Themes** from the ≡ menu, choose the gear button, then **Install Add-on From File…**, and pick the `.xpi` file.
+The `.xpi` is not signed. Thunderbird installs an unsigned add-on from a file, but does not update it by itself: install the newer `.xpi` from each release over the old one in the same way. A listing on addons.thunderbird.net, which would sign the add-on and update it automatically, is to follow and will be linked here when it is live.
 
 ## 4. The setup page
 
@@ -167,7 +167,7 @@ Where the program is not on your command path, use its full path:
 - Windows (Command Prompt): `"%LOCALAPPDATA%\Programs\MCP for Thunderbird\mcp-for-thunderbird.exe" setup --clients=claude-desktop`
 - macOS (Terminal): `"$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird" setup --clients=claude-code,codex`
 
-**macOS: Claude Code and Codex may not be found from the setup page.** Claude Code and Codex are command-line programs, found through your shell's command path. Thunderbird started from the Dock or Finder does not get that path, so the setup page may say they are not installed. Use the Terminal command above instead.
+**macOS and Linux: Claude Code and Codex may not be found from the setup page.** Claude Code and Codex are command-line programs, found through your shell's command path. Thunderbird started from the Dock, Finder or a desktop menu does not always get that path, so the setup page may say they are not installed. Use the terminal command above instead.
 
 **If you installed the add-on before the host**, the setup page could not reach the host and found no apps. Install the host, restart Thunderbird, then choose **Open the setup page** under **AI apps** in the add-on's options, or use the command line as above.
 
@@ -187,7 +187,7 @@ Each Thunderbird profile with the add-on runs its own host. `connect` uses the o
 
 ## Upgrading
 
-- **The add-on** from addons.thunderbird.net updates itself with Thunderbird's other add-ons.
+- **The add-on:** until it is listed on addons.thunderbird.net, install each release's `.xpi` over the old one (**Install Add-on From File…**); once listed, it updates itself with Thunderbird's other add-ons.
 - **The host:** install the newer installer, package or archive over the old one. When they connect, the add-on and the host check that they speak the same version of the protocol between them, so a newer add-on usually works with an older host and the other way round. When they do not, the toolbar button shows "Update needed", and AI apps get no mail tools until you update the older one.
 
 ### Upgrading from a versioned folder
@@ -205,11 +205,11 @@ First remove the add-on: in Thunderbird, open **Add-ons and Themes**, find MCP f
   "$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird" setup --uninstall
   ```
 
-  then delete the folder `~/Library/Application Support/MCP for Thunderbird`.
+  then delete the folder `~/Library/Application Support/MCP for Thunderbird`. `pkgutil --forget io.github.wadejbeckett.mcp-for-thunderbird` removes the installer's receipt as well.
 - **Linux (`.deb`):** run `mcp-for-thunderbird setup --uninstall` as each user who ran setup, then `sudo apt remove mcp-for-thunderbird`.
 - **Linux (`.tar.gz`):** run `~/.local/bin/mcp-for-thunderbird setup --uninstall`, then delete the program with `rm ~/.local/bin/mcp-for-thunderbird`.
 
-`setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry from each AI app, keeping a backup of each file it changes.
+`setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry from each AI app, keeping a backup of each file it changes. The Claude Code entry is removed through the `claude` command; if that command is not on your command path at the time, remove the entry yourself with `claude mcp remove mcp-for-thunderbird` in a terminal.
 
 The host also keeps a small connection file, holding its port and access key while Thunderbird runs, in a folder you can delete afterwards:
 
@@ -238,6 +238,7 @@ Each release also has a software bill of materials for every archive (the `.spdx
 - **The AI app does not show new tools after you change the options.** Some AI apps do not notice when the tools change. Restart the AI app.
 - **A search for words in messages misses mail you know is there.** Thunderbird searches the text of messages only when it has downloaded them. In Thunderbird, open the account's settings, choose **Synchronization & Storage**, and tick **Keep messages for this account on this computer**. Searches are also case-sensitive.
 - **Saving an attachment fails.** Choose an attachment folder in the add-on's options.
+- **The toolbar button says no port is free.** The host listens on one port between 47110 and 47119 on this computer only; another program holds all ten. Stop it, or free one of those ports, and restart Thunderbird.
 
 <!--
 Screenshots to capture during the manual check in docs/PLATFORMS.md, saved
