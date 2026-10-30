@@ -96,6 +96,6 @@ You can also help by reporting bugs, sending fixes or starring the repository.
 
 MCP for Thunderbird is published by Wade J. Beckett ([wadejbeckett](https://github.com/wadejbeckett) on GitHub) under the Mozilla Public License 2.0 ([LICENSE](LICENSE)).
 
-Parts of the add-on and the threat model in [SECURITY.md](SECURITY.md) are adapted from [thunderbird-cli](https://github.com/vitalio-sh/thunderbird-cli) by Vitalii Ionov, used under the MIT License. [NOTICE](NOTICE) lists the files and keeps that licence.
+Parts of the add-on and the threat model in [SECURITY.md](SECURITY.md) are adapted from [thunderbird-cli](https://github.com/vitalio-sh/thunderbird-cli) by Vitalii Ionov, used under the MIT License. [NOTICE](NOTICE) lists the files and keeps that licence. The host links Go libraries under the MIT and BSD licences; [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES) carries their notices and ships inside every host package.
 
-Thunderbird is a trademark of the Mozilla Foundation.
+Thunderbird is a trademark of the Mozilla Foundation. Claude, Codex and Cursor are the names of products of Anthropic, OpenAI and Anysphere; they appear here only to say which apps MCP for Thunderbird works with, and none of those companies makes, endorses or is affiliated with it.

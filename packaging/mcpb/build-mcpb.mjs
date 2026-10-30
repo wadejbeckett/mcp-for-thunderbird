@@ -11,7 +11,7 @@
 //
 // Writes <dist>/mcp-for-thunderbird-<v>-<goos>-<goarch>.mcpb (dist defaults
 // to dist/) and prints its path. The bundle holds manifest.json, LICENSE,
-// NOTICE and server/mcp-for-thunderbird[.exe] (mode 0755).
+// NOTICE, THIRD_PARTY_LICENSES and server/mcp-for-thunderbird[.exe] (mode 0755).
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
@@ -56,6 +56,7 @@ manifest.compatibility.platforms = [PLATFORMS[opts.os]];
 const files = [
   { name: "LICENSE", data: readFileSync(join(root, "LICENSE")) },
   { name: "NOTICE", data: readFileSync(join(root, "NOTICE")) },
+  { name: "THIRD_PARTY_LICENSES", data: readFileSync(join(root, "THIRD_PARTY_LICENSES")) },
   { name: "manifest.json", data: Buffer.from(JSON.stringify(manifest, null, 2) + "\n", "utf8") },
   { name: `server/${exe}`, data: readFileSync(opts.binary), mode: 0o755 },
 ];

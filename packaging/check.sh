@@ -12,6 +12,8 @@
 #     e2e-settings.json (ruling R2);
 #   - the XPI's manifest has no experiment_apis, the add-on id, and the
 #     release version's X.Y.Z core, and the XPI carries LICENSE and NOTICE;
+#   - every host package (archive, .deb, .mcpb) carries THIRD_PARTY_LICENSES,
+#     the licences of the Go modules linked into the host;
 #   - every host binary contains the native host name and the add-on id,
 #     and the linux/amd64 one reports `mcp-for-thunderbird <version>`;
 #   - the .deb installs to /usr/lib/mcp-for-thunderbird/ and the .mcpb
@@ -105,6 +107,9 @@ for f in files:
     for name in n:
         if BAD.search(name.removeprefix("./")):
             fail(f"{f} contains {name}")
+    if f.endswith((".tar.gz", ".zip", ".mcpb", ".deb")):
+        if not any(name.rstrip("/").split("/")[-1] == "THIRD_PARTY_LICENSES" for name in n):
+            fail(f"{f} lacks THIRD_PARTY_LICENSES")
     if f.endswith(".deb") and "./usr/lib/mcp-for-thunderbird/mcp-for-thunderbird" not in n:
         fail(f"{f} does not install /usr/lib/mcp-for-thunderbird/mcp-for-thunderbird")
     if f.endswith(".xpi"):

@@ -43,6 +43,12 @@ go vet ./...
 
 `gofmt -l .` must print nothing.
 
+After changing `host/go.mod`, regenerate the licences of the modules linked into the host and commit the result; `packaging/build.sh` and the `test` workflow fail when it is out of date:
+
+```
+sh packaging/third-party-licenses.sh
+```
+
 Documentation check (product name, privacy statements, no internal references):
 
 ```

@@ -137,4 +137,39 @@ linux=$(find "$work/d" -mindepth 2 -maxdepth 2 -path "*_linux_amd64*/$N" -type f
 printf '#!/bin/sh\n# mcp_for_thunderbird mcp-for-thunderbird@wadejbeckett.github.io\necho %s 0.0.0-dev\n' "$N" >"$linux"
 expect_fail "linux/amd64 binary with the wrong version"
 
+# Every host package must carry THIRD_PARTY_LICENSES.
+cat >"$work/drop.py" <<'DROP'
+import io, os, shutil, subprocess, sys, tarfile, tempfile, zipfile
+path, base = sys.argv[1], sys.argv[2]
+def keep(name):
+    return name.rstrip("/").split("/")[-1] != base
+if path.endswith(".tar.gz"):
+    with tarfile.open(path) as t:
+        members = [(m, t.extractfile(m).read() if m.isfile() else None) for m in t.getmembers() if keep(m.name)]
+    with tarfile.open(path, "w:gz") as t:
+        for m, d in members:
+            t.addfile(m, io.BytesIO(d) if d is not None else None)
+elif path.endswith((".zip", ".mcpb")):
+    with zipfile.ZipFile(path) as z:
+        items = [(i, z.read(i)) for i in z.infolist() if keep(i.filename)]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for i, d in items:
+            z.writestr(i, d)
+elif path.endswith(".deb"):
+    d = tempfile.mkdtemp()
+    subprocess.run(["dpkg-deb", "-R", path, d], check=True)
+    for dirpath, _, files in os.walk(d):
+        for f in files:
+            if f == base:
+                os.remove(os.path.join(dirpath, f))
+    subprocess.run(["dpkg-deb", "-b", "--root-owner-group", d, path], check=True, capture_output=True)
+    shutil.rmtree(d)
+DROP
+for f in "$N-$version-linux-amd64.tar.gz" "$N-$version-windows-amd64.zip" "$N-$version-darwin-all.mcpb" "${N}_${debver}_amd64.deb"; do
+  fresh
+  python3 -I "$work/drop.py" "$work/d/$f" THIRD_PARTY_LICENSES
+  resign
+  expect_fail "$f without THIRD_PARTY_LICENSES"
+done
+
 echo PASS

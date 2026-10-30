@@ -27,7 +27,7 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/root" "$work/scripts" "$work/resources" "$out"
 
 install -m 0755 "$binary" "$work/root/mcp-for-thunderbird"
-for f in LICENSE NOTICE README.md; do install -m 0644 "$root/$f" "$work/root/$f"; done
+for f in LICENSE NOTICE THIRD_PARTY_LICENSES README.md; do install -m 0644 "$root/$f" "$work/root/$f"; done
 install -m 0755 "$here/postinstall" "$work/scripts/postinstall"
 cp "$root/LICENSE" "$work/resources/LICENSE"
 

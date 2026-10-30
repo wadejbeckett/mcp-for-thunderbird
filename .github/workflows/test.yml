@@ -61,6 +61,9 @@ jobs:
           go-version-file: host/go.mod
           cache-dependency-path: host/go.sum
       - run: go test ./...
+      - name: THIRD_PARTY_LICENSES matches go.mod
+        if: runner.os == 'Linux'
+        run: sh ../packaging/third-party-licenses.sh --check
       # The Windows-only tests (owner-only DACLs, HKCU registration) must
       # really run there, not be skipped or filtered out.
       - name: Windows-only tests ran

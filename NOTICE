@@ -1,6 +1,8 @@
 MCP for Thunderbird
 Copyright (c) 2026 Wade J. Beckett and contributors
 Licensed under the Mozilla Public License, v. 2.0 (see LICENSE).
+The Go libraries linked into the host program and their licences are
+listed in THIRD_PARTY_LICENSES, which ships with every host package.
 
 This product includes material derived from the vitalio-sh "thunderbird-cli"
 project (seed commit 465613d), which is licensed under the MIT License. The

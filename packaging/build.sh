@@ -5,8 +5,9 @@
 #
 # build.sh [goreleaser release flags]
 #
-# Runs the pinned GoReleaser with packaging/goreleaser.yaml, then
-# packaging/check.sh and its self-test. With no flags it makes a local snapshot:
+# Checks that THIRD_PARTY_LICENSES matches host/go.mod, runs the pinned
+# GoReleaser with packaging/goreleaser.yaml, then packaging/check.sh and its
+# self-test. With no flags it makes a local snapshot:
 #   sh packaging/build.sh                -> release --snapshot --clean
 #   sh packaging/build.sh --clean        -> a tagged release (CI, Task 21)
 # Tools run through `go run` at pinned versions; nothing is installed.
@@ -27,6 +28,7 @@ if ! git ls-remote --get-url >/dev/null 2>&1; then
   export GIT_CONFIG_VALUE_0=https://github.com/wadejbeckett/mcp-for-thunderbird.git
 fi
 
+sh packaging/third-party-licenses.sh --check
 go run "$GORELEASER" release --config packaging/goreleaser.yaml "$@"
 sh packaging/check.sh dist
 sh packaging/check-selftest.sh dist

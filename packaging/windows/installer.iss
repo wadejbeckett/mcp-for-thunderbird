@@ -77,6 +77,7 @@ RestartApplications=no
 Source: "{#SourceDir}\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DocDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DocDir}\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DocDir}\THIRD_PARTY_LICENSES"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DocDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [UninstallRun]
