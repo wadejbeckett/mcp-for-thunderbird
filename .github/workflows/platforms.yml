@@ -7,6 +7,13 @@
 # their own runners, add both to SHA256SUMS, and run the end-to-end tests
 # against Thunderbird with the host installed by those installers.
 # Everything installed here is installed on the throwaway runner only.
+#
+# A push of a release tag (vX.Y.Z) runs the same jobs in release mode:
+# GoReleaser creates a draft GitHub release with the archives, .deb, .xpi,
+# .mcpb, SBOMs and SHA256SUMS, and the sums job adds the Windows installers
+# and the macOS pkg to SHA256SUMS and uploads them to that draft. The
+# release stays a draft until the maintainer checks the end-to-end jobs and
+# publishes it (CONTRIBUTING.md, Releasing).
 
 name: platforms
 
@@ -23,6 +30,7 @@ on:
         default: both
   push:
     branches: [v1]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"] # path filters do not apply to tag pushes
     paths:
       - host/**
       - addon/**
@@ -53,6 +61,8 @@ jobs:
   build:
     if: ${{ !inputs.reuse_run }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # a tag push creates the draft release; a branch push publishes nothing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -64,8 +74,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-      - name: GoReleaser snapshot, check.sh and its self-test
-        run: sh packaging/build.sh
+      - name: GoReleaser (snapshot, or a draft release on a tag), check.sh and its self-test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: sh packaging/build.sh ${{ startsWith(github.ref, 'refs/tags/v') && '--clean' || '' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
@@ -199,6 +211,8 @@ jobs:
   sums:
     needs: [windows-installer, macos-pkg]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload to the draft release on a tag
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -213,6 +227,11 @@ jobs:
           sh packaging/add-sums.sh dist dist/*-setup.exe dist/*-macos.pkg
           sh packaging/check.sh dist
           grep -E 'setup\.exe|macos\.pkg' dist/SHA256SUMS
+      - name: Add the installers, the pkg and the completed SHA256SUMS to the draft release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*-setup.exe dist/*-macos.pkg dist/SHA256SUMS --clobber
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-candidate
