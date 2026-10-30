@@ -106,6 +106,10 @@ def tb_env():
     if HEADLESS:
         env["MOZ_HEADLESS"] = "1"
     env["MOZ_CRASHREPORTER_DISABLE"] = "1"
+    # Marionette system access: Thunderbird 153 takes the command-line flag
+    # --remote-allow-system-access; from 159 the flag is unknown and only this
+    # environment variable grants it. Both are set, so either version works.
+    env["MOZ_REMOTE_ALLOW_SYSTEM_ACCESS"] = "1"
     env["XDG_CONFIG_HOME"] = str(HOME / ".config")
     if WIN:
         env["APPDATA"] = str(config_dir())
