@@ -73,11 +73,14 @@ const listIdOf = (v) => (typeof v === "string" ? v : v && typeof v.id === "strin
 
 // call runs fn through the limiter and gives up at the run's deadline,
 // freeing its slot even when Thunderbird never answers. With list: true, a
-// message list that arrives after the timeout is aborted.
+// message list that arrives after the timeout is aborted. Once a call of the
+// run has timed out, the budget counts as spent: a timer can fire a
+// millisecond before the clock reaches the deadline, and a later call must
+// not get that millisecond as a budget of its own.
 export function call(run, fn, { list = false } = {}) {
   return limiter.run(() => {
     const left = run.deadline - Date.now();
-    if (left <= 0) {
+    if (left <= 0 || run.timedOut) {
       run.timedOut = true;
       return TIMEOUT;
     }
