@@ -4,7 +4,7 @@ MCP for Thunderbird is tested on Linux, Windows and macOS. This page records wha
 
 ## Automated checks (GitHub Actions)
 
-Two workflows run on every push to `v1`, and `platforms` also runs on a push of a release tag (`vX.Y.Z`), when it creates a draft release instead of a snapshot (CONTRIBUTING.md, Releasing):
+Two workflows run in GitHub Actions: `test` on every push and pull request, and `platforms` on a push to `v1` that changes `host/`, `addon/`, `packaging/`, `test/e2e/` or the workflow file, on a push of a release tag (`vX.Y.Z`), when it creates a draft release instead of a snapshot (CONTRIBUTING.md, Releasing), and when started by hand:
 
 - `test` (`.github/workflows/test.yml`): the documentation check (`docs/check-docs.sh` and its self-test) and the add-on tests (`npm test`) on `ubuntu-latest`, and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
 - `platforms` (`.github/workflows/platforms.yml`, also started by hand with "Run workflow"):
