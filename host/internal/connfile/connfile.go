@@ -56,7 +56,8 @@ func AllowPortsForTesting(allow func(port int) bool) (restore func()) {
 
 // Usable reports why c must not be used to reach a host, or nil. A file is
 // usable only while the host that wrote it is alive (it clears its port on
-// a clean exit) and names a port in 47110-47119 and a well-formed token;
+// a clean exit), its PID is still a running mcp-for-thunderbird (see
+// HostRunning), and it names a port in 47110-47119 and a well-formed token;
 // otherwise the port may now belong to another program, which must never
 // be sent the token (ruling R33).
 func Usable(c *Conn) error {
@@ -69,7 +70,7 @@ func Usable(c *Conn) error {
 		return fmt.Errorf("connfile: port %d is outside %d-%d", c.Port, PortMin, PortMax)
 	case !tokenRE.MatchString(c.Token):
 		return errors.New("connfile: no valid token")
-	case !pidAlive(c.PID):
+	case !HostRunning(c.PID):
 		return errors.New("connfile: MCP for Thunderbird is not running")
 	}
 	return nil

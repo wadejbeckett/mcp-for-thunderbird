@@ -4,8 +4,10 @@
 package connfile_test
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"regexp"
 	"strings"
 	"testing"
@@ -171,6 +173,74 @@ func TestUsable(t *testing.T) {
 		err := connfile.Usable(&c.c)
 		if (err == nil) != c.ok {
 			t.Errorf("%s: Usable = %v, want ok %v", c.name, err, c.ok)
+		}
+	}
+}
+
+// TestHelperSleep is not a test: run as a child with MFT_HELPER_SLEEP=1
+// it stays alive until killed, standing in for another program.
+func TestHelperSleep(t *testing.T) {
+	if os.Getenv("MFT_HELPER_SLEEP") != "1" {
+		return
+	}
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+// runAs copies this test binary to a file called name and runs it as a
+// live child, whose PID it returns.
+func runAs(t *testing.T, name string) int {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
+	src, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(bin, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-test.run=^TestHelperSleep$")
+	cmd.Env = append(os.Environ(), "MFT_HELPER_SLEEP=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return cmd.Process.Pid
+}
+
+// After a host crash its PID may be reused by another program of the same
+// user, perhaps one listening on the old port: the file is then stale, and
+// the token must not be sent there (R33).
+func TestUsableNeedsTheHostProgram(t *testing.T) {
+	tok := connfile.NewToken()
+	other := runAs(t, "other-program")
+	host := runAs(t, "mcp-for-thunderbird")
+	for _, c := range []struct {
+		name string
+		pid  int
+		ok   bool
+	}{
+		{"another program", other, false},
+		{"a host", host, true},
+		{"this program", os.Getpid(), true},
+	} {
+		err := connfile.Usable(&connfile.Conn{Instance: "x", Port: 47110, Token: tok, PID: c.pid})
+		if (err == nil) != c.ok {
+			t.Errorf("%s: Usable = %v, want ok %v", c.name, err, c.ok)
+		}
+		if got := connfile.HostRunning(c.pid); got != c.ok {
+			t.Errorf("%s: HostRunning = %v, want %v", c.name, got, c.ok)
 		}
 	}
 }
