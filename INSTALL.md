@@ -7,7 +7,7 @@ MCP for Thunderbird has two parts, and you need both:
 
 Install the host first. When the add-on is installed, it opens a setup page that needs the host to find your AI apps.
 
-You need Thunderbird 153 or later. To check, open Thunderbird's ≡ menu (top right), choose **Help**, then **About Thunderbird**. If your version is older, update Thunderbird first.
+You need Thunderbird 140 ESR or later. On Thunderbird 140, AI apps can open a filled-in compose window for you to check and send, but cannot save drafts or send mail without a window; those need Thunderbird 153 or later. To check, open Thunderbird's ≡ menu (top right), choose **Help**, then **About Thunderbird**. If your version is older, update Thunderbird first.
 
 The steps below take about five minutes.
 

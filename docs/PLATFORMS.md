@@ -4,9 +4,10 @@ MCP for Thunderbird is tested on Linux, Windows and macOS. This page records wha
 
 ## Automated checks (GitHub Actions)
 
-Two workflows run in GitHub Actions: `test` on every push and pull request, and `platforms` on a push to `v1` that changes `host/`, `addon/`, `packaging/`, `test/e2e/` or the workflow file, on a push of a release tag (`vX.Y.Z`), when it creates a draft release instead of a snapshot (CONTRIBUTING.md, Releasing), and when started by hand:
+Three workflows run in GitHub Actions: `test` on every push and pull request; `e2e-linux` on a push to `v1` or a pull request that changes `host/`, `addon/`, `packaging/build-xpi.mjs`, `test/e2e/` or the workflow file, and when started by hand; and `platforms` on a push to `v1` that changes `host/`, `addon/`, `packaging/`, `test/e2e/` or the workflow file, on a push of a release tag (`vX.Y.Z`), when it creates a draft release instead of a snapshot (CONTRIBUTING.md, Releasing), and when started by hand:
 
 - `test` (`.github/workflows/test.yml`): the documentation check (`docs/check-docs.sh` and its self-test) and the add-on tests (`npm test`) on `ubuntu-latest`, and the host tests (`go test ./...`) on `ubuntu-latest`, `windows-latest` and `macos-latest`. A Windows step fails unless the Windows-only tests actually ran and passed: `TestWindowsACLOwnerOnly`, `TestWindowsRegistry`, `TestOwnerOnlyWindows` and `TestSavePrivateWindows`.
+- `e2e-linux` (`.github/workflows/e2e-linux.yml`): every Linux end-to-end test (`test/e2e/run.sh`) on `ubuntu-latest` under xvfb, once on Thunderbird 140 ESR and once on the current release. `test/e2e/fetch-thunderbird.sh` downloads each from Mozilla as the Linux tarball. It checks the tarball against Mozilla's `SHA256SUMS` and against the version and SHA-256 pinned in the workflow; the workflow's header says how to move the pins to newer versions. On 140 ESR the tests expect `mail_compose` without `mail_draft` and `mail_send`, which need Thunderbird 153 (README, Supported versions).
 - `platforms` (`.github/workflows/platforms.yml`, also started by hand with "Run workflow"):
   1. `build` (Linux): the GoReleaser snapshot with `packaging/build.sh`, then `packaging/check.sh` and its self-test.
   2. `windows-installer` (Windows): installs Inno Setup with Chocolatey (on the runner only) and compiles `packaging/windows/installer.iss` for amd64 and arm64. It then installs the amd64 build silently and checks the following:
@@ -25,7 +26,7 @@ Two workflows run in GitHub Actions: `test` on every push and pull request, and 
 `test/e2e/platform/e2e.py` replaces `run.sh`, `make-profile.sh` and `tb.sh`, which need Linux (`/proc`, Xvfb, `setsid`, Docker), on these two systems:
 
 - **GreenMail** runs as the standalone jar 2.1.14 from Maven Central (the version in the Linux Docker image), checked against its published SHA-256. The macOS runners have no Docker.
-- **Thunderbird** comes from Chocolatey (`thunderbird`) on Windows and from Homebrew (`--cask thunderbird`) on macOS. Both are the release channel. Homebrew's `thunderbird@esr` cask is still ESR 140, which is older than our minimum of 153. The job fails if the installed version is older than 153.
+- **Thunderbird** comes from Chocolatey (`thunderbird`) on Windows and from Homebrew (`--cask thunderbird`) on macOS. Both are the release channel. Homebrew's `thunderbird@esr` cask is still ESR 140. The job fails if the installed version is older than 153, so these two jobs test the full tool set; 140 ESR is tested on Linux by `e2e-linux`.
 - **Headless:** Thunderbird runs with `--headless` (`MOZ_HEADLESS=1`) on a throwaway profile, with `--profile <dir> --no-remote`.
 - **Throwaway home:** `HOME` (macOS) or `APPDATA` (Windows) points at a throwaway folder, so the connection file is written there.
 - **Registration:** Thunderbird finds the host through the registration the installer made: the HKCU key on Windows, and `~/Library/Mozilla/NativeMessagingHosts` of the real user on macOS. Thunderbird does not follow `HOME` for this lookup. Run the harness only where installing the host is wanted, such as a CI runner or a test machine.
@@ -54,14 +55,15 @@ MFT_E2E_GREENMAIL=<greenmail-standalone-2.1.14.jar> python3 test/e2e/platform/e2
 | Uninstall removes the registration | | pass | not automated (no uninstaller in v1) |
 | In `SHA256SUMS` | pass | pass | pass |
 | `TestE2ERead`, `TestE2EOrganise` | pass (`test/e2e/run.sh`, all e2e tests) | pass (Thunderbird 158.0) | pass (Thunderbird 157.0.1) |
+| All e2e tests on Thunderbird 140 ESR | pass (140.17.0esr, locally) | | |
 
-These results are from 20 October 2026, at commit `688d076` on `v1`: `test` run [39360856956](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39360856956) and `platforms` run [39360856999](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39360856999). The Linux end-to-end suite ran locally on Thunderbird 153.4.0esr. On Windows and macOS only `TestE2ERead` and `TestE2EOrganise` run. The other end-to-end tests (drafts and sending, the injection defaults, connect-mode restarts, the toolbar) have run on Linux only.
+These results are from 20 October 2026, at commit `688d076` on `v1`: `test` run [39360856956](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39360856956) and `platforms` run [39360856999](https://github.com/wadejbeckett/mcp-for-thunderbird/actions/runs/39360856999). The Linux end-to-end suite ran locally on Thunderbird 153.4.0esr. On 1 November 2026 every Linux end-to-end test also passed locally on Thunderbird 140.17.0esr and 159.0 (Mozilla's tarballs, through `fetch-thunderbird.sh`) and on 153.5.1esr (the distribution package); `e2e-linux` had not yet run in GitHub Actions. On Windows and macOS only `TestE2ERead` and `TestE2EOrganise` run. The other end-to-end tests (drafts and sending, the injection defaults, connect-mode restarts, the toolbar) have run on Linux only.
 
 ## Manual check (maintainer)
 
 The steps below are left for the maintainer, on Windows 11 and on macOS. Use a release candidate: the `release-candidate` artifact of a green `platforms` run, or a draft release.
 
-1. Install Thunderbird 153 or later, if it is not installed already.
+1. Install Thunderbird 153 or later, if it is not installed already. Thunderbird 140 ESR is supported too, but has no `mail_draft` or `mail_send`; the steps below are written for 153 or later.
 2. Install the add-on: in Thunderbird, open Add-ons and Themes, choose "Install Add-on From File…" from the gear menu, and pick `mcp-for-thunderbird-<version>.xpi`. Take a screenshot of the permission prompt.
 3. Install the host:
    - **Windows 11:** run `mcp-for-thunderbird-<version>-windows-amd64-setup.exe`, or the arm64 file on an ARM PC. SmartScreen warns about an unknown publisher, because v1 is unsigned. Choose "More info", then "Run anyway". Take screenshots of both SmartScreen screens and the installer's licence page.

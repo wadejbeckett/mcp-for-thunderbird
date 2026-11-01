@@ -59,6 +59,8 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `storage` | Your settings and the activity log. |
 | `messages.send` (optional) | Direct sending. Thunderbird asks you for it only when you turn on direct sending in the options, and it is not used otherwise. |
 
+Thunderbird 140 ESR does not know `messages.save` or `messages.send` and ignores them. There MCP for Thunderbird does not offer the tools that need them (`mail_draft` and `mail_send`), and the options page keeps direct sending off.
+
 ## Your choices
 
 - Choose which accounts AI apps may use, and turn tool groups on or off, in the add-on's options.
