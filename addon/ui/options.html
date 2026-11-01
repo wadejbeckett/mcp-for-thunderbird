@@ -28,6 +28,7 @@
 <label><input type="checkbox" id="group-read"> <strong>Read mail</strong><span class="hint">Search, read, list folders and attachments.</span></label>
 <label><input type="checkbox" id="group-organise"> <strong>Organise mail</strong><span class="hint">Mark, tag, move, archive and bin mail.</span></label>
 <label><input type="checkbox" id="group-compose"> <strong>Draft mail</strong><span class="hint">Write drafts and open pre-filled messages for you to review.</span></label>
+<p id="draft-unsupported" class="hint" hidden>This version of Thunderbird can only open pre-filled messages in a window. Saving drafts without a window needs Thunderbird 153 or later.</p>
 <label><input type="checkbox" id="group-contacts"> <strong>Search contacts</strong><span class="hint">Look people up in your address books.</span></label>
 </div>
 </section>
@@ -37,6 +38,7 @@
 <div class="choices">
 <label><input type="checkbox" id="send-enabled"> <strong>Allow sending without a window</strong><span class="hint">AI apps can send mail to the addresses below with no review. Thunderbird will ask you to allow this.</span></label>
 </div>
+<p id="send-unsupported" class="hint" hidden>Sending without a window needs Thunderbird 153 or later.</p>
 <label for="send-allow">Allowed recipients, one per line</label>
 <p class="hint">Use a full address (anna@example.com) or a whole domain (@example.com). Domains with accented or non-Latin letters must be written in their punycode form (xn--...).</p>
 <textarea id="send-allow" rows="5" spellcheck="false" autocomplete="off"></textarea>

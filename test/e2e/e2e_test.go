@@ -43,9 +43,29 @@ const (
 var (
 	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"}
 	organiseTools = []string{"mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"}
-	composeTools  = []string{"mail_draft", "mail_compose"}
+	composeTools  = composeToolsOf(os.Getenv("MFT_E2E_TB_VERSION"))
 	contactsTools = []string{"mail_contacts"}
 )
+
+// backgroundSave reports whether the Thunderbird under test (its version
+// from run.sh, MFT_E2E_TB_VERSION) has messages.saveMessage and
+// sendMessage, which came in Thunderbird 153. On 140 ESR the add-on leaves
+// mail_draft and mail_send out (addon/src/features.js). An unknown version
+// counts as a current one.
+func backgroundSave(version string) bool {
+	var major int
+	if _, err := fmt.Sscanf(version, "%d", &major); err != nil {
+		return true
+	}
+	return major >= 153
+}
+
+func composeToolsOf(version string) []string {
+	if backgroundSave(version) {
+		return []string{"mail_draft", "mail_compose"}
+	}
+	return []string{"mail_compose"}
+}
 
 func TestMain(m *testing.M) {
 	if os.Getenv("MFT_E2E") != "1" {
@@ -792,10 +812,40 @@ const composeWindowsScript = `return [...Services.wm.getEnumerator("msgcompose")
 // TestE2EDraftAndSend saves a new draft, a threaded reply and a forward
 // with the original's attachment to Drafts, opens a compose window, then
 // grants messages.send and sends to GreenMail; a recipient outside the
-// allowlist (@localhost) is refused and nothing is sent.
+// allowlist (@localhost) is refused and nothing is sent. On Thunderbird
+// 140 ESR it checks instead that only mail_compose is offered and opens
+// its window.
 func TestE2EDraftAndSend(t *testing.T) {
 	cs := httpSession(t)
 	names := toolNames(t, cs)
+	// mail_compose opens a window and sends nothing.
+	composeWindow := func() {
+		t.Helper()
+		var before, after int
+		marionette(t, composeWindowsScript, &before)
+		var opened struct{ Opened bool }
+		callOK(t, cs, "mail_compose", map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": "E2E compose window", "body": "Not sent."}, &opened)
+		marionette(t, composeWindowsScript, &after)
+		if !opened.Opened || after != before+1 {
+			t.Fatalf("mail_compose: opened %v, compose windows %d -> %d", opened.Opened, before, after)
+		}
+	}
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		// Thunderbird 140 ESR: no background save or send. Only
+		// mail_compose is offered; the others are unknown even by name.
+		if !contains(names, "mail_compose") || contains(names, "mail_draft") || contains(names, "mail_send") {
+			t.Fatalf("tools on Thunderbird %s = %v", version, names)
+		}
+		for _, tool := range []string{"mail_draft", "mail_send"} {
+			_, _, err := tryCall(cs, tool, map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": "s", "body": "b"})
+			if err == nil || !strings.Contains(err.Error(), "unknown tool") {
+				t.Fatalf("tools/call %s on Thunderbird %s: err %v, want unknown tool", tool, version, err)
+			}
+		}
+		composeWindow()
+		t.Logf("Thunderbird %s: drafts and direct send are not offered; mail_compose opened a window", version)
+		return
+	}
 	if !contains(names, "mail_draft") || !contains(names, "mail_compose") || contains(names, "mail_send") {
 		t.Fatalf("tools before the send permission = %v", names)
 	}
@@ -854,15 +904,7 @@ func TestE2EDraftAndSend(t *testing.T) {
 		t.Fatalf("forward draft attachments = %+v", fwd.Attachments)
 	}
 
-	// mail_compose opens a window and sends nothing.
-	var before, after int
-	marionette(t, composeWindowsScript, &before)
-	var opened struct{ Opened bool }
-	callOK(t, cs, "mail_compose", map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": "E2E compose window", "body": "Not sent."}, &opened)
-	marionette(t, composeWindowsScript, &after)
-	if !opened.Opened || after != before+1 {
-		t.Fatalf("mail_compose: opened %v, compose windows %d -> %d", opened.Opened, before, after)
-	}
+	composeWindow()
 
 	// Grant messages.send; mail_send appears.
 	var perms []string

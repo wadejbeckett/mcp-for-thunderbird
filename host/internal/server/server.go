@@ -200,7 +200,8 @@ const (
 
 // errorCodes are the shared error codes an add-on result may carry.
 var errorCodes = map[string]bool{"paused": true, "not_enabled": true, "excluded": true,
-	"not_found": true, "invalid_argument": true, "refused": true, "too_large": true, "thunderbird_error": true}
+	"not_found": true, "invalid_argument": true, "refused": true, "too_large": true, "not_supported": true,
+	"thunderbird_error": true}
 
 // composeTools take attachments from the attachment folder.
 var composeTools = map[string]bool{"mail_draft": true, "mail_compose": true, "mail_send": true}

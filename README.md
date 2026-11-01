@@ -23,9 +23,9 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 |---|---|---|
 | Read | `mail_accounts`, `mail_folders`, `mail_search`, `mail_read`, `mail_thread`, `mail_attachment`, `mail_filter_suggest` | List accounts and folders; search mail; read one message; list the messages in a conversation; save an attachment to a folder you choose; describe a message filter for you to create. |
 | Organise | `mail_mark`, `mail_tag`, `mail_move`, `mail_archive`, `mail_trash` | Mark as read or flagged; add or remove tags; move or copy to another folder; archive; move to Trash. |
-| Draft | `mail_draft`, `mail_compose` | Save a new message, reply or forward to Drafts; open a filled-in compose window for you to check and send. |
+| Draft | `mail_draft`, `mail_compose` | Save a new message, reply or forward to Drafts (Thunderbird 153 or later); open a filled-in compose window for you to check and send. |
 | Contacts | `mail_contacts` | Look people up in your address books. |
-| Sending | `mail_send` | Send a message with no window, only to recipients you have listed. Off unless you turn it on. |
+| Sending | `mail_send` | Send a message with no window, only to recipients you have listed (Thunderbird 153 or later). Off unless you turn it on. |
 
 ## What it cannot do
 
@@ -50,8 +50,9 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 
 ## Supported versions
 
-- Thunderbird 153 or later, on Windows, macOS and Linux. Earlier versions lack the add-on interfaces MCP for Thunderbird needs to save drafts without opening a window.
-- Tested on Thunderbird ESR 153.4 on Linux; Thunderbird 158 on Windows and Thunderbird 157 on macOS are covered by the end-to-end tests that run in CI.
+- Thunderbird 140 ESR or later, on Windows, macOS and Linux. Versions before 140 are not supported.
+- On Thunderbird 140 ESR, `mail_draft` and `mail_send` are not offered. The add-on interfaces that save a draft or send a message without opening a window came in Thunderbird 153. `mail_compose` still opens a filled-in compose window for you to check and send, and every other tool works as on later versions. A call to either tool there is refused with the error `not_supported`.
+- Tested on Linux with Thunderbird 140.17.0esr, 153.5.1esr and 159.0: every end-to-end test passed on each, run locally on 1 November 2026. The `e2e-linux` workflow runs the same tests on 140 ESR and the current release in CI. Thunderbird 158 on Windows and Thunderbird 157 on macOS are covered by the end-to-end tests that run in CI.
 - Account types: tested with IMAP. MCP for Thunderbird uses only Thunderbird's general mail interfaces, so other account types Thunderbird supports, such as Gmail and Microsoft 365 over IMAP, should behave the same. Exchange accounts added with Thunderbird's built-in Exchange support have not been tested.
 - Linux: Thunderbird downloaded from thunderbird.net, and distribution packages that are not a Snap or Flatpak, work. The Snap (what `apt install thunderbird` gives you on current Ubuntu) has not been tested, and the Flatpak is not supported; see [INSTALL.md](INSTALL.md).
 

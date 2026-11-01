@@ -11,7 +11,7 @@ import { save, load, enabledTools, LEVELS } from "../src/settings.js";
 import { append } from "../src/log.js";
 import { HANDLERS } from "../src/rpc.js";
 import { isAllowed } from "../src/handlers/compose.js";
-import { levelToGroups, parseAllowlist, renderState, isAbsolutePath, RESTART_NOTE, isAllMail, allMailAccounts } from "../ui/logic.js";
+import { levelToGroups, parseAllowlist, renderState, isAbsolutePath, RESTART_NOTE, isAllMail, allMailAccounts, describeEntry } from "../ui/logic.js";
 import { initPopup } from "../ui/popup.js";
 import { initOptions, broadFolder } from "../ui/options.js";
 import { initSetup } from "../ui/setup.js";
@@ -685,4 +685,29 @@ test("a reopened setup leaves groups alone when they match no level", async () =
   p.click(p.$("finish"));
   await flush();
   assert.deepEqual((await load()).groups, { read: false, organise: true, compose: true, contacts: false });
+});
+
+test("on Thunderbird 140 the options say why drafts open in a window and keep direct send off", async () => {
+  let p = await options({ accounts: { a1: true } });
+  assert.equal(p.$("draft-unsupported").hidden, true);
+  assert.equal(p.$("send-unsupported").hidden, true);
+  assert.equal(p.$("send-enabled").disabled, false);
+
+  // What Thunderbird 140 ESR lacks (mocks/messenger.js, release 140).
+  delete mock.messenger.messages.saveMessage;
+  delete mock.messenger.messages.sendMessage;
+  p = await options({ accounts: { a1: true }, send: { enabled: true, allow: ["a@example.com"] } });
+  assert.equal(p.$("draft-unsupported").hidden, false);
+  assert.match(p.$("draft-unsupported").textContent, /Thunderbird 153 or later/);
+  assert.equal(p.$("send-unsupported").hidden, false);
+  assert.equal(p.$("send-enabled").disabled, true);
+  assert.equal(p.$("send-enabled").checked, false);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.equal((await load()).send.enabled, false);
+  assert.deepEqual(mock.permissionRequests, []);
+});
+
+test("the activity log names a not_supported refusal", () => {
+  assert.equal(describeEntry({ time: "", client: "c", tool: "mail_draft", outcome: "not_supported" }).outcome, "Refused: needs a newer Thunderbird");
 });

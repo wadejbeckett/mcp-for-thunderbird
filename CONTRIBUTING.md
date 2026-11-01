@@ -18,7 +18,7 @@ For a security problem, do not open a public issue or pull request; follow [SECU
 
 - Node.js 22 or later, for the add-on tests and the XPI build.
 - Go 1.25 or later. With `GOTOOLCHAIN=auto`, Go fetches the exact version named in `host/go.mod`.
-- For the end-to-end tests on Linux: Thunderbird 153 or later, Docker, `xvfb-run`, `curl` and Python 3.
+- For the end-to-end tests on Linux: Thunderbird 140 ESR or later, Docker, `xvfb-run`, `curl` and Python 3.
 - For the documentation check: bash.
 - For release builds: Python 3.9 or later (`packaging/check.sh` and its self-test use features added in Python 3.9), `sha256sum`, and `dpkg-deb` to check the `.deb`.
 
@@ -65,6 +65,13 @@ test/e2e/run.sh
 test/e2e/run.sh -run TestE2ERead -v
 ```
 
+They use the Thunderbird on your `PATH`. To run them on another version, `test/e2e/fetch-thunderbird.sh` downloads Mozilla's Linux tarball for it, checks it against Mozilla's `SHA256SUMS` and unpacks it; pass the program it prints as `MFT_E2E_THUNDERBIRD`:
+
+```
+tb=$(test/e2e/fetch-thunderbird.sh 140.17.0esr "$TMPDIR/mft-e2e-tb")
+MFT_E2E_THUNDERBIRD=$tb test/e2e/run.sh -v
+```
+
 Release build (a local snapshot unless you pass GoReleaser release flags):
 
 ```
@@ -86,7 +93,7 @@ Release archives are not yet byte-for-byte reproducible: two builds of the same 
 
 Every GitHub Actions step is pinned to a full commit SHA, with the version in a comment, and the Windows installer tool (Inno Setup) to an exact Chocolatey version (`INNOSETUP_VERSION` in `.github/workflows/platforms.yml`). Update a pin by replacing both the SHA and its comment; the `docs` job fails if any step is not pinned.
 
-GitHub Actions runs the add-on tests and the documentation check on Linux, and the host tests on Linux, Windows and macOS, for every push and pull request (`.github/workflows/test.yml`). A second workflow (`.github/workflows/platforms.yml`) builds the installers and runs end-to-end tests on Windows and macOS.
+GitHub Actions runs the add-on tests and the documentation check on Linux, and the host tests on Linux, Windows and macOS, for every push and pull request (`.github/workflows/test.yml`). A second workflow (`.github/workflows/platforms.yml`) builds the installers and runs end-to-end tests on Windows and macOS. A third (`.github/workflows/e2e-linux.yml`) runs the Linux end-to-end tests on Thunderbird 140 ESR and the current release.
 
 ## Safety rules for the end-to-end tests
 

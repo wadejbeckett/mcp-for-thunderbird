@@ -11,7 +11,8 @@
 // oldest-first ordering, never-settling queries, raw sources, attachments
 // and address books. Task 12 added getFull (plain and HTML parts, extra
 // headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
-// saveMessage, import, sendMessage, compose and messengerUtilities.
+// saveMessage, import, sendMessage, compose and messengerUtilities;
+// `release` below 153 takes away what Thunderbird 140 ESR lacks.
 
 export function event() {
   const listeners = [];
@@ -83,7 +84,7 @@ export class MockPort {
 // createMessenger returns a fresh mock. `accounts` is a list of
 // {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]}}.
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
-export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [] } = {}) {
+export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153 } = {}) {
   const local = new Map();
   const onChanged = event();
   const ports = [];
@@ -546,6 +547,21 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       out.id = listId;
     }
     return out;
+  }
+
+  // release below 153 stands for Thunderbird 140 ESR: it has no
+  // messages.saveMessage or sendMessage, and rejects the messages.save and
+  // messages.send permissions it does not know.
+  if (release < 153) {
+    delete messenger.messages.saveMessage;
+    delete messenger.messages.sendMessage;
+    const unknown = (permissions) => {
+      const bad = permissions.find((p) => p === "messages.save" || p === "messages.send");
+      if (bad) throw new Error(`Type error for parameter permissions (Error processing permissions.0: Value "${bad}" must either be one of the known permissions)`);
+    };
+    const { contains, request } = messenger.permissions;
+    messenger.permissions.contains = async (arg = {}) => (unknown(arg.permissions || []), contains(arg));
+    messenger.permissions.request = async (arg = {}) => (unknown(arg.permissions || []), request(arg));
   }
 
   const mock = {

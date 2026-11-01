@@ -10,6 +10,7 @@ import { check } from "./policy.js";
 import { append } from "./log.js";
 import { decodeId } from "./ids.js";
 import { PAUSED_MESSAGE } from "./policy.js";
+import { assertSupported } from "./features.js";
 
 // HANDLERS maps a tool name to async (args, ctx) => content. The handler
 // modules fill it in.
@@ -79,6 +80,9 @@ export async function dispatch(call) {
     if (s.paused) throw { code: "paused", message: PAUSED_MESSAGE };
     if (!groupOf(call.tool)) throw { code: "invalid_argument", message: "Unknown tool." };
     if (!argsOk) throw { code: "invalid_argument", message: "Arguments must be an object." };
+    // A tool this Thunderbird cannot run (features.js) is refused before
+    // any policy check, so the answer names the real reason.
+    assertSupported(call.tool);
     args = await resolveAccountName(args, s);
     check(call.tool, args, s);
     const handler = HANDLERS[call.tool];

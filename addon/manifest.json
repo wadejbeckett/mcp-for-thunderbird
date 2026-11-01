@@ -6,7 +6,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "mcp-for-thunderbird@wadejbeckett.github.io",
-      "strict_min_version": "153.0"
+      "strict_min_version": "140.0"
     }
   },
   "background": {

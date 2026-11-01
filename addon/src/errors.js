@@ -13,6 +13,7 @@ export const ERROR_CODES = Object.freeze([
   "invalid_argument",
   "refused",
   "too_large",
+  "not_supported",
   "thunderbird_error",
 ]);
 

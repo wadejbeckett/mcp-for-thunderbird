@@ -9,9 +9,10 @@
 # out of the real home). Never touches any other Thunderbird.
 #
 # Marionette exposure: the e2e Thunderbird runs with --marionette and system
-# access (the --remote-allow-system-access flag for Thunderbird 153, the
-# MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 variable from 159), so any local process
-# can run chrome code in it through its Marionette port while it runs. The port is a random free
+# access (140 ESR and 153 take the --remote-allow-system-access flag or the
+# MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 variable, 159 and later the variable
+# only; both are given), so any local process can run chrome code in it
+# through its Marionette port while it runs. The port is a random free
 # port on 127.0.0.1 chosen at each start, the profile holds only GreenMail
 # test data, and every Marionette call here first checks that the port's
 # listener is in our process group.
@@ -19,7 +20,9 @@
 # usage: tb.sh start [extra thunderbird args] | stop | running |
 #        wait-conn [seconds] | sync [count] | marionette <script-file | ->
 # Environment: MFT_E2E_DIR (work dir), MFT_E2E_PROFILE (profile dir; its
-# name must start mft-e2e).
+# name must start mft-e2e), MFT_E2E_THUNDERBIRD (the Thunderbird to run,
+# for example one unpacked by fetch-thunderbird.sh; default: thunderbird
+# on PATH).
 #
 # The pid file holds "<xvfb-run pid> <its start time> <Marionette port>".
 # Nothing is signalled unless that pid still leads its process group, has
@@ -30,6 +33,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 : "${MFT_E2E_DIR:=${TMPDIR:-/tmp}/mft-e2e}"
 : "${MFT_E2E_PROFILE:=${TMPDIR:-/tmp}/mft-e2e-profile}"
+: "${MFT_E2E_THUNDERBIRD:=thunderbird}"
 HOME_DIR=$MFT_E2E_DIR/home
 PIDFILE=$MFT_E2E_DIR/tb.pid
 CONN_DIR=$HOME_DIR/.config/mcp-for-thunderbird
@@ -121,7 +125,7 @@ start() {
   mkdir -p "$HOME_DIR/.config"
   HOME=$HOME_DIR XDG_CONFIG_HOME=$HOME_DIR/.config MOZ_CRASHREPORTER_DISABLE=1 MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 \
     setsid xvfb-run -a -s "-screen 0 1600x1000x24" \
-    thunderbird --profile "$MFT_E2E_PROFILE" --no-remote --marionette --remote-allow-system-access "$@" \
+    "$MFT_E2E_THUNDERBIRD" --profile "$MFT_E2E_PROFILE" --no-remote --marionette --remote-allow-system-access "$@" \
     >>"$MFT_E2E_DIR/tb.out" 2>&1 </dev/null &
   pid=$!
   st=$(start_time "$pid")
