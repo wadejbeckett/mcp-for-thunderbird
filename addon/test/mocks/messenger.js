@@ -471,9 +471,14 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       beginNew: async (...args) => composeCall("beginNew", args),
       beginReply: async (...args) => composeCall("beginReply", args),
       beginForward: async (...args) => composeCall("beginForward", args),
+      // getComposeDetails returns what Thunderbird lays out for an HTML
+      // identity with a signature: a new message holds only the signature,
+      // a reply the quote, a forward the forwarded message.
       getComposeDetails: async (tabId) => {
         calls.compose.push(["getComposeDetails", [tabId]]);
-        return { isPlainText: false, body: '<html><head></head><body><div class="moz-cite-prefix">On a day, A wrote:<br></div><blockquote type="cite">old</blockquote></body></html>' };
+        const opened = tabs[tabId - 101];
+        const inner = opened && opened.fn === "beginNew" ? COMPOSE_NEW_BODY : opened && opened.fn === "beginForward" ? COMPOSE_FORWARD_BODY : COMPOSE_REPLY_BODY;
+        return { isPlainText: false, body: `<html><head></head><body>${inner}</body></html>` };
       },
       setComposeDetails: async (...args) => {
         calls.compose.push(["setComposeDetails", args]);
@@ -587,6 +592,13 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   };
   return mock;
 }
+
+// The bodies of an open compose window (getComposeDetails), by how the
+// window was opened.
+export const COMPOSE_SIGNATURE = '<div class="moz-signature">-- <br>Me Myself<br>Example Ltd</div>';
+export const COMPOSE_NEW_BODY = `<p><br></p>${COMPOSE_SIGNATURE}`;
+export const COMPOSE_REPLY_BODY = '<div class="moz-cite-prefix">On a day, A wrote:<br></div><blockquote type="cite">old</blockquote>';
+export const COMPOSE_FORWARD_BODY = '<div class="moz-forward-container"><br><br>-------- Forwarded Message --------</div>';
 
 // parseMailboxes splits a mailbox list as Thunderbird's header parser does
 // for these tests: commas outside quotes and angle brackets separate

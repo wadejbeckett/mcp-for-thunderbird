@@ -5,11 +5,11 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { DOMParser } from "linkedom";
-import { install, fetchFrom } from "./mocks/messenger.js";
-import { dispatch } from "../src/rpc.js";
-import { save } from "../src/settings.js";
+import { install, fetchFrom, COMPOSE_SIGNATURE } from "./mocks/messenger.js";
+import { dispatch, HANDLERS } from "../src/rpc.js";
+import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
+import { isAllowed, baseName, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -474,7 +474,11 @@ test("TestComposeOpensWindow", async () => {
   // signature); the text is put at the top of the open window instead.
   assert.deepEqual(args[0], { identityId: "id1", to: ["x@example.test"], cc: [], bcc: [], subject: "S" });
   const setNew = mock.calls.compose.find(([f]) => f === "setComposeDetails");
-  assert.match(setNew[1][1].body, /^<html><head><\/head><body><p>Hello<br>there<\/p>/);
+  const newBody = setNew[1][1].body;
+  assert.match(newBody, /^<html><head><\/head><body><p>Hello<br>there<\/p>/);
+  // the text goes above the identity's signature, which stays as it was
+  assert.ok(newBody.includes(COMPOSE_SIGNATURE), newBody);
+  assert.ok(newBody.indexOf("<p>Hello<br>there</p>") < newBody.indexOf('<div class="moz-signature">'), newBody);
 
   const o = original();
   r = await call("mail_compose", { kind: "reply_all", id: o.id, body: "Yes" });
@@ -494,4 +498,124 @@ test("TestComposeOpensWindow", async () => {
   assert.deepEqual(fwd[1][2].to, ["y@example.test"]);
 
   assert.equal(mock.calls.sendMessage.length + mock.calls.saveMessage.length + mock.calls.import.length, 0);
+});
+
+// composeDirect calls the handler itself, so the test sees the error the
+// handler throws, mayHaveCompleted included.
+async function composeDirect(args) {
+  try {
+    await HANDLERS.mail_compose(args, { client: "test", settings: await load(), tool: "mail_compose" });
+  } catch (e) {
+    return e;
+  }
+  assert.fail("mail_compose did not fail");
+}
+
+const composeCalls = (name) => mock.calls.compose.filter(([f]) => f === name).length;
+
+test("mail_compose: a failure after the window opened says so and may have completed", async () => {
+  const o = original();
+  const cases = [
+    ["getComposeDetails rejects", () => (mock.messenger.compose.getComposeDetails = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
+    ["setComposeDetails rejects", () => (mock.messenger.compose.setComposeDetails = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
+    ["getComposeDetails never answers", () => (mock.messenger.compose.getComposeDetails = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
+    ["setComposeDetails never answers", () => (mock.messenger.compose.setComposeDetails = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
+  ];
+  const budget = COMPOSE.budgetMs;
+  COMPOSE.budgetMs = 300;
+  try {
+    const working = { ...mock.messenger.compose };
+    for (const [what, breakIt, message] of cases) {
+      for (const args of [{ kind: "new", body: "Hi" }, { kind: "reply", id: o.id, body: "Hi" }]) {
+        Object.assign(mock.messenger.compose, working);
+        mock.calls.compose.length = 0;
+        breakIt();
+        const e = await composeDirect(args);
+        assert.equal(e.code, "thunderbird_error", what);
+        assert.match(e.message, message, what);
+        assert.equal(e.mayHaveCompleted, true, what);
+        // the window was opened once and is not opened again
+        assert.equal(composeCalls("beginNew") + composeCalls("beginReply"), 1, what);
+        // through dispatch the client is told the same
+        mock.calls.compose.length = 0;
+        const r = await call("mail_compose", args);
+        assert.equal(r.ok, false);
+        assert.match(r.error.message, message, what);
+      }
+    }
+  } finally {
+    COMPOSE.budgetMs = budget;
+  }
+});
+
+test("mail_compose fails when Thunderbird opens the window without reporting its tab", async () => {
+  for (const ret of [undefined, null, {}, { windowId: 3 }]) {
+    mock.messenger.compose.beginNew = async (...args) => {
+      mock.calls.compose.push(["beginNew", args]);
+      return ret;
+    };
+    const e = await composeDirect({ kind: "new", body: "Hi" });
+    assert.equal(e.code, "thunderbird_error", JSON.stringify(ret));
+    assert.match(e.message, /^The compose window opened, but Thunderbird did not report the window it opened, so the text was not put in it\./);
+    assert.equal(e.mayHaveCompleted, true);
+  }
+  assert.equal(composeCalls("setComposeDetails"), 0);
+});
+
+test("mail_compose: a timeout of the call that opens the window may have completed", async () => {
+  const budget = COMPOSE.budgetMs;
+  COMPOSE.budgetMs = 300;
+  try {
+    mock.messenger.compose.beginNew = () => new Promise(() => {});
+    const e = await composeDirect({ kind: "new", body: "Hi" });
+    assert.equal(e.code, "thunderbird_error");
+    assert.match(e.message, /the compose window may have opened/);
+    assert.equal(e.mayHaveCompleted, true);
+  } finally {
+    COMPOSE.budgetMs = budget;
+  }
+});
+
+// ---- attachment names ----
+
+test("baseName cuts long names on code points and keeps the extension", () => {
+  const emoji = "\u{1F600}"; // two UTF-16 units
+  const long = "ab" + emoji.repeat(300) + ".pdf";
+  const n = baseName(long);
+  assert.equal([...n].length, 255);
+  assert.ok(n.endsWith(emoji + ".pdf"), n.slice(-10));
+  assert.doesNotThrow(() => encodeURIComponent(n));
+  // a cut at 255 UTF-16 units would have split a pair
+  assert.throws(() => encodeURIComponent(long.slice(0, 255)));
+  // no extension, or one too long to be one: a plain cut
+  assert.equal(baseName("x".repeat(300)), "x".repeat(255));
+  assert.equal(baseName("x".repeat(280) + "." + "y".repeat(40)), "x".repeat(255));
+  // path segments go and short names stay; a lone surrogate becomes U+FFFD
+  assert.equal(baseName("C:\\dir/sub\\report.pdf"), "report.pdf");
+  assert.equal(baseName("a\ud800b.txt"), "a\ufffdb.txt");
+  assert.equal(baseName("dir/"), "attachment");
+});
+
+test("mail_draft forward with a long non-ASCII attachment name saves", async () => {
+  const o = original();
+  const name = "\u{1F600}".repeat(200) + ".txt";
+  const r = await call("mail_draft", { kind: "forward", id: o.id, to: ["c@example.test"], body: "FYI", attachments: [{ name, data: new Uint8Array([1]) }] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const raw = mock.calls.import[0].raw;
+  assert.match(raw, /filename\*=UTF-8''(%F0%9F%98%80)+\.txt/);
+});
+
+// ---- recipients of replies and forwards ----
+
+test("mail_draft reply, reply_all and forward refuse a recipient that is not an address", async () => {
+  const o = original();
+  for (const kind of ["reply", "reply_all", "forward"]) {
+    for (const k of ["to", "cc", "bcc"]) {
+      const r = await call("mail_draft", { kind, id: o.id, [k]: ["good@example.test", "Nobody <>"], body: "x" });
+      assert.equal(r.ok, false, `${kind} ${k}`);
+      assert.equal(r.error.code, "invalid_argument", `${kind} ${k}`);
+      assert.equal(r.error.message, `Not an address in ${k}: Nobody <>`, `${kind} ${k}`);
+    }
+  }
+  assert.equal(mock.calls.import.length, 0);
 });

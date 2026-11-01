@@ -137,7 +137,7 @@ Everything on the setup page can be changed later in the add-on's options: open 
 
 **Searching message text.** A search for words in messages finds only mail whose text Thunderbird has stored on this computer. For an IMAP account, open the account's settings in Thunderbird, choose **Synchronization & Storage**, and tick **Keep messages for this account on this computer**. Searches by sender, recipient and subject work either way.
 
-**Attachment folder.** Before an AI app can save an attachment, or attach a file to a draft, choose a folder for this in the options. AI apps can save files only into that folder, and can attach any file in it to a draft, so keep in it only files you are willing to send. Attachments over 50 MiB are not saved, and a draft takes at most 20 files and 50 MiB from the folder.
+**Attachment folder.** Before an AI app can save an attachment, or attach a file to a draft, choose a folder for this in the options. AI apps can save files only into that folder, and can attach any file in it to a draft, so keep in it only files you are willing to send. The options refuse the top of a drive or of the file system and a home folder itself (such as /home/anna or C:\Users\Anna); they read the path as written, so they cannot see where a link in it leads. Attachments over 50 MiB are not saved, and a draft takes at most 20 files and 50 MiB from the folder.
 
 ## 5. Connecting AI apps
 

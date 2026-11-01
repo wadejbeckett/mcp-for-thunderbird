@@ -16,7 +16,37 @@ const LOG_SHOWN = 100;
 const NOT_CONNECTED = "MCP for Thunderbird is not connected to its host program.";
 const PATH_HELP = "Enter the full path of a folder, such as /home/anna/MCP-attachments or C:\\Users\\Anna\\MCP-attachments.";
 
+const BROAD_FOLDER =
+  "Choose a folder of its own, not the top of a drive or of the file system, and not a home folder itself: AI apps can attach any file in this folder to mail.";
+
 const keyOf = (accountId, path) => `${accountId}\u0000${path}`;
+
+// broadFolder says whether an absolute path names a folder too broad to
+// be the attachment folder: a filesystem root (/), a drive root (C:\), a
+// network share's root (\\server\share), a home folder itself
+// (/home/anna, /Users/anna, /var/home/anna, /root, C:\Users\Anna) or the
+// folder holding the home folders. It works from the text alone: the
+// add-on cannot look at the file system, so it cannot tell where a link
+// leads or which folder is this user's home.
+export function broadFolder(p) {
+  const unc = /^\\\\/.test(p);
+  const windows = unc || /^[A-Za-z]:[\\/]/.test(p);
+  const segs = p.split(windows ? /[\\/]+/ : /\/+/).filter((x) => x !== "");
+  // The root is the drive letter, \\server\share or nothing; ".." stops
+  // there, as it does on the file system.
+  const parts = [];
+  for (const seg of segs.slice(unc ? 2 : windows ? 1 : 0)) {
+    if (seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(windows ? seg.toLowerCase() : seg);
+  }
+  if (parts.length === 0) return true;
+  const [a, b] = parts;
+  if (windows) return (a === "users" || a === "documents and settings") && parts.length <= 2;
+  if ((a === "home" || a.toLowerCase() === "users") && parts.length <= 2) return true;
+  if (a === "root" && parts.length === 1) return true;
+  return a === "var" && b === "home" && parts.length <= 3;
+}
 
 export async function initOptions(doc, { send, m, clipboard, confirm }) {
   const $ = (id) => byId(doc, id);
@@ -66,14 +96,19 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     return folderCache.get(accountId);
   }
 
+  // renderExcluded lists the folders of the ticked accounts. Runs overlap
+  // when accounts are ticked quickly; only the latest one changes the page,
+  // and it does so at once, so rows are never listed twice.
+  let renderRun = 0;
   async function renderExcluded() {
-    const box = $("excluded");
-    box.replaceChildren();
+    const run = ++renderRun;
+    const rows = [];
     let shown = 0;
     const enabled = [];
     for (const input of accountBoxes.filter((b) => b.checked)) {
       const accountId = input.getAttribute("data-id");
       const folders = await foldersOf(accountId);
+      if (run !== renderRun) return;
       enabled.push({ name: accountName.get(accountId), folders });
       for (const f of folders) {
         const { label, input: cb } = checkboxRow(doc, `${accountName.get(accountId)}: ${f.path}`, { "data-account": accountId, "data-path": f.path }, excluded.has(keyOf(accountId, f.path)));
@@ -82,10 +117,12 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
           if (cb.checked) excluded.set(k, { accountId, path: f.path });
           else excluded.delete(k);
         });
-        box.append(label);
+        rows.push(label);
         shown++;
       }
     }
+    if (run !== renderRun) return;
+    $("excluded").replaceChildren(...rows);
     $("excluded-empty").hidden = shown > 0;
     // Folder exclusions are by path; Gmail shows one message in several
     // folders (R34).
@@ -136,8 +173,9 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     const list = parseAllowlist($("send-allow").value);
     $("send-allow-error").textContent = list.errors.map((e) => (e.line ? `Line ${e.line} (${e.text}): ${e.message}` : e.message)).join(" ");
     const dir = $("attachment-dir").value.trim();
-    const dirBad = dir !== "" && !isAbsolutePath(dir);
-    $("attachment-dir-error").textContent = dirBad ? PATH_HELP : "";
+    const dirProblem = dir === "" ? "" : !isAbsolutePath(dir) ? PATH_HELP : broadFolder(dir) ? BROAD_FOLDER : "";
+    const dirBad = dirProblem !== "";
+    $("attachment-dir-error").textContent = dirProblem;
     if (list.errors.length > 0 || dirBad) {
       status.textContent = "Nothing was saved. Fix the problems above and save again.";
       return;

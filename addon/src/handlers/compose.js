@@ -116,7 +116,21 @@ function kindArg(args) {
   return kind;
 }
 
-const baseName = (n) => oneLine(n).split(/[/\\]/).pop().slice(0, MAX_NAME) || "attachment";
+// baseName keeps the last path segment of an attachment name, at most
+// MAX_NAME characters counted in code points, so a cut never splits a
+// surrogate pair (encodeURIComponent throws on half of one). A long name
+// loses the end of its stem and keeps its extension. A lone surrogate in
+// the name becomes U+FFFD.
+const MAX_EXT = 16;
+export function baseName(n) {
+  let name = [...oneLine(n).split(/[/\\]/).pop().toWellFormed()];
+  if (name.length > MAX_NAME) {
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 && name.length - dot <= MAX_EXT ? name.slice(dot) : [];
+    name = [...name.slice(0, MAX_NAME - ext.length), ...ext];
+  }
+  return name.join("") || "attachment";
+}
 
 // attachmentsArg checks attachments resolved by the background page from
 // the host's blobs ({name, data: Uint8Array}).
@@ -361,11 +375,17 @@ async function replyDraft(run, kind, h, a, who, drafts) {
         .map(formatMailbox);
     }
   }
-  // Recipients the client gave are parsed and written back in one form.
-  const norm = async (list) => (list && list.length ? (await mailboxes(run, list)).filter((m) => m.email).map(formatMailbox) : []);
-  to = a.to !== undefined ? await norm(a.to) : to || [];
-  cc = a.cc !== undefined ? await norm(a.cc) : cc || [];
-  const bcc = await norm(a.bcc);
+  // Recipients the client gave are parsed and written back in one form;
+  // an entry that yields no address is refused rather than dropped.
+  const norm = async (list, k) => {
+    const boxes = await mailboxes(run, list || []);
+    const bad = boxes.find((m) => !m.email);
+    if (bad) fail("invalid_argument", `Not an address in ${k}: ${bad.raw}`);
+    return boxes.map(formatMailbox);
+  };
+  to = a.to !== undefined ? await norm(a.to, "to") : to || [];
+  cc = a.cc !== undefined ? await norm(a.cc, "cc") : cc || [];
+  const bcc = await norm(a.bcc, "bcc");
 
   const subject = a.subject !== undefined ? oneLine(a.subject) : kind === "forward" ? `Fwd: ${oneLine(h.subject)}` : `Re: ${stripRe(oneLine(h.subject))}`;
   const author = oneLine(h.author);
@@ -490,6 +510,26 @@ async function mailDraft(args, ctx) {
 
 // ---- mail_compose ----
 
+// openedWithoutText is the error for a compose window that opened but did
+// not get the client's text. It may have completed: the window is there.
+function openedWithoutText(why) {
+  const e = new ToolError("thunderbird_error", `The compose window opened, but ${why}. Check the window before trying again.`);
+  e.mayHaveCompleted = true;
+  return e;
+}
+
+// intoOpenWindow runs a call on the open compose window; a timeout or an
+// error says the window is open and may lack the text.
+async function intoOpenWindow(run, fn) {
+  let v;
+  try {
+    v = await call(run, fn);
+  } catch {
+    throw openedWithoutText("Thunderbird could not put the text in it");
+  }
+  return done(v, "the compose window is open, but the text may not be in it. Check the window before trying again");
+}
+
 async function mailCompose(args, ctx) {
   const s = ctx.settings;
   const kind = kindArg(args);
@@ -516,7 +556,10 @@ async function mailCompose(args, ctx) {
     if (subject !== undefined) details.subject = subject;
   }
   if (a.attachments.length) details.attachments = files(a.attachments);
-  const tab = answered(
+  // Once Thunderbird may have opened the window, a failure carries
+  // mayHaveCompleted, so a client does not open a second window by trying
+  // again.
+  const tab = done(
     await call(run, () =>
       kind === "new"
         ? tb().compose.beginNew(details)
@@ -524,9 +567,11 @@ async function mailCompose(args, ctx) {
           ? tb().compose.beginForward(h.id, "forwardInline", details)
           : tb().compose.beginReply(h.id, kind === "reply_all" ? "replyToAll" : "replyToSender", details),
     ),
+    "the compose window may have opened",
   );
-  if (html && tab && tab.id !== undefined) {
-    const d = answered(await call(run, () => tb().compose.getComposeDetails(tab.id)));
+  if (html) {
+    if (!tab || tab.id === undefined) throw openedWithoutText("Thunderbird did not report the window it opened, so the text was not put in it");
+    const d = await intoOpenWindow(run, () => tb().compose.getComposeDetails(tab.id));
     let upd;
     if (d && d.isPlainText) {
       upd = { plainTextBody: stripInvisible(a.body) + "\n\n" + (d.plainTextBody || "") };
@@ -534,7 +579,7 @@ async function mailCompose(args, ctx) {
       const cur = String((d && d.body) || "");
       upd = { body: /<body[^>]*>/i.test(cur) ? cur.replace(/<body([^>]*)>/i, (m, attrs) => `<body${attrs}>${html}`) : html + cur };
     }
-    answered(await call(run, () => tb().compose.setComposeDetails(tab.id, upd)));
+    await intoOpenWindow(run, () => tb().compose.setComposeDetails(tab.id, upd));
   }
   return { opened: true };
 }
