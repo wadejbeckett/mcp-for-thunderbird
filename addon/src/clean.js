@@ -534,8 +534,10 @@ class Lines {
   constructor() {
     this.done = [];
     this.line = "";
+    this.chars = 0; // characters other than white space written so far
   }
   text(s, pre) {
+    this.chars += s.replace(/\s+/g, "").length;
     if (pre) {
       const parts = s.split(/\r?\n/);
       this.line += parts[0];
@@ -558,7 +560,7 @@ class Lines {
     else this.line = "";
   }
   mark() {
-    return { n: this.done.length, col: this.line.length };
+    return { n: this.done.length, col: this.line.length, chars: this.chars };
   }
   since(m) {
     return this.done.length === m.n ? this.line.slice(m.col) : null;
@@ -570,6 +572,17 @@ class Lines {
 }
 
 const MAX_URL = 2048;
+
+// dot says an image is drawn at most 1px wide or high (a tracking pixel,
+// or alt text hidden in a shrunk image), by its width or height attribute
+// or its style.
+function dot(node, st, em) {
+  for (const k of ["width", "height"]) {
+    const a = /^\s*([\d.]+)(?:px)?\s*$/.exec(String(node.getAttribute(k) ?? ""));
+    if (a && parseFloat(a[1]) <= 1) return true;
+  }
+  return ["width", "height", "max-width", "max-height"].some((k) => toPx(val(st, k), em) <= 1);
+}
 
 // unreadable says text in this context cannot be read: under MIN_PX, in
 // a transparent colour (transparent, alpha 0) unless the element paints
@@ -653,7 +666,7 @@ export function htmlToText(html) {
         continue;
       }
       if (tag === "img") {
-        if (unreadable(next) || offLine(next)) continue;
+        if (unreadable(next) || offLine(next) || dot(node, st, px)) continue;
         const alt = String(node.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
         if (alt) out.text(`[image: ${alt}]`, false);
         continue;
@@ -670,7 +683,10 @@ export function htmlToText(html) {
         if (href && !href.startsWith("#") && !unreadable(next)) {
           const m = out.mark();
           stack.push({
+            // The address is shown only after readable link text (an
+            // image's alt text counts): an empty or hidden link shows none.
             exit: () => {
+              if (out.chars === m.chars) return;
               const shown = out.since(m);
               if (shown === null || shown.trim() !== href) out.text(` (${href})`, false);
             },

@@ -48,6 +48,25 @@ test("block elements become lines, links show their url, images their alt", () =
   assert.equal(text, text.trim());
 });
 
+test("an empty or hidden link shows no address; a 0 or 1px image shows no alt text", () => {
+  const html = `<p>Start.<a href="https://evil.example/empty"></a><a href="https://evil.example/space"> </a>
+    <a href="https://evil.example/hidden"><span style="display:none">x</span></a>
+    <a href="https://evil.example/white"><span style="color:#fff">x</span></a>
+    <a href="https://evil.example/br"><br></a>
+    <a href="https://evil.example/dot"><img src="x.gif" width="1" height="1" alt="HIDDEN-PIXEL"></a></p>
+    <img src="t.gif" width="0" alt="HIDDEN-ZERO"><img src="t.gif" height="1px" alt="HIDDEN-ONE-PX">
+    <img src="t.gif" style="width:0;height:0" alt="HIDDEN-STYLE"><img src="t.gif" style="max-height:1px" alt="HIDDEN-MAX">
+    <style>.px { width: 1px }</style><img class="px" src="t.gif" alt="HIDDEN-SHEET">
+    <p><a href="https://example.org/logo"><img src="l.png" width="120" height="40" alt="Logo"></a>
+    <a href="https://example.org/more">Read more</a> <img src="a.png" width="2" alt="Small"></p>`;
+  const text = htmlToText(html);
+  assert.doesNotMatch(text, /HIDDEN|evil\.example/);
+  assert.match(text, /^Start\./);
+  assert.match(text, /\[image: Logo\] \(https:\/\/example\.org\/logo\)/);
+  assert.match(text, /Read more \(https:\/\/example\.org\/more\)/);
+  assert.match(text, /\[image: Small\]/);
+});
+
 test("br, pre and whitespace", () => {
   assert.equal(htmlToText("<p>a<br>b</p><p>  c \n  d  </p>"), "a\nb\nc d");
   assert.equal(htmlToText("<pre>x  y\n  z</pre>"), "x  y\n  z");
