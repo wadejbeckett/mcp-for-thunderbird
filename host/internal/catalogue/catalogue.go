@@ -80,7 +80,7 @@ var tools = []Tool{
 			"limit":          m{"type": "integer", "minimum": 1, "maximum": 200, "default": 25, "description": "Maximum results."},
 		})},
 	{Name: "mail_read", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Returns one message's headers, plain-text body (wrapped as untrusted content) and attachment names. The body is the text a reader sees; plainTextDiffers is true when the message's plain-text alternative says something that text does not.",
+		Description: "Returns one message's headers, plain-text body (wrapped as untrusted content) and attachments (name, size, content type and part). The body is the text a reader sees; plainTextDiffers is true when the message's plain-text alternative says something that text does not. Pass an attachment's part to mail_attachment when several attachments share its name.",
 		Input: schema([]string{"id"}, m{
 			"account": account(), "id": str("Message id from mail_search."),
 			"max_chars": m{"type": "integer", "minimum": 1, "maximum": 50000, "default": 8000, "description": "Maximum body characters."},
@@ -92,6 +92,7 @@ var tools = []Tool{
 		Description: "Returns a text attachment's text inline (wrapped as untrusted content; nothing is saved), or saves any other attachment to the user's attachment folder and returns its path. Attachments over 50 MiB are refused.",
 		Input: schema([]string{"id", "name"}, m{
 			"account": account(), "id": str("Message id."), "name": str("Attachment file name."),
+			"part": str("Attachment part from mail_read; picks that attachment when several share the name."),
 		})},
 	{Name: "mail_filter_suggest", Group: "read", ReadOnly: true, Idempotent: true,
 		Description: "Returns step-by-step instructions for making a message filter with these conditions and actions in Thunderbird's Message Filters window; it changes nothing.",
