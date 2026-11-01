@@ -347,6 +347,19 @@ test("the attachment folder must be an absolute path", async () => {
   assert.deepEqual(mock.lastPort().sentOfType("config").at(-1), { type: "config", attachmentDir: "/home/u/MCP" });
 });
 
+test("ticking accounts quickly lists each folder once", async () => {
+  const p = await options({ accounts: { a1: true } });
+  const accts = boxes(p.document, "#accounts input");
+  // several change events before any folder list has arrived
+  p.tick(accts[1]);
+  p.tick(accts[1], false);
+  p.tick(accts[1]);
+  p.fire(accts[0], "change");
+  await flush();
+  const paths = boxes(p.document, "#excluded input").map((f) => `${f.getAttribute("data-account")}:${f.getAttribute("data-path")}`);
+  assert.deepEqual(paths, ["a1:INBOX", "a1:Private", "a1:Private/Sub", "a2:INBOX"]);
+});
+
 test("the restart note shows only when the tool set changed", async () => {
   const p = await options({ accounts: { a1: true } });
   assert.equal(p.$("restart-note").hidden, true);

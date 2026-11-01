@@ -66,14 +66,19 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     return folderCache.get(accountId);
   }
 
+  // renderExcluded lists the folders of the ticked accounts. Runs overlap
+  // when accounts are ticked quickly; only the latest one changes the page,
+  // and it does so at once, so rows are never listed twice.
+  let renderRun = 0;
   async function renderExcluded() {
-    const box = $("excluded");
-    box.replaceChildren();
+    const run = ++renderRun;
+    const rows = [];
     let shown = 0;
     const enabled = [];
     for (const input of accountBoxes.filter((b) => b.checked)) {
       const accountId = input.getAttribute("data-id");
       const folders = await foldersOf(accountId);
+      if (run !== renderRun) return;
       enabled.push({ name: accountName.get(accountId), folders });
       for (const f of folders) {
         const { label, input: cb } = checkboxRow(doc, `${accountName.get(accountId)}: ${f.path}`, { "data-account": accountId, "data-path": f.path }, excluded.has(keyOf(accountId, f.path)));
@@ -82,10 +87,12 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
           if (cb.checked) excluded.set(k, { accountId, path: f.path });
           else excluded.delete(k);
         });
-        box.append(label);
+        rows.push(label);
         shown++;
       }
     }
+    if (run !== renderRun) return;
+    $("excluded").replaceChildren(...rows);
     $("excluded-empty").hidden = shown > 0;
     // Folder exclusions are by path; Gmail shows one message in several
     // folders (R34).
