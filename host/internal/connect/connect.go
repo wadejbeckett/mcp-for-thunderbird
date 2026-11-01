@@ -132,10 +132,14 @@ type proxy struct {
 	closed     bool
 	lastFail   string // last logged connection failure, to log changes only
 
-	saw401 atomic.Bool
-	connMu sync.Mutex // serialises connection attempts
-	syncMu sync.Mutex // serialises tool re-syncs
-	pollWG sync.WaitGroup
+	// rejected is set when the last connection attempt was refused with
+	// a 401 even after re-reading the file. It is upstream state for the
+	// closed/rejected copy and the log; a request's own 401 is noted on
+	// that request's context (see with401), never here.
+	rejected atomic.Bool
+	connMu   sync.Mutex // serialises connection attempts
+	syncMu   sync.Mutex // serialises tool re-syncs
+	pollWG   sync.WaitGroup
 }
 
 // middleware answers the two methods whose behaviour depends on upstream
@@ -164,7 +168,7 @@ func (p *proxy) middleware(ctx context.Context) mcp.Middleware {
 					p.sync(c)
 				}
 				if p.session() == nil {
-					if p.saw401.Load() {
+					if p.rejected.Load() {
 						return rejectedResult(), nil
 					}
 					return closedResult(), nil
@@ -220,7 +224,7 @@ func (p *proxy) noteConnect(err error) {
 	msg := ""
 	if err != nil {
 		msg = "upstream not reachable: " + err.Error()
-		if p.saw401.Load() {
+		if errors.Is(err, errRejected) {
 			msg = "upstream rejected the access key"
 		}
 	}
@@ -244,6 +248,19 @@ func (p *proxy) session() *mcp.ClientSession {
 	return p.sess
 }
 
+// saw401Key carries a request's own 401 flag on its context.
+type saw401Key struct{}
+
+// with401 returns ctx carrying a fresh flag that authRT sets when a request
+// made with it is answered 401. Each call, ping and connection attempt has
+// its own, so one request cannot take another's 401 for its own: a write
+// whose reply was lost must not be retried because some other request was
+// refused at the same time.
+func with401(ctx context.Context) (context.Context, *atomic.Bool) {
+	f := &atomic.Bool{}
+	return context.WithValue(ctx, saw401Key{}, f), f
+}
+
 // authRT adds the bearer token and notes a 401. Before every request it
 // re-reads the session's connection file: the token goes only to the
 // address a live host's file names right now. If the host has gone, its
@@ -263,7 +280,9 @@ func (a authRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := http.DefaultTransport.RoundTrip(r)
 	if err == nil && resp.StatusCode == http.StatusUnauthorized {
-		a.p.saw401.Store(true)
+		if f, ok := r.Context().Value(saw401Key{}).(*atomic.Bool); ok {
+			f.Store(true)
+		}
 	}
 	return resp, err
 }
@@ -316,7 +335,8 @@ func (p *proxy) tryConnect(ctx context.Context) {
 }
 
 // connect opens an upstream session unless one exists. On a 401 it re-reads
-// the connection file and tries once more (the token was rotated).
+// the connection file and tries once more (the token was rotated). If the
+// second attempt is refused too, the error wraps errRejected.
 func (p *proxy) connect(ctx context.Context) error {
 	p.connMu.Lock()
 	defer p.connMu.Unlock()
@@ -327,9 +347,10 @@ func (p *proxy) connect(ctx context.Context) error {
 	for attempt := 0; attempt < 2; attempt++ {
 		var conn *connfile.Conn
 		if conn, err = p.loadConn(); err != nil {
+			p.rejected.Store(false)
 			return err
 		}
-		p.saw401.Store(false)
+		actx, saw401 := with401(ctx)
 		p.mu.Lock()
 		p.conn = conn
 		name := p.name
@@ -349,7 +370,8 @@ func (p *proxy) connect(ctx context.Context) error {
 			MaxRetries: -1,
 		}
 		var cs *mcp.ClientSession
-		if cs, err = client.Connect(ctx, tr, nil); err == nil {
+		if cs, err = client.Connect(actx, tr, nil); err == nil {
+			p.rejected.Store(false)
 			p.mu.Lock()
 			if p.closed {
 				p.mu.Unlock()
@@ -361,11 +383,13 @@ func (p *proxy) connect(ctx context.Context) error {
 			go func() { _ = cs.Wait(); p.drop(cs) }()
 			return nil
 		}
-		if !p.saw401.Load() {
-			break
+		if !saw401.Load() {
+			p.rejected.Store(false)
+			return err
 		}
 	}
-	return err
+	p.rejected.Store(true)
+	return fmt.Errorf("%w: %v", errRejected, err)
 }
 
 // drop forgets cs if it is still the current session and removes the
@@ -458,7 +482,7 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 			err := p.connect(ctx)
 			p.noteConnect(err)
 			if err != nil {
-				if p.saw401.Swap(false) {
+				if errors.Is(err, errRejected) {
 					return nil, errRejected
 				}
 				return nil, errUnavailable
@@ -468,7 +492,8 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 			}
 			go p.sync(context.Background())
 		}
-		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
+		rctx, saw401 := with401(ctx)
+		res, err := cs.CallTool(rctx, &mcp.CallToolParams{Name: tool, Arguments: args})
 		if err == nil {
 			return res, nil
 		}
@@ -479,7 +504,7 @@ func (p *proxy) callUpstream(ctx context.Context, tool string, args json.RawMess
 		// Transport failure: the old session may belong to a Thunderbird
 		// that restarted (new port or token). Drop it, re-read the
 		// connection file and retry once if that is safe.
-		was401 := p.saw401.Swap(false)
+		was401 := saw401.Load()
 		p.drop(cs)
 		if !was401 && !dialFailed(err) && !readOnly(tool) {
 			return nil, errLost
@@ -560,8 +585,9 @@ func (p *proxy) pollOnce(ctx context.Context) {
 	}
 	pctx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
+	pctx, saw401 := with401(pctx)
 	if err := cs.Ping(pctx, nil); err != nil && ctx.Err() == nil {
-		was401 := p.saw401.Swap(false)
+		was401 := saw401.Load()
 		p.drop(cs)
 		if was401 && p.connectQuiet(ctx) {
 			p.sync(ctx)
