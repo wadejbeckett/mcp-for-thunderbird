@@ -592,9 +592,9 @@ test("pages load nothing remote, run no inline script and name the product corre
 
 // ---- Gmail labels (R34) ----
 
-test("isAllMail spots Gmail's All Mail by special use or by path", () => {
-  assert.equal(isAllMail({ path: "/[Gmail]/All Mail", specialUse: ["all"] }), true);
-  assert.equal(isAllMail({ path: "/Archive", specialUse: ["all"] }), true);
+test("isAllMail spots Gmail's All Mail by path", () => {
+  assert.equal(isAllMail({ path: "/[Gmail]/All Mail", specialUse: ["archives"] }), true);
+  assert.equal(isAllMail({ path: "/Archive", specialUse: ["archives"] }), false);
   assert.equal(isAllMail({ path: "/[Gmail]/All Mail" }), true);
   assert.equal(isAllMail({ path: "[gmail]/all mail", specialUse: [] }), true);
   assert.equal(isAllMail({ path: "/[Google Mail]/All Mail" }), true);
@@ -603,7 +603,7 @@ test("isAllMail spots Gmail's All Mail by special use or by path", () => {
   assert.equal(isAllMail(null), false);
   assert.deepEqual(
     allMailAccounts([
-      { name: "Gmail", folders: [{ path: "/INBOX" }, { path: "/[Gmail]/All Mail", specialUse: ["all"] }] },
+      { name: "Gmail", folders: [{ path: "/INBOX" }, { path: "/[Gmail]/All Mail", specialUse: ["archives"] }] },
       { name: "Work", folders: [{ path: "/INBOX" }] },
       { name: "Other Gmail", folders: [{ path: "/[Gmail]/All Mail" }] },
     ]),
@@ -614,7 +614,7 @@ test("isAllMail spots Gmail's All Mail by special use or by path", () => {
 test("options warn about Gmail labels when an enabled account has All Mail", async () => {
   const gmail = { id: "g1", name: "Gmail", type: "imap" };
   const folders = {
-    g1: [{ accountId: "g1", path: "/INBOX", specialUse: ["inbox"] }, { accountId: "g1", path: "/[Gmail]/All Mail", specialUse: ["all"] }],
+    g1: [{ accountId: "g1", path: "/INBOX", specialUse: ["inbox"] }, { accountId: "g1", path: "/[Gmail]/All Mail", specialUse: ["archives"] }],
     a1: [{ accountId: "a1", path: "/INBOX", specialUse: ["inbox"] }],
   };
   const m = {
