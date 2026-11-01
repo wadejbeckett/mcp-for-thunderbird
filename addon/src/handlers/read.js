@@ -487,6 +487,11 @@ async function firstPage(run, query) {
   }
 }
 
+// A thread holds each message once, keyed by its Message-ID (as message
+// ids are): Gmail shows one message in several folders, each copy with a
+// numeric id of its own. Of several copies a visible one is kept.
+const threadKey = (h) => stripAngleBrackets(h.headerMessageId || "") || `#${h.id}`;
+
 async function mailThread(args, ctx) {
   const s = ctx.settings;
   const run = newRun();
@@ -499,9 +504,13 @@ async function mailThread(args, ctx) {
   const upstream = [...ids].slice(0, THREAD_IDS_MAX);
   const inAccount = (h) => h && h.folder && h.folder.accountId === accountId;
 
-  const found = new Map([[msg.id, msg]]);
+  const found = new Map([[threadKey(msg), msg]]);
+  const add = (h) => {
+    const had = found.get(threadKey(h));
+    if (!had || (!visible(had, s) && visible(h, s))) found.set(threadKey(h), h);
+  };
   const pages = await Promise.all(upstream.map((headerMessageId) => firstPage(run, { accountId, headerMessageId, messagesPerPage: 20 })));
-  for (const h of pages.flat()) if (inAccount(h)) found.set(h.id, h);
+  for (const h of pages.flat()) if (inAccount(h)) add(h);
 
   // Replies: later messages of the same subject whose References or
   // In-Reply-To name a message of the thread. Only visible candidates are
@@ -512,17 +521,17 @@ async function mailThread(args, ctx) {
     const since = new Date(msg.date);
     if (!Number.isNaN(since.getTime())) query.fromDate = since;
     const candidates = (await firstPage(run, query)).filter(
-      (h) => inAccount(h) && visible(h, s) && !found.has(h.id) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
+      (h) => inAccount(h) && visible(h, s) && !found.has(threadKey(h)) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
     );
     const heads = await Promise.all(candidates.map(async (h) => [h, buildThreadIds(await headOf(run, h.id))]));
     const known = new Set([own, ...upstream, ...[...found.values()].map((h) => stripAngleBrackets(h.headerMessageId))]);
     for (let changed = true; changed; ) {
       changed = false;
       for (const [h, refs] of heads) {
-        if (found.has(h.id)) continue;
+        if (found.has(threadKey(h))) continue;
         const self = stripAngleBrackets(h.headerMessageId);
         if ([...refs].some((r) => r !== self && known.has(r))) {
-          found.set(h.id, h);
+          add(h);
           known.add(self);
           changed = true;
         }

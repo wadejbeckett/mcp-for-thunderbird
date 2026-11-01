@@ -427,6 +427,24 @@ test("TestThreadExcludesExcluded", async () => {
   assert.equal("truncated" in fromRoot, false);
 });
 
+test("a thread lists a message once however many folders hold a copy (Gmail labels)", async () => {
+  const root = mock.addMessage("a1", "INBOX", { subject: "Plan", date: ago(5), headerMessageId: "root@x" });
+  mock.addMessage("a1", "Archive", { subject: "Plan", date: ago(5), headerMessageId: "root@x" });
+  mock.addMessage("a1", "Secret", { subject: "Plan", date: ago(5), headerMessageId: "root@x" });
+  const reply = mock.addMessage("a1", "INBOX", { subject: "Re: Plan", date: ago(3), headerMessageId: "reply@x", inReplyTo: "root@x", references: ["root@x"] });
+  mock.addMessage("a1", "Archive", { subject: "Re: Plan", date: ago(3), headerMessageId: "reply@x", inReplyTo: "root@x", references: ["root@x"] });
+  mock.addMessage("a1", "Archive", { subject: "Re: Re: Plan", date: ago(2), headerMessageId: "later@x", references: ["root@x", "reply@x"] });
+  mock.addMessage("a1", "INBOX", { subject: "Re: Re: Plan", date: ago(2), headerMessageId: "later@x", references: ["root@x", "reply@x"] });
+  for (const from of [root, reply]) {
+    const out = await ok("mail_thread", { id: idOf(from) });
+    assert.deepEqual(
+      out.messages.map((p) => decodeId(p.id).headerMessageId),
+      ["root@x", "reply@x", "later@x"],
+    );
+    for (const p of out.messages) assert.notEqual(p.folder, "Secret");
+  }
+});
+
 test("thread is marked truncated when its budget runs out", async () => {
   SEARCH.budgetMs = 200;
   const { reply } = threadFixture();
