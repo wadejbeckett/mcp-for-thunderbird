@@ -77,6 +77,10 @@ func (u *upstream) setCut(f func([]byte) bool) { u.mu.Lock(); u.cut = f; u.mu.Un
 // client the request was sent and the reply lost (a non-dial failure).
 func (u *upstream) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Refuse") != "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		u.mu.Lock()
 		cut := u.cut
 		u.mu.Unlock()
@@ -802,6 +806,37 @@ func TestWriteNotRetriedAfterLostReply(t *testing.T) {
 	u.setCut(isCall("mail_move"))
 	res := callTool(t, cs, "mail_move")
 	if !res.IsError || resultText(res) != "thunderbird_error: Connection lost; the action may or may not have happened" {
+		t.Fatalf("call = %v %q", res.IsError, resultText(res))
+	}
+	if n := u.calls("mail_move"); n != 1 {
+		t.Fatalf("mail_move reached the add-on %d times, want 1", n)
+	}
+}
+
+// A 401 that answers some other request while a write's reply is lost is
+// not the write's: the write is not repeated (it may have happened).
+func TestOtherRequests401DoesNotRetryWrite(t *testing.T) {
+	isolate(t)
+	u := startUpstream(t, "lost401", []string{"mail_accounts", "mail_move"})
+	cs, p, _, _ := stdioProxy(t, "", time.Hour, nil, "")
+	if res := callTool(t, cs, "mail_accounts"); res.IsError {
+		t.Fatalf("first call: %q", resultText(res))
+	}
+	// A refused request through the proxy's transport, made while the
+	// write is in flight, before its connection drops.
+	u.setCut(func(b []byte) bool {
+		if !isCall("mail_move")(b) {
+			return false
+		}
+		req, _ := http.NewRequest(http.MethodPost, u.hs.URL+"/mcp", strings.NewReader("{}"))
+		req.Header.Set("X-Refuse", "1")
+		if resp, err := (authRT{p}).RoundTrip(req); err == nil {
+			resp.Body.Close()
+		}
+		return true
+	})
+	res := callTool(t, cs, "mail_move")
+	if !res.IsError || resultText(res) != LostMessage {
 		t.Fatalf("call = %v %q", res.IsError, resultText(res))
 	}
 	if n := u.calls("mail_move"); n != 1 {

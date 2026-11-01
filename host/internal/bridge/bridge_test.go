@@ -347,3 +347,123 @@ func TestResultWithSave(t *testing.T) {
 		t.Fatalf("content = %s", res.Content)
 	}
 }
+
+// A Thunderbird that stops reading must not hold calls or replies past the
+// call timeout: the writer goroutine is stuck, the callers are not.
+func TestStalledReaderBoundsCallsAndReplies(t *testing.T) {
+	b, _ := newPair(t) // the fake add-on never reads
+	b.SetCallTimeout(100 * time.Millisecond)
+	type res struct {
+		err  error
+		took time.Duration
+	}
+	call := func() <-chan res {
+		ch := make(chan res, 1)
+		go func() {
+			start := time.Now()
+			_, err := b.Call(context.Background(), "mail_move", json.RawMessage(`{}`), "x", nil)
+			ch <- res{err, time.Since(start)}
+		}()
+		return ch
+	}
+	wait := func(ch <-chan res) res {
+		select {
+		case r := <-ch:
+			return r
+		case <-time.After(3 * time.Second):
+			t.Fatal("call still blocked 3 s after a 100 ms timeout")
+		}
+		return res{}
+	}
+	// The first call's frame is taken by the writer, which then blocks:
+	// it may have reached Thunderbird.
+	first := wait(call())
+	var ce CallError
+	if !errors.As(first.err, &ce) || ce.Message != "Thunderbird did not answer in 60 s" || !ce.MayHaveCompleted {
+		t.Fatalf("first err = %#v", first.err)
+	}
+	// Later calls never reach the writer: certainly not sent.
+	second := wait(call())
+	if !errors.As(second.err, &ce) || ce.Code != "thunderbird_error" || ce.MayHaveCompleted {
+		t.Fatalf("second err = %#v", second.err)
+	}
+	if second.took > time.Second {
+		t.Fatalf("second call took %v", second.took)
+	}
+	done := make(chan error, 1)
+	go func() { done <- b.SendWelcome(47110, "") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("welcome to a stalled reader reported success")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("welcome still blocked 3 s after a 100 ms timeout")
+	}
+}
+
+// A call that reached Thunderbird and then timed out, was cancelled, or
+// lost Thunderbird may have happened; the error says so.
+func TestUnansweredCallMayHaveCompleted(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) {
+		b, f := newPair(t)
+		b.SetCallTimeout(50 * time.Millisecond)
+		go f.recv()
+		_, err := b.Call(context.Background(), "mail_send", json.RawMessage(`{}`), "x", nil)
+		var ce CallError
+		if !errors.As(err, &ce) || !ce.MayHaveCompleted {
+			t.Fatalf("err = %#v", err)
+		}
+	})
+	t.Run("cancel", func(t *testing.T) {
+		b, f := newPair(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { f.recv(); cancel() }()
+		_, err := b.Call(ctx, "mail_send", json.RawMessage(`{}`), "x", nil)
+		var ce CallError
+		if !errors.As(err, &ce) || !ce.MayHaveCompleted || ce.Message != "The request was cancelled" || !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %#v", err)
+		}
+	})
+	t.Run("closed", func(t *testing.T) {
+		b, f := newPair(t)
+		go func() { f.recv(); f.toHost.Close() }()
+		_, err := b.Call(context.Background(), "mail_send", json.RawMessage(`{}`), "x", nil)
+		var ce CallError
+		if !errors.As(err, &ce) || !ce.MayHaveCompleted || ce.Message != "Thunderbird closed" {
+			t.Fatalf("err = %#v", err)
+		}
+	})
+	t.Run("cancelled before sending", func(t *testing.T) {
+		b, _ := newPair(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := b.Call(ctx, "mail_send", json.RawMessage(`{}`), "x", nil)
+		var ce CallError
+		if errors.As(err, &ce) && ce.MayHaveCompleted {
+			t.Fatalf("err = %#v, nothing was sent", err)
+		}
+	})
+}
+
+// Thunderbird's time to answer starts once the call frame is written, so
+// a slow attachment transfer does not use it up.
+func TestAnswerTimeStartsAfterBlobs(t *testing.T) {
+	b, f := newPair(t)
+	b.SetCallTimeout(time.Second)
+	blob := make([]byte, 2<<20) // three chunks
+	go func() {
+		for {
+			time.Sleep(150 * time.Millisecond) // a slow reader: 600 ms for blob and call
+			m := f.recv()
+			if m["type"] == "call" {
+				time.Sleep(600 * time.Millisecond)
+				f.send(map[string]any{"type": "result", "id": m["id"], "ok": true, "content": "done"})
+				return
+			}
+		}
+	}()
+	if _, err := b.Call(context.Background(), "mail_draft", json.RawMessage(`{}`), "x", [][]byte{blob}); err != nil {
+		t.Fatalf("call with a slow blob transfer: %v", err)
+	}
+}

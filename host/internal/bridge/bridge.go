@@ -58,12 +58,21 @@ type Result struct {
 }
 
 // CallError is a failed tool call, coded as in the shared contract.
+// MayHaveCompleted is set when the call reached Thunderbird (or was being
+// written to it) before the host stopped waiting: a timeout, a cancelled
+// request or Thunderbird closing. The action may then have happened, so a
+// call that changes mail must not be repeated blindly.
 type CallError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code             string `json:"code"`
+	Message          string `json:"message"`
+	MayHaveCompleted bool   `json:"-"`
+	cause            error
 }
 
 func (e CallError) Error() string { return e.Code + ": " + e.Message }
+
+// Unwrap returns the cause, such as context.Canceled.
+func (e CallError) Unwrap() error { return e.cause }
 
 // ClientStatus describes one MCP client's detection/configuration state.
 type ClientStatus struct {
@@ -117,7 +126,10 @@ type Bridge struct {
 	out         io.Writer
 	hostVersion string
 
-	wmu sync.Mutex // serialises writers
+	// writes feeds the one writer goroutine. It is unbuffered: a frame the
+	// writer has not taken was never sent, so a caller that gives up
+	// before then knows nothing reached Thunderbird.
+	writes chan writeReq
 
 	mu          sync.Mutex
 	pending     map[string]chan outcome
@@ -143,12 +155,71 @@ type helloOutcome struct {
 // New creates a bridge over the add-on's stdin and stdout. Register callbacks,
 // then call Start (WaitHello and Call start it implicitly).
 func New(in io.Reader, out io.Writer, hostVersion string) *Bridge {
-	return &Bridge{
+	b := &Bridge{
 		in: in, out: out, hostVersion: hostVersion,
 		pending:     map[string]chan outcome{},
 		callTimeout: defaultCallTimeout,
 		helloCh:     make(chan helloOutcome, 1),
 		done:        make(chan struct{}),
+		writes:      make(chan writeReq),
+	}
+	go b.writeLoop()
+	return b
+}
+
+// writeReq is one frame for the writer goroutine; its result arrives on
+// done (buffered, so the writer never waits for a caller that gave up).
+type writeReq struct {
+	raw  []byte
+	done chan error
+}
+
+// writeLoop writes frames one at a time, so no frame is interleaved with
+// another. A write blocked on a stalled Thunderbird holds up only this
+// goroutine: callers wait for it with their own deadline.
+func (b *Bridge) writeLoop() {
+	for {
+		select {
+		case w := <-b.writes:
+			w.done <- nativemsg.Write(b.out, w.raw)
+		case <-b.done:
+			return
+		}
+	}
+}
+
+var (
+	errWriteTimeout = errors.New("bridge: Thunderbird is not reading")
+	errClosed       = errors.New("bridge: Thunderbird closed")
+)
+
+// write hands raw to the writer goroutine and waits for it, until expire
+// fires, ctx ends or the add-on's stream closes. taken reports whether the
+// writer took the frame: if it did, the frame may have reached Thunderbird
+// even when write gives up.
+func (b *Bridge) write(ctx context.Context, expire <-chan time.Time, raw []byte) (taken bool, err error) {
+	if len(raw) > nativemsg.MaxOutgoing {
+		return false, nativemsg.ErrTooLarge
+	}
+	w := writeReq{raw: raw, done: make(chan error, 1)}
+	select {
+	case b.writes <- w:
+	case <-expire:
+		return false, errWriteTimeout
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-b.done:
+		return false, errClosed
+	}
+	select {
+	case err := <-w.done:
+		return true, err
+	case <-expire:
+		return true, errWriteTimeout
+	case <-ctx.Done():
+		return true, ctx.Err()
+	case <-b.done:
+		return true, errClosed
 	}
 }
 
@@ -191,14 +262,23 @@ func (b *Bridge) WaitHello(ctx context.Context) (Hello, error) {
 	}
 }
 
+// send writes a frame that answers the add-on (welcome, token, clients),
+// giving up after the call timeout if Thunderbird is not reading.
 func (b *Bridge) send(f frame) error {
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return err
 	}
-	b.wmu.Lock()
-	defer b.wmu.Unlock()
-	return nativemsg.Write(b.out, raw)
+	timer := time.NewTimer(b.timeout())
+	defer timer.Stop()
+	_, err = b.write(context.Background(), timer.C, raw)
+	return err
+}
+
+func (b *Bridge) timeout() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.callTimeout
 }
 
 // SendWelcome answers the hello. A non-empty errMsg makes the welcome ok:false.
@@ -229,6 +309,13 @@ func newID() string {
 func tbErr(msg string) CallError { return CallError{Code: "thunderbird_error", Message: msg} }
 
 // Call sends a tool call (after any blobs) and waits for its result.
+//
+// Sending the blobs and the call frame has one call timeout; waiting for
+// the answer has another, started once the call frame is written, so a
+// large attachment does not eat into Thunderbird's time to answer. A
+// failure before the call frame was taken by the writer means nothing
+// was asked of Thunderbird. A timeout, cancellation or close after that
+// sets CallError.MayHaveCompleted: the action may or may not have happened.
 func (b *Bridge) Call(ctx context.Context, tool string, args json.RawMessage, client string, blobs [][]byte) (Result, error) {
 	b.Start()
 	id := newID()
@@ -243,44 +330,82 @@ func (b *Bridge) Call(ctx context.Context, tool string, args json.RawMessage, cl
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, id); b.mu.Unlock() }()
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	var blobIDs []string
-	for _, blob := range blobs {
-		bid := newID()
-		blobIDs = append(blobIDs, bid)
-		if err := b.sendBlob(bid, blob); err != nil {
-			return Result{}, sendErr(err)
-		}
-	}
 	if client == "" {
 		client = "unknown"
 	}
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	if err := b.send(frame{Type: "call", ID: id, Tool: tool, Args: args, Client: client, Blobs: blobIDs}); err != nil {
-		return Result{}, sendErr(err)
+	sendTimer := time.NewTimer(timeout)
+	defer sendTimer.Stop()
+
+	var blobIDs []string
+	for _, blob := range blobs {
+		bid := newID()
+		blobIDs = append(blobIDs, bid)
+		// Blobs alone do nothing in Thunderbird, so a failure here is a
+		// failure before anything happened.
+		if err := b.sendBlob(ctx, sendTimer.C, bid, blob); err != nil {
+			return Result{}, sendErr(ctx, err, false)
+		}
 	}
+	raw, err := json.Marshal(frame{Type: "call", ID: id, Tool: tool, Args: args, Client: client, Blobs: blobIDs})
+	if err != nil {
+		return Result{}, err
+	}
+	if taken, err := b.write(ctx, sendTimer.C, raw); err != nil {
+		return Result{}, sendErr(ctx, err, taken)
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case o := <-ch:
 		return o.res, o.err
 	case <-timer.C:
-		return Result{}, tbErr("Thunderbird did not answer in 60 s")
+		return Result{}, uncertain(tbErr("Thunderbird did not answer in 60 s"), nil)
 	case <-ctx.Done():
-		return Result{}, ctx.Err()
+		return Result{}, uncertain(CallError{Code: "thunderbird_error", Message: "The request was cancelled"}, ctx.Err())
 	}
 }
 
-func sendErr(err error) error {
-	if err == nativemsg.ErrTooLarge {
+// uncertain marks e as a call that reached Thunderbird before the host
+// stopped waiting for it.
+func uncertain(e CallError, cause error) CallError {
+	e.MayHaveCompleted = true
+	e.cause = cause
+	return e
+}
+
+// sendErr maps a failure to write a call's frames. taken reports whether
+// the call frame itself had been taken by the writer.
+func sendErr(ctx context.Context, err error, taken bool) error {
+	var e CallError
+	switch {
+	case errors.Is(err, nativemsg.ErrTooLarge):
 		return CallError{Code: "too_large", Message: "Request is too large to send to Thunderbird"}
+	case errors.Is(err, errWriteTimeout):
+		e = tbErr("Thunderbird did not answer in 60 s")
+	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		if !taken {
+			return ctx.Err()
+		}
+		e = CallError{Code: "thunderbird_error", Message: "The request was cancelled", cause: ctx.Err()}
+	default:
+		// The pipe closed: either before the writer took the frame, or
+		// with the write failing, so the frame never arrived whole.
+		if !errors.Is(err, errClosed) {
+			taken = false
+		}
+		e = tbErr("Thunderbird closed")
 	}
-	return tbErr("Thunderbird closed")
+	if taken {
+		return uncertain(e, e.cause)
+	}
+	return e
 }
 
-func (b *Bridge) sendBlob(id string, data []byte) error {
+func (b *Bridge) sendBlob(ctx context.Context, expire <-chan time.Time, id string, data []byte) error {
 	seq := 0
 	for {
 		n := len(data)
@@ -289,7 +414,11 @@ func (b *Bridge) sendBlob(id string, data []byte) error {
 		}
 		last := n == len(data)
 		f := frame{Type: "blob", Blob: id, Seq: &seq, Last: &last, Data: base64.StdEncoding.EncodeToString(data[:n])}
-		if err := b.send(f); err != nil {
+		raw, err := json.Marshal(f)
+		if err != nil {
+			return err
+		}
+		if _, err := b.write(ctx, expire, raw); err != nil {
 			return err
 		}
 		if last {
@@ -322,7 +451,9 @@ func (b *Bridge) shutdown() {
 	b.pending = map[string]chan outcome{}
 	b.mu.Unlock()
 	for _, ch := range pend {
-		ch <- outcome{err: tbErr("Thunderbird closed")}
+		// Every pending call's frame was written (or was being written)
+		// before Thunderbird went: it may have acted on it.
+		ch <- outcome{err: uncertain(tbErr("Thunderbird closed"), nil)}
 	}
 	select {
 	case b.helloCh <- helloOutcome{err: fmt.Errorf("Thunderbird closed before hello")}:

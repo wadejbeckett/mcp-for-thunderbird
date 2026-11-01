@@ -11,6 +11,10 @@ import "golang.org/x/sys/windows"
 // process (STILL_ACTIVE).
 const stillActive = 259
 
+// nameLimit is how many bytes of a program name processName reports;
+// 0 means all of it.
+const nameLimit = 0
+
 // pidAlive reports whether a process with this PID is running and can be
 // queried by the current user. A process of another user (access denied)
 // cannot be our host.
@@ -28,4 +32,22 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	return code == stillActive
+}
+
+// processName is the full path of the program pid runs.
+func processName(pid int) (string, bool) {
+	if pid <= 0 || pid > 0xFFFFFFFF {
+		return "", false
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return "", false
+	}
+	defer windows.CloseHandle(h)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil || n == 0 {
+		return "", false
+	}
+	return windows.UTF16ToString(buf[:n]), true
 }

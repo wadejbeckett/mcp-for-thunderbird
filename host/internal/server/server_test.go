@@ -545,3 +545,80 @@ func TestSetToolsRemovesDisabledGroup(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A rotate_token that arrives while the host stops must not put a fresh
+// token back into the connection file Clear has just emptied.
+func TestRotateRefusedAfterClear(t *testing.T) {
+	d := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", d)
+	t.Setenv("HOME", d)
+	t.Setenv("AppData", d)
+	conn := &connfile.Conn{Instance: "stop", Port: 47110, Token: connfile.NewToken(), PID: os.Getpid()}
+	if err := connfile.Save(conn); err != nil {
+		t.Fatal(err)
+	}
+	s := New(nil, conn, func() string { return "" })
+	s.Log = log.New(io.Discard, "", 0)
+	if err := s.Rotate(); err != nil {
+		t.Fatalf("rotate while running: %v", err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rotate(); !errors.Is(err, ErrStopped) {
+		t.Fatalf("rotate after Clear = %v, want ErrStopped", err)
+	}
+	got, err := connfile.Load("stop")
+	if err != nil || got.Port != 0 || got.Token != "" || s.Token() != "" {
+		t.Fatalf("after a late rotate: file %+v %v, token in memory %q", got, err, s.Token())
+	}
+}
+
+// A call that changes mail and reached Thunderbird without an answer says
+// the action may have happened, so it is not simply repeated; a read says
+// only what went wrong.
+func TestUnansweredWriteSaysItMayHaveHappened(t *testing.T) {
+	h := newHarness(t, []string{"mail_move", "mail_search"})
+	h.srv.b.SetCallTimeout(100 * time.Millisecond)
+	h.addon.setReply(func(m map[string]any) map[string]any {
+		time.Sleep(300 * time.Millisecond) // answers after the timeout
+		return map[string]any{"ok": true, "content": "late"}
+	})
+	cs := h.connect(t, nil)
+	res, err := call(t, cs, "mail_move", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "thunderbird_error: Thunderbird did not answer in 60 s" + MaybeSuffix; !res.IsError || text(res) != want {
+		t.Fatalf("mail_move: isError=%v text=%q, want %q", res.IsError, text(res), want)
+	}
+	res, err = call(t, cs, "mail_search", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "thunderbird_error: Thunderbird did not answer in 60 s"; !res.IsError || text(res) != want {
+		t.Fatalf("mail_search: isError=%v text=%q, want %q", res.IsError, text(res), want)
+	}
+	// A cancelled write is worded the same way.
+	r := h.srv.toolError("mail_send", bridge.CallError{Code: "thunderbird_error", Message: "The request was cancelled", MayHaveCompleted: true})
+	if got := text(r); got != "thunderbird_error: The request was cancelled"+MaybeSuffix {
+		t.Fatalf("cancelled send: %q", got)
+	}
+}
+
+// A session that sends nothing for sessionTimeout is closed, so abandoned
+// sessions do not build up for the host's life.
+func TestIdleSessionClosed(t *testing.T) {
+	old := sessionTimeout
+	sessionTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { sessionTimeout = old })
+	h := newHarness(t, []string{"mail_search"})
+	cs := h.connect(t, nil)
+	if _, err := call(t, cs, "mail_search", map[string]any{}); err != nil {
+		t.Fatalf("call while active: %v", err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	if _, err := call(t, cs, "mail_search", map[string]any{}); err == nil {
+		t.Fatal("an idle session was still served")
+	}
+}

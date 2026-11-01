@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -51,6 +52,8 @@ type Server struct {
 	clients map[string]bool
 	// clientsFull is set once the overflow line has been logged.
 	clientsFull bool
+	// stopped is set by Clear; Rotate then refuses.
+	stopped bool
 }
 
 // New builds a server with no tools; call SetTools with the add-on's list.
@@ -130,7 +133,7 @@ func toMCP(t catalogue.Tool) *mcp.Tool {
 // new requests while streams already open continue.
 func (s *Server) Handler() http.Handler {
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp },
-		&mcp.StreamableHTTPOptions{MaxRequestBodyBytes: MaxBody})
+		&mcp.StreamableHTTPOptions{MaxRequestBodyBytes: MaxBody, SessionTimeout: sessionTimeout})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", h)
 	s.mu.Lock()
@@ -138,6 +141,13 @@ func (s *Server) Handler() http.Handler {
 	s.mu.Unlock()
 	return guard(s.Token, port, mux)
 }
+
+// sessionTimeout closes an MCP session that has sent no request for this
+// long, so sessions abandoned by clients that never said goodbye do not
+// build up for the host's life. connect pings every 5 s, so a running
+// proxy never comes near it; a client whose session was closed gets
+// "session not found" and starts a new one.
+var sessionTimeout = 30 * time.Minute
 
 // Token is the current bearer token.
 func (s *Server) Token() string {
@@ -153,21 +163,30 @@ func (s *Server) URL() string {
 	return "http://127.0.0.1:" + strconv.Itoa(s.conn.Port) + "/mcp"
 }
 
-// Rotate replaces the token and saves the connection file.
+// ErrStopped refuses a token rotation after Clear: a fresh token must not
+// reappear in a connection file the stopping host has cleared.
+var ErrStopped = errors.New("server: stopped")
+
+// Rotate replaces the token and saves the connection file. It refuses
+// after Clear (ErrStopped), and when another host has taken the file over
+// (connfile.ErrNotOwner).
 func (s *Server) Rotate() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return ErrStopped
+	}
 	return connfile.Rotate(s.conn)
 }
 
-// Clear forgets the port and token and saves the connection file, so
-// nothing can use them once the host stops (ruling R33). The guard then
-// authorises nothing.
+// Clear forgets the port and token and saves the connection file if it
+// still names this host, so nothing can use them once the host stops
+// (ruling R33). The guard then authorises nothing, and Rotate refuses.
 func (s *Server) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.conn.Port, s.conn.Token = 0, ""
-	return connfile.Save(s.conn)
+	s.stopped = true
+	return connfile.Clear(s.conn)
 }
 
 // maxClientNames bounds the client names logged.
@@ -312,8 +331,29 @@ func (s *Server) toolError(tool string, err error) *mcp.CallToolResult {
 	if !errorCodes[ce.Code] {
 		ce.Code = "thunderbird_error"
 	}
+	if ce.MayHaveCompleted && !readOnly(tool) {
+		// The call reached Thunderbird before the host stopped waiting
+		// (timeout, cancellation, Thunderbird closing): say so, so that a
+		// move, draft or send is not simply repeated.
+		ce.Message += MaybeSuffix
+	}
 	s.Log.Printf("tool %s: error %s", tool, ce.Code)
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: ce.Code + ": " + ce.Message}}}
+}
+
+// MaybeSuffix ends the error of a call that changes mail when it reached
+// Thunderbird but no answer came back.
+const MaybeSuffix = "; the action may or may not have happened"
+
+// readOnly reports whether tool only reads, so repeating it is harmless.
+// Unknown names count as changing mail.
+func readOnly(tool string) bool {
+	for _, t := range catalogue.All() {
+		if t.Name == tool {
+			return t.ReadOnly
+		}
+	}
+	return false
 }
 
 // noteClient logs a client name the first time it is seen. Once

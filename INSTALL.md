@@ -185,6 +185,8 @@ An app that connects over HTTP instead needs the address and the access key. Bot
 
 Each Thunderbird profile with the add-on runs its own host. `connect` uses the one that started most recently. To pin an AI app to one profile, add `--instance <id>` after `connect`. The id is part of the connection file's name (`connection-<id>.json`) in the folder listed under [Uninstalling](#uninstalling).
 
+A copied profile keeps the add-on's id. If the original and the copy run in two Thunderbirds at the same time, they would share one connection file, so the host started second does not serve: its button shows **Host program problem** with the reason that MCP for Thunderbird is already running for this profile in another Thunderbird. The add-on tries again by itself and connects once the first Thunderbird has closed.
+
 ## Upgrading
 
 - **The add-on:** until it is listed on addons.thunderbird.net, install each release's `.xpi` over the old one (**Install Add-on From File…**); once listed, it updates itself with Thunderbird's other add-ons.
