@@ -202,7 +202,11 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 		if s := current(); s != nil {
 			// Rotate refuses once the host is stopping (Clear has run),
 			// so a late rotation cannot put a token back in the file.
-			if err := s.Rotate(); err != nil {
+			switch err := s.Rotate(); {
+			case errors.Is(err, connfile.ErrNotOwner):
+				logger.Printf("token rotation refused: the connection file belongs to another host; the old token no longer works, and requests are refused until a later rotation succeeds or Thunderbird starts the host again")
+				return
+			case err != nil:
 				logger.Printf("token rotation refused: %v", err)
 				return
 			}

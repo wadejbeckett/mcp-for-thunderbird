@@ -210,10 +210,16 @@ func owned(c *Conn) error {
 	return nil
 }
 
-// Rotate replaces c.Token with a fresh token and saves the file, unless the
-// file now belongs to another host (ErrNotOwner).
+// Rotate replaces c.Token with a fresh token and saves the file. A missing,
+// unreadable or corrupt file is replaced by a fresh one. When the file now
+// belongs to another host, Rotate leaves it as it is and returns
+// ErrNotOwner, but still forgets c's token, so the old key, which the user
+// asked to replace, is refused from then on; the host then authorises
+// nothing until a later rotation succeeds or it is started again. If saving fails, c keeps its old
+// token, which the file still holds.
 func Rotate(c *Conn) error {
-	if err := owned(c); err != nil {
+	if err := owned(c); errors.Is(err, ErrNotOwner) {
+		c.Token = ""
 		return err
 	}
 	old := c.Token

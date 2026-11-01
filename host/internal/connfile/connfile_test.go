@@ -324,3 +324,62 @@ func TestClearWithoutFile(t *testing.T) {
 		t.Fatalf("Clear created a file: %v", err)
 	}
 }
+
+// A rotation the user asked for must replace the token even when the file
+// has gone missing or cannot be read: the host writes a fresh file.
+func TestRotateRewritesMissingOrCorruptFile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spoil func(path string) error
+	}{
+		{"missing", os.Remove},
+		{"corrupt", func(p string) error { return os.WriteFile(p, []byte("{not json"), 0o600) }},
+		{"bad instance", func(p string) error { return os.WriteFile(p, []byte(`{"instance":"../x"}`), 0o600) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolate(t)
+			c := &connfile.Conn{Instance: "rot", Port: 47110, Token: connfile.NewToken(), PID: os.Getpid()}
+			if err := connfile.Save(c); err != nil {
+				t.Fatal(err)
+			}
+			dir, _ := connfile.Dir()
+			if err := tc.spoil(filepath.Join(dir, "connection-rot.json")); err != nil {
+				t.Fatal(err)
+			}
+			old := c.Token
+			if err := connfile.Rotate(c); err != nil {
+				t.Fatalf("Rotate = %v", err)
+			}
+			if c.Token == old || len(c.Token) != 64 {
+				t.Fatalf("token in memory not rotated: %q", c.Token)
+			}
+			got, err := connfile.Load("rot")
+			if err != nil || got.Token != c.Token || got.Port != 47110 || got.PID != os.Getpid() {
+				t.Fatalf("file not rewritten: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+// When another host has taken the file over, Rotate leaves it alone but
+// forgets the old token, so the key the user asked to replace stops working.
+func TestRotateRefusedForgetsOldToken(t *testing.T) {
+	isolate(t)
+	mine := &connfile.Conn{Instance: "dup", Port: 47110, Token: connfile.NewToken(), PID: os.Getpid()}
+	if err := connfile.Save(mine); err != nil {
+		t.Fatal(err)
+	}
+	theirs := &connfile.Conn{Instance: "dup", Port: 47111, Token: connfile.NewToken(), PID: os.Getpid() + 1}
+	if err := connfile.Save(theirs); err != nil {
+		t.Fatal(err)
+	}
+	if err := connfile.Rotate(mine); !errors.Is(err, connfile.ErrNotOwner) {
+		t.Fatalf("Rotate = %v, want ErrNotOwner", err)
+	}
+	if mine.Token != "" {
+		t.Fatalf("old token still in memory: %q", mine.Token)
+	}
+	if got, _ := connfile.Load("dup"); got.Token != theirs.Token || got.PID != theirs.PID {
+		t.Fatalf("the other host's file was changed: %+v", got)
+	}
+}
