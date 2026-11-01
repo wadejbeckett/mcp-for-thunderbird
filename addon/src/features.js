@@ -9,6 +9,15 @@
 // messages.save and messages.send permissions): there mail_draft and
 // mail_send are left out of the tool list and refused with not_supported
 // if called. mail_compose, which opens a compose window, works on both.
+//
+// mail_send is found out from messages.saveMessage, not sendMessage:
+// messages.save is a required permission, so saveMessage is there from
+// the start on 153 and later, but messages.send is optional and
+// sendMessage exists only once it has been granted (docs/SPIKES.md
+// section 4). Probing sendMessage would call 153 unable to send before the
+// grant, and so hide the very option that asks for it. Whether the
+// permission is granted is a separate check (permissions.contains), made
+// before mail_send is offered and again before each send.
 
 import { fail } from "./errors.js";
 
@@ -18,7 +27,7 @@ const NEEDS = Object.freeze({
     message: "Saving a draft without opening a window needs Thunderbird 153 or later. Use mail_compose to open the message in a compose window instead.",
   }),
   mail_send: Object.freeze({
-    method: "sendMessage",
+    method: "saveMessage",
     message: "Sending without a window needs Thunderbird 153 or later. Use mail_compose to open the message in a compose window instead.",
   }),
 });

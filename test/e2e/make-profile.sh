@@ -17,6 +17,8 @@
 #     SMTP on 3025, offline sync on and the sideload prefs (ruling R3), and
 #     a second IMAP account other@localhost (account3) on the same server,
 #     the other account of the injection suite's cross-account move.
+#     Identity id1 archives into the single folder Archives on its own
+#     account (TestE2EArchive), with no year or month subfolders.
 #
 # usage: make-profile.sh <xpi> <host-binary>
 # Environment as tb.sh (MFT_E2E_DIR, MFT_E2E_PROFILE).
@@ -164,6 +166,10 @@ for kv in \
   'mail.identity.id1.draft_folder "imap://test@127.0.0.1/Drafts"' \
   'mail.identity.id1.fcc_folder "imap://test@127.0.0.1/Sent"' \
   'mail.identity.id1.stationery_folder "imap://test@127.0.0.1/Templates"' \
+  'mail.identity.id1.archive_enabled true' \
+  'mail.identity.id1.archive_folder "imap://test@127.0.0.1/Archives"' \
+  'mail.identity.id1.archive_granularity 0' \
+  'mail.identity.id1.archive_keep_folder_structure false' \
   'mail.smtpservers "smtp1"' \
   'mail.smtp.defaultserver "smtp1"' \
   'mail.smtpserver.smtp1.hostname "127.0.0.1"' \

@@ -104,11 +104,12 @@ export function describeEntry(e) {
 
 const ALL_MAIL_PATHS = new Set(["[gmail]/all mail", "[google mail]/all mail"]);
 
-// isAllMail reports whether a folder is Gmail's All Mail: special use
-// "all", or the [Gmail]/All Mail path (ruling R34).
+// isAllMail reports whether a folder is Gmail's All Mail, by its
+// [Gmail]/All Mail path (ruling R34). Thunderbird's folder special uses
+// (MailFolderSpecialUse: inbox, drafts, sent, trash, templates, archives,
+// junk, outbox) have no value for All Mail.
 export function isAllMail(f) {
   if (!f || typeof f !== "object") return false;
-  if (Array.isArray(f.specialUse) && f.specialUse.includes("all")) return true;
   return typeof f.path === "string" && ALL_MAIL_PATHS.has(f.path.replace(/^\/+/, "").toLowerCase());
 }
 

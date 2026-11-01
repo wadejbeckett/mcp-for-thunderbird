@@ -41,7 +41,21 @@ test("support is read from the API given, not from the version", () => {
   install({ release: 153 });
   const m = { messages: { saveMessage() {} } };
   assert.equal(supported("mail_draft", m), true);
-  assert.equal(supported("mail_send", m), false);
+  assert.equal(supported("mail_send", m), true);
   assert.equal(supported("mail_draft", {}), false);
+  assert.equal(supported("mail_send", {}), false);
   assert.equal(supported("mail_search", {}), true);
+});
+
+test("on 153 mail_send is supported before messages.send is granted", () => {
+  // sendMessage appears only with the optional permission; support is
+  // read from saveMessage, which the required messages.save brings.
+  const mock = install({ release: 153 });
+  assert.equal(typeof mock.messenger.messages.sendMessage, "undefined");
+  assert.equal(supported("mail_send"), true);
+  assert.doesNotThrow(() => assertSupported("mail_send"));
+  assert.equal(supported("mail_send", { messages: { sendMessage() {} } }), false);
+  mock.grant("messages.send");
+  assert.equal(typeof mock.messenger.messages.sendMessage, "function");
+  assert.equal(supported("mail_send"), true);
 });

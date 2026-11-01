@@ -166,10 +166,12 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     helloSent = true;
     await showState();
     // Settings may have changed while the hello was being built, before
-    // onSettingsChanged could send them: catch up on tools and folder.
-    const now = await load();
-    await refreshTools(now);
-    syncConfig(now);
+    // onSettingsChanged could send them: catch up on tools and folder. The
+    // folder is read again after the tool check, which waits on
+    // Thunderbird: one saved meanwhile must not be overwritten by the one
+    // read before.
+    await refreshTools(await load());
+    syncConfig(await load());
   }
 
   function scheduleReconnect() {
@@ -307,8 +309,10 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     if (!s) return;
     paused = Boolean(s.paused);
     showState();
-    await refreshTools(s);
+    // The folder goes first, before the tool check waits on Thunderbird,
+    // so a later change cannot be overtaken by this one.
     syncConfig(s);
+    await refreshTools(s);
   }
 
   // syncConfig tells the host the attachment folder when it differs from

@@ -194,6 +194,22 @@ test("the log keeps at most 64 characters of the client name", async () => {
   assert.equal(b.client, "y".repeat(64));
 });
 
+test("on Thunderbird 153 mail_send without the messages.send grant is not called not_supported", async () => {
+  // sendMessage is missing until the optional permission is granted; the
+  // handler, not features.js, refuses the send then (compose.js NO_SEND).
+  const m = install({ release: 153, accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }] });
+  assert.equal(typeof m.messenger.messages.sendMessage, "undefined");
+  await save({ accounts: { a1: true }, groups: { compose: true }, send: { enabled: true, allow: ["x@y.test"] } });
+  let ran = false;
+  HANDLERS.mail_send = async () => {
+    ran = true;
+    return {};
+  };
+  const r = await dispatch(call("mail_send", { kind: "new", to: ["x@y.test"] }));
+  assert.equal(ran, true, JSON.stringify(r));
+  assert.equal(r.ok, true);
+});
+
 test("on Thunderbird 140 mail_draft and mail_send are refused with not_supported", async () => {
   install({ release: 140, accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }] });
   await save({ accounts: { a1: true }, groups: { compose: true }, send: { enabled: true, allow: ["x@y.test"] } });
