@@ -537,7 +537,7 @@ func claudeCodeAdd(binPath string) error {
 	}
 	if err := runClaude(add...); err != nil {
 		if rerr := runClaude(readd...); rerr != nil {
-			return fmt.Errorf("the old entry was removed but the new one could not be added (%v), and adding the old one back failed too (%v); a copy of .claude.json from before the change is next to it, named with .bak- and the date and time", err, rerr)
+			return fmt.Errorf("the old entry was removed but the new one could not be added (%v), and adding the old one back failed too (%v); the earliest of the copies of .claude.json next to it, named with .bak- and the date and time, is from before the change", err, rerr)
 		}
 		return fmt.Errorf("the new entry could not be added, so the old one was put back: %w", err)
 	}

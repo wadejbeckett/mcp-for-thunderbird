@@ -805,7 +805,7 @@ func TestClaudeCodeUpgradeAddFailurePutsOldBack(t *testing.T) {
 		error  string
 	}{
 		{false, "the old one was put back"},
-		{true, "a copy of .claude.json from before the change"},
+		{true, "the earliest of the copies of .claude.json"},
 	} {
 		home, bin := sandbox(t)
 		logf := fakeClaudeFailingAdd(t, bin, c.always)
