@@ -14,7 +14,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -57,16 +61,71 @@ func RegisterNative(binPath string) error {
 // key). Nothing registered is not an error.
 func UnregisterNative() error { return unregisterNative() }
 
-// Executable returns the absolute, symlink-free path of the running binary.
+// Executable returns the absolute path of the running binary with
+// symlinks resolved, except when it was reached through a link in a
+// package manager's bin folder (Homebrew's, for example): that link is
+// returned instead, so the recorded path keeps working after an upgrade
+// moves the binary to a new versioned folder.
 func Executable() (string, error) {
 	p, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		p = r
+	arg0 := ""
+	if len(os.Args) > 0 {
+		arg0 = os.Args[0]
 	}
-	return filepath.Abs(p)
+	return executable(p, arg0, stableBinDirs())
+}
+
+// stableBinDirs are folders whose links package managers keep pointing at
+// the current version.
+func stableBinDirs() []string {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"}
+	if p := os.Getenv("HOMEBREW_PREFIX"); filepath.IsAbs(p) {
+		dirs = append(dirs, filepath.Join(p, "bin"))
+	}
+	return dirs
+}
+
+// executable resolves exe, the running binary as the system reports it.
+// exe itself (macOS reports the path it was started by) or arg0 found on
+// PATH is returned instead when it is a symlink in one of bins that
+// resolves to the same binary.
+func executable(exe, arg0 string, bins []string) (string, error) {
+	real := exe
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		real = r
+	}
+	real, err := filepath.Abs(real)
+	if err != nil {
+		return "", err
+	}
+	cands := []string{exe}
+	if arg0 != "" && !strings.ContainsAny(arg0, `/\`) {
+		if lp, err := exec.LookPath(arg0); err == nil {
+			cands = append(cands, lp)
+		}
+	} else if arg0 != "" {
+		cands = append(cands, arg0)
+	}
+	for _, c := range cands {
+		c, err := filepath.Abs(c)
+		if err != nil || c == real || !slices.Contains(bins, filepath.Dir(c)) {
+			continue
+		}
+		fi, err := os.Lstat(c)
+		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		if r, err := filepath.EvalSymlinks(c); err == nil && r == real {
+			return c, nil
+		}
+	}
+	return real, nil
 }
 
 // resolve follows symlinks of an existing path; a missing path is

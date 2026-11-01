@@ -849,3 +849,57 @@ func TestTrailingDataRefused(t *testing.T) {
 		t.Fatalf("file changed:\n%s", b)
 	}
 }
+
+// Started through a package manager's bin link, the program records the
+// link, which survives upgrades; elsewhere it records the resolved path.
+func TestExecutableKeepsPackageManagerLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	_, bin := sandbox(t)
+	root := resolvedDir(t, t.TempDir())
+	cellar := filepath.Join(root, "Cellar", "mcp-for-thunderbird", "1.1.0", "bin")
+	os.MkdirAll(cellar, 0o755)
+	real := filepath.Join(cellar, "mcp-for-thunderbird")
+	os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755)
+	brewBin := filepath.Join(root, "bin")
+	os.MkdirAll(brewBin, 0o755)
+	link := filepath.Join(brewBin, "mcp-for-thunderbird")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", brewBin+string(os.PathListSeparator)+bin)
+	bins := []string{brewBin}
+	for _, c := range []struct{ exe, arg0, want string }{
+		{link, link, link},                  // macOS: the path it was started by
+		{real, "mcp-for-thunderbird", link}, // Linux: /proc/self/exe, started from PATH
+		{real, link, link},                  // Thunderbird starts the recorded link
+		{real, real, real},                  // started from the versioned folder
+		{link, link, link},
+	} {
+		if got, err := executable(c.exe, c.arg0, bins); err != nil || got != c.want {
+			t.Errorf("executable(%s, %s) = %s %v, want %s", c.exe, c.arg0, got, err, c.want)
+		}
+	}
+	// A link outside the package manager's bin folders is resolved.
+	if got, _ := executable(link, link, nil); got != real {
+		t.Errorf("unlisted folder: %s", got)
+	}
+	// A link in the bin folder that points at another binary is ignored.
+	other := filepath.Join(root, "other")
+	os.WriteFile(other, nil, 0o755)
+	os.Remove(link)
+	os.Symlink(other, link)
+	if got, _ := executable(real, "mcp-for-thunderbird", bins); got != real {
+		t.Errorf("foreign link used: %s", got)
+	}
+}
+
+func resolvedDir(t *testing.T, d string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
