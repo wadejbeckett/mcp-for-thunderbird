@@ -323,8 +323,29 @@ func (s *Server) toolError(tool string, err error) *mcp.CallToolResult {
 	if !errorCodes[ce.Code] {
 		ce.Code = "thunderbird_error"
 	}
+	if ce.MayHaveCompleted && !readOnly(tool) {
+		// The call reached Thunderbird before the host stopped waiting
+		// (timeout, cancellation, Thunderbird closing): say so, so that a
+		// move, draft or send is not simply repeated.
+		ce.Message += MaybeSuffix
+	}
 	s.Log.Printf("tool %s: error %s", tool, ce.Code)
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: ce.Code + ": " + ce.Message}}}
+}
+
+// MaybeSuffix ends the error of a call that changes mail when it reached
+// Thunderbird but no answer came back.
+const MaybeSuffix = "; the action may or may not have happened"
+
+// readOnly reports whether tool only reads, so repeating it is harmless.
+// Unknown names count as changing mail.
+func readOnly(tool string) bool {
+	for _, t := range catalogue.All() {
+		if t.Name == tool {
+			return t.ReadOnly
+		}
+	}
+	return false
 }
 
 // noteClient logs a client name the first time it is seen. Once

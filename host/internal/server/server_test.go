@@ -573,3 +573,35 @@ func TestRotateRefusedAfterClear(t *testing.T) {
 		t.Fatalf("after a late rotate: file %+v %v, token in memory %q", got, err, s.Token())
 	}
 }
+
+// A call that changes mail and reached Thunderbird without an answer says
+// the action may have happened, so it is not simply repeated; a read says
+// only what went wrong.
+func TestUnansweredWriteSaysItMayHaveHappened(t *testing.T) {
+	h := newHarness(t, []string{"mail_move", "mail_search"})
+	h.srv.b.SetCallTimeout(100 * time.Millisecond)
+	h.addon.setReply(func(m map[string]any) map[string]any {
+		time.Sleep(300 * time.Millisecond) // answers after the timeout
+		return map[string]any{"ok": true, "content": "late"}
+	})
+	cs := h.connect(t, nil)
+	res, err := call(t, cs, "mail_move", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "thunderbird_error: Thunderbird did not answer in 60 s" + MaybeSuffix; !res.IsError || text(res) != want {
+		t.Fatalf("mail_move: isError=%v text=%q, want %q", res.IsError, text(res), want)
+	}
+	res, err = call(t, cs, "mail_search", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "thunderbird_error: Thunderbird did not answer in 60 s"; !res.IsError || text(res) != want {
+		t.Fatalf("mail_search: isError=%v text=%q, want %q", res.IsError, text(res), want)
+	}
+	// A cancelled write is worded the same way.
+	r := h.srv.toolError("mail_send", bridge.CallError{Code: "thunderbird_error", Message: "The request was cancelled", MayHaveCompleted: true})
+	if got := text(r); got != "thunderbird_error: The request was cancelled"+MaybeSuffix {
+		t.Fatalf("cancelled send: %q", got)
+	}
+}
