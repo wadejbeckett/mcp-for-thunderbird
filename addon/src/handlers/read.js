@@ -487,10 +487,15 @@ async function firstPage(run, query) {
   }
 }
 
+// A thread holds each message once, keyed by its Message-ID (as message
+// ids are): Gmail shows one message in several folders, each copy with a
+// numeric id of its own. Of several copies a visible one is kept.
+const threadKey = (h) => stripAngleBrackets(h.headerMessageId || "") || `#${h.id}`;
+
 async function mailThread(args, ctx) {
   const s = ctx.settings;
   const run = newRun();
-  const msg = await resolveId(args.id);
+  const msg = answered(await call(run, () => resolveId(args.id)));
   const accountId = msg.folder.accountId;
   assertFolderAllowed(accountId, msg.folder.path, s);
   const own = stripAngleBrackets(msg.headerMessageId);
@@ -499,9 +504,13 @@ async function mailThread(args, ctx) {
   const upstream = [...ids].slice(0, THREAD_IDS_MAX);
   const inAccount = (h) => h && h.folder && h.folder.accountId === accountId;
 
-  const found = new Map([[msg.id, msg]]);
+  const found = new Map([[threadKey(msg), msg]]);
+  const add = (h) => {
+    const had = found.get(threadKey(h));
+    if (!had || (!visible(had, s) && visible(h, s))) found.set(threadKey(h), h);
+  };
   const pages = await Promise.all(upstream.map((headerMessageId) => firstPage(run, { accountId, headerMessageId, messagesPerPage: 20 })));
-  for (const h of pages.flat()) if (inAccount(h)) found.set(h.id, h);
+  for (const h of pages.flat()) if (inAccount(h)) add(h);
 
   // Replies: later messages of the same subject whose References or
   // In-Reply-To name a message of the thread. Only visible candidates are
@@ -512,17 +521,17 @@ async function mailThread(args, ctx) {
     const since = new Date(msg.date);
     if (!Number.isNaN(since.getTime())) query.fromDate = since;
     const candidates = (await firstPage(run, query)).filter(
-      (h) => inAccount(h) && visible(h, s) && !found.has(h.id) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
+      (h) => inAccount(h) && visible(h, s) && !found.has(threadKey(h)) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
     );
     const heads = await Promise.all(candidates.map(async (h) => [h, buildThreadIds(await headOf(run, h.id))]));
     const known = new Set([own, ...upstream, ...[...found.values()].map((h) => stripAngleBrackets(h.headerMessageId))]);
     for (let changed = true; changed; ) {
       changed = false;
       for (const [h, refs] of heads) {
-        if (found.has(h.id)) continue;
+        if (found.has(threadKey(h))) continue;
         const self = stripAngleBrackets(h.headerMessageId);
         if ([...refs].some((r) => r !== self && known.has(r))) {
-          found.set(h.id, h);
+          add(h);
           known.add(self);
           changed = true;
         }
@@ -602,8 +611,8 @@ function truncate(s, n) {
 // value is cut before it is cleaned (with headroom for what cleaning
 // removes), so a huge header costs no more than a short one.
 const HEADROOM = 512;
-const clip = (v) => truncate(cleanLine(truncate(String(v ?? ""), HEADER_CHARS + HEADROOM).text), HEADER_CHARS).text;
-const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
+export const clip = (v) => truncate(cleanLine(truncate(String(v ?? ""), HEADER_CHARS + HEADROOM).text), HEADER_CHARS).text;
+export const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
 
 function firstHeader(full, name) {
   const v = full && full.headers ? full.headers[name] : undefined;
@@ -619,6 +628,23 @@ export async function message(run, id, s) {
   return msg;
 }
 
+// plainDiffers says a plain-text alternative holds at least PLAIN_EXTRA
+// words (runs of letters and digits, in any case) that the text shown
+// from the HTML part does not: text in the message the reader never sees.
+const PLAIN_EXTRA = 5;
+const WORD = /[\p{L}\p{N}]+/gu;
+
+export function plainDiffers(plain, shown) {
+  if (plain.trim() === "") return false;
+  const seen = new Set(shown.toLowerCase().match(WORD) || []);
+  const extra = new Set();
+  for (const w of plain.toLowerCase().matchAll(WORD)) {
+    if (!seen.has(w[0])) extra.add(w[0]);
+    if (extra.size >= PLAIN_EXTRA) return true;
+  }
+  return false;
+}
+
 async function mailRead(args, ctx) {
   const s = ctx.settings;
   const maxChars = limitArg(args.max_chars, DEFAULT_MAX_CHARS, MAX_CHARS, "max_chars");
@@ -631,12 +657,15 @@ async function mailRead(args, ctx) {
   answered(full);
   answered(atts);
 
+  // The text is what a reader sees: the HTML part through htmlToText
+  // when there is one (a plain alternative can hold text the reader is
+  // never shown), else the plain part.
   const parts = bodyParts(full);
-  const plainFirst = parts.plain.trim() !== "";
-  const source = plainFirst ? parts.plain : htmlToText(parts.html);
-  const { text, cut } = truncate(stripInvisible(source), maxChars);
-  const over = plainFirst ? parts.plainOver : parts.htmlOver;
-  return {
+  const useHtml = parts.html.trim() !== "";
+  const source = stripInvisible(useHtml ? htmlToText(parts.html) : parts.plain);
+  const { text, cut } = truncate(source, maxChars);
+  const over = useHtml ? parts.htmlOver : parts.plainOver;
+  const out = {
     id: args.id,
     headers: {
       date: iso(msg.date),
@@ -655,6 +684,8 @@ async function mailRead(args, ctx) {
       contentType: clip(a && a.contentType),
     })),
   };
+  if (useHtml && plainDiffers(stripInvisible(parts.plain), source)) out.plainTextDiffers = true;
+  return out;
 }
 
 // ---- mail_attachment ----
@@ -664,6 +695,7 @@ export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024 };
 const ATTACHMENT_TEXT = 20_000;
 const NO_DIR = "Choose an attachment folder in MCP for Thunderbird's options first.";
 const TOO_LARGE = "The attachment is larger than 50 MiB.";
+const AMBIGUOUS = "Several attachments in this message have that name, so the attachment meant cannot be told apart.";
 // base64 is built in pieces of whole 3-byte groups.
 const B64_PIECE = 3 * 16_384;
 
@@ -696,12 +728,17 @@ async function mailAttachment(args, ctx) {
   const run = newRun();
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
-  // Match the name as mail_read lists it (cleaned by clip: invisible
-  // characters stripped, markers defused, at most 2000 characters), else
-  // the name exactly as Thunderbird has it.
+  // Match the name exactly as Thunderbird has it first, else as mail_read
+  // lists it (cleaned by clip: invisible characters stripped, markers
+  // defused, at most 2000 characters). An exact name always wins, so an
+  // attachment whose name differs only by invisible characters cannot
+  // stand in for it; a name that fits several attachments is refused.
   const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
-  const att = atts.find((a) => clip(a.name) === name) || atts.find((a) => a.name === name);
-  if (!att) fail("not_found", "No attachment of that name in this message.");
+  let found = atts.filter((a) => a.name === name);
+  if (found.length === 0) found = atts.filter((a) => clip(a.name) === name);
+  if (found.length === 0) fail("not_found", "No attachment of that name in this message.");
+  if (found.length > 1) fail("invalid_argument", AMBIGUOUS);
+  const att = found[0];
   const contentType = String(att.contentType || "application/octet-stream");
   const isText = /^\s*text\//i.test(contentType);
   const isHtml = /^\s*text\/html\b/i.test(contentType);

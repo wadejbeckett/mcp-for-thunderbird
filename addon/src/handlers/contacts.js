@@ -7,10 +7,15 @@
 // books are left out so a slow directory cannot stall the call. The
 // list-and-filter fallback follows the vitalio-sh "thunderbird-cli"
 // extension (seed commit 465613d), MIT licence, see NOTICE.
+//
+// A contact can come from a message (Thunderbird collects addresses), so
+// its fields are shown like header values outside the untrusted wrapper:
+// cleaned by clip (invisible characters removed, markers defused, at
+// most 2000 characters), with at most 200 addresses a contact.
 
 import { HANDLERS } from "../rpc.js";
 import { fail } from "../errors.js";
-import { limitArg } from "./read.js";
+import { limitArg, clip, clipList } from "./read.js";
 
 export const DEFAULT_LIMIT = 25;
 export const MAX_LIMIT = 200;
@@ -66,6 +71,12 @@ export function parseVCard(text) {
   return { name: fn || n, emails, organisation: org };
 }
 
+// cleaned gives a contact's fields as they are returned.
+function cleaned(c) {
+  const emails = [...new Set(clipList(c.emails))].filter(Boolean);
+  return { name: clip(c.name), emails, organisation: clip(c.organisation) };
+}
+
 function matches(c, terms) {
   const hay = [c.name, ...c.emails].map((x) => x.toLowerCase());
   return terms.every((t) => hay.some((h) => h.includes(t)));
@@ -92,7 +103,7 @@ async function mailContacts(args) {
   const contacts = [];
   for (const node of nodes || []) {
     if (contacts.length >= limit) break;
-    const c = parseVCard(node && node.vCard);
+    const c = cleaned(parseVCard(node && node.vCard));
     if (!c.name && c.emails.length === 0) continue;
     if (filter && !matches(c, terms)) continue;
     contacts.push(c);
