@@ -1,0 +1,84 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Linux end-to-end tests (test/e2e/run.sh) on the oldest Thunderbird the
+# add-on supports, 140 ESR, and on the current release, each unpacked from
+# Mozilla's own Linux tarball under xvfb. GreenMail runs in Docker on
+# 127.0.0.1; Thunderbird runs with a throwaway profile and home on the
+# throwaway runner. Nothing is installed but the libraries Thunderbird needs.
+#
+# To move to newer Thunderbird versions, change `version` and `sha256` in
+# the matrix below. The version is the release folder name on
+# https://archive.mozilla.org/pub/thunderbird/releases/ (140.x.yesr for
+# the ESR, the newest plain number for the release). The hash is the
+# "linux-x86_64/en-US/thunderbird-<version>.tar.xz" line of that folder's
+# SHA256SUMS. fetch-thunderbird.sh checks the tarball against both.
+
+name: e2e-linux
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - host/**
+      - addon/**
+      - packaging/build-xpi.mjs
+      - test/e2e/**
+      - .github/workflows/e2e-linux.yml
+  push:
+    branches: [v1]
+    paths:
+      - host/**
+      - addon/**
+      - packaging/build-xpi.mjs
+      - test/e2e/**
+      - .github/workflows/e2e-linux.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Thunderbird ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Thunderbird 140 ESR, the oldest supported version.
+          - version: 140.17.0esr
+            sha256: 217edda8359412f13d76765802ed946b94b3cf95db5a4c8d9386f1f62f9391de
+          # The current release.
+          - version: "159.0"
+            sha256: a7cb57c4dfec66e566e1cbbdcf7e0aab67aad7262dd0ab38b4f4e8df2b771074
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: test/e2e/go.mod
+          cache-dependency-path: |
+            host/go.sum
+            test/e2e/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Libraries Thunderbird needs, and xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgtk-3-0t64 libasound2t64 libx11-xcb1
+      - name: Thunderbird ${{ matrix.version }} from Mozilla, checked against SHA256SUMS
+        id: tb
+        run: |
+          tb=$(test/e2e/fetch-thunderbird.sh "${{ matrix.version }}" "$RUNNER_TEMP/mft-e2e-tb" "${{ matrix.sha256 }}")
+          echo "path=$tb" >>"$GITHUB_OUTPUT"
+      - name: End-to-end tests
+        env:
+          TMPDIR: ${{ runner.temp }}
+          MFT_E2E_THUNDERBIRD: ${{ steps.tb.outputs.path }}
+        run: test/e2e/run.sh -v
