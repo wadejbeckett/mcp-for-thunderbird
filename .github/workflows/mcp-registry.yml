@@ -1,0 +1,115 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Publishes the server's entry in the official MCP Registry
+# (registry.modelcontextprotocol.io) when a GitHub release is published,
+# or when started by hand for an existing release tag.
+#
+# server.json in the repository is a template. For the release this run
+# is for, the job sets the version, points each .mcpb package at that
+# release's asset and takes its SHA-256 from the release's SHA256SUMS,
+# after checking each downloaded .mcpb against that file. It then
+# validates the result and publishes it.
+#
+# The job signs in to the registry with GitHub OIDC (id-token: write), so
+# no personal token or secret is stored. mcp-publisher is downloaded at a
+# pinned version and checked against a pinned SHA-256 before it runs.
+
+name: mcp-registry
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to list (vX.Y.Z)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-registry
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # OIDC grants the namespace of the repository owner, so a fork cannot
+    # publish under io.github.wadejbeckett.
+    if: github.repository == 'wadejbeckett/mcp-for-thunderbird'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC sign-in to the MCP Registry
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.5
+      # sha256 of mcp-publisher_linux_amd64.tar.gz for that version, from
+      # registry_1.8.5_checksums.txt on the registry's release page.
+      MCP_PUBLISHER_SHA256: 2d151ac57275c9a6684d9d22b1cba81058bab195ea0a162e8fce3c6a5ec32812
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "release tag must be vX.Y.Z, got: $TAG"; exit 1
+          fi
+          draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+          if [ "$draft" != "false" ]; then
+            echo "release $TAG is not published"; exit 1
+          fi
+
+      - name: Download the release's .mcpb bundles and SHA256SUMS, and check them
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern SHA256SUMS --pattern '*.mcpb'
+          cd release
+          grep -E '  [^ ]+\.mcpb$' SHA256SUMS > mcpb.sums
+          sha256sum -c --strict mcpb.sums
+
+      - name: Fill in server.json for this release
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          jq --arg version "$version" --arg base "$base" --rawfile sums release/mcpb.sums '
+            ($sums | split("\n") | map(select(length > 0) | split("  ") | {key: .[1], value: .[0]}) | from_entries) as $sha
+            | .version = $version
+            | .packages |= map(
+                if .registryType == "mcpb" then
+                  (.identifier | capture("/mcp-for-thunderbird-[0-9]+[.][0-9]+[.][0-9]+-(?<platform>[^/]+)[.]mcpb$").platform) as $platform
+                  | ("mcp-for-thunderbird-" + $version + "-" + $platform + ".mcpb") as $file
+                  | if $sha[$file] == null then error("no " + $file + " in SHA256SUMS") else . end
+                  | .identifier = ($base + "/" + $file)
+                  | .fileSha256 = $sha[$file]
+                else . end)
+          ' server.json > server.release.json
+          mv server.release.json server.json
+          cat server.json
+
+      - name: Download and check mcp-publisher
+        run: |
+          set -euo pipefail
+          archive=mcp-publisher_linux_amd64.tar.gz
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/$archive"
+          echo "$MCP_PUBLISHER_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" mcp-publisher
+
+      - name: Validate server.json
+        run: '"$RUNNER_TEMP/mcp-publisher" validate server.json'
+
+      - name: Sign in to the MCP Registry with GitHub OIDC
+        run: '"$RUNNER_TEMP/mcp-publisher" login github-oidc'
+
+      - name: Publish to the MCP Registry
+        run: '"$RUNNER_TEMP/mcp-publisher" publish server.json'
