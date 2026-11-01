@@ -492,4 +492,3 @@ func TestTokenRequestAfterRotateSeesNewKey(t *testing.T) {
 		t.Fatalf("token after rotate = %v, want the new key", m)
 	}
 }
-

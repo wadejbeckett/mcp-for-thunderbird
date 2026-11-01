@@ -25,6 +25,7 @@ export const HOST_NAME = "mcp_for_thunderbird";
 export const PROTOCOL = 1;
 export const BACKOFF_SECONDS = Object.freeze([0, 1, 2, 4, 8, 16, 25]);
 const REPLY_TIMEOUT_MS = 30_000;
+const ROTATE_REFUSED = "The host program refused to rotate the access key and now refuses every request. Restart Thunderbird to give it a new key.";
 
 const TOOLBAR = {
   connected: { title: "MCP for Thunderbird: connected", badge: "", color: "#2e7d32" },
@@ -75,6 +76,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   let stopped = false;
   let helloSent = false;
   let lastTools = null;
+  let toolsSeq = 0;
   let lastDir = null;
   let reqSeq = 0;
   const blobs = new Map(); // blob id -> {chunks: [], done}
@@ -325,8 +327,11 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   }
 
   async function refreshTools(s) {
+    const seq = ++toolsSeq;
     s = s || (await load());
     const tools = await currentTools(s);
+    // A later refresh started while this one waited: it sends the newer list.
+    if (seq !== toolsSeq) return;
     const key = JSON.stringify(tools);
     if (port && helloSent && key !== lastTools) {
       lastTools = key;
@@ -393,11 +398,16 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   const detectClients = () => clientsRequest("clients_detect", {});
   const configureClients = (names) => clientsRequest("clients_configure", { clients: [...names] });
 
-  function rotateToken() {
+  // rotateToken asks the host for a new access key, then reads the key
+  // back: the host handles the two requests in order, so an empty key means
+  // it refused the rotation and now refuses every request.
+  async function rotateToken() {
     const bad = unusable();
-    if (bad) return Promise.reject(bad);
+    if (bad) throw bad;
     send({ type: "rotate_token" });
-    return Promise.resolve(true);
+    const { token } = await requestToken();
+    if (!token) throw new Error(ROTATE_REFUSED);
+    return true;
   }
 
   // UI pages (setup, options, popup) reach the background through

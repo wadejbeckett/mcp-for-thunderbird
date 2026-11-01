@@ -379,8 +379,12 @@ test("message router: rotateToken, detectClients, configureClients and getEndpoi
   welcome(port);
   const [handler] = mock.messenger.runtime.onMessage.listeners;
   const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
-  assert.equal(await handler({ type: "rotateToken" }, me), true);
+  const rotated = handler({ type: "rotateToken" }, me);
+  await flush();
   assert.equal(port.sentOfType("rotate_token").length, 1);
+  assert.equal(port.sentOfType("token_request").length, 1, "the new key is read back");
+  port.receive({ type: "token", token: "n".repeat(64), url: "http://127.0.0.1:47110/mcp" });
+  assert.equal(await rotated, true);
 
   const d = handler({ type: "detectClients" }, me);
   const c = handler({ type: "configureClients", clients: ["claude-code"] }, me);
@@ -393,8 +397,45 @@ test("message router: rotateToken, detectClients, configureClients and getEndpoi
   assert.equal((await d)[0].name, "codex");
   assert.equal((await c)[0].configured, true);
 
+  const asked = port.sentOfType("token_request").length;
   assert.deepEqual(await handler({ type: "getEndpoint" }, me), { url: "http://127.0.0.1:47110/mcp" }, "the endpoint reply never carries the token");
-  assert.equal(port.sentOfType("token_request").length, 0, "getEndpoint never asks the host for the token");
+  assert.equal(port.sentOfType("token_request").length, asked, "getEndpoint never asks the host for the token");
+});
+
+test("a rotation the host refused is reported, not claimed", async () => {
+  await bg.start();
+  const port = mock.lastPort();
+  welcome(port);
+  const p = bg.rotateToken();
+  await flush();
+  port.receive({ type: "token", token: "", url: "http://127.0.0.1:47110/mcp" });
+  await assert.rejects(p, /refused to rotate/);
+});
+
+test("an older tool refresh that finishes last does not overwrite a newer one", async () => {
+  // Direct send on, so every refresh waits for the permission check.
+  await save({ send: { enabled: true, allow: ["x@example.org"] } });
+  mock.grant?.("messages.send");
+  await bg.start();
+  const port = mock.lastPort();
+  welcome(port);
+  await flush();
+  const contains = mock.messenger.permissions.contains;
+  const gates = [];
+  mock.messenger.permissions.contains = (arg) => new Promise((resolve) => gates.push(() => resolve(contains(arg))));
+  const s = await load();
+  // The first change turns compose on; the second turns it off again.
+  mock.messenger.storage.onChanged.fire({ settings: { oldValue: s, newValue: { ...s, groups: { ...s.groups, compose: true } } } }, "local");
+  await flush();
+  mock.messenger.storage.onChanged.fire({ settings: { oldValue: s, newValue: { ...s, groups: { ...s.groups, compose: false } } } }, "local");
+  await flush();
+  assert.equal(gates.length, 2);
+  gates[1](); // the newer refresh answers first
+  await flush();
+  gates[0](); // then the older one
+  await flush();
+  const last = port.sentOfType("tools").at(-1);
+  assert.ok(!last || !last.tools.includes("mail_draft"), `the last tool list sent must be the newer one: ${JSON.stringify(last)}`);
 });
 
 test("getEndpoint comes from the welcome port and fails while not connected", async () => {

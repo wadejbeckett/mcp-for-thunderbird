@@ -230,6 +230,10 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     try {
       const { token, url } = await send({ type: "requestToken" });
       $("endpoint").textContent = url;
+      if (!token) {
+        status.textContent = "The host program has no access key at the moment. Restart Thunderbird to give it a new one.";
+        return;
+      }
       await clipboard.writeText(token);
       status.textContent = "Token copied. Paste it where the app asks for it; it is not kept anywhere else.";
     } catch (e) {
