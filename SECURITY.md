@@ -86,7 +86,7 @@ These are known and accepted for now. Reports of ways to get past them are welco
 
 - A style rule inside `@media`, `@supports` or `@container` applies only on some screens or in some readers, so whatever it sets counts as unknown: it hides nothing itself, and it cancels what an ordinary rule hides on the same element (a newsletter that hides a block by default and shows it on wider screens keeps that text). When several style rules disagree, CSS specificity is not weighed. Text hidden only in either of these ways stays in.
 - The one case that leans the other way: a parent hidden with `visibility: hidden` hides its children, even where a child sets `visibility: visible` again, so such text is dropped.
-- Colour comparison assumes a white reading pane. White text with no declared background is kept, and colours written as `hsl()` or as some colour names may not be recognised.
+- Colour comparison assumes a white reading pane, so white or near-white text with no background of its own (or from an enclosing element) is dropped, even though a reader whose Thunderbird shows mail on a dark background would see it. Colours written as `hsl()` or as some colour names may not be recognised, and text in them is kept.
 - Text hidden only from screen readers (`aria-hidden`) is kept, because sighted readers see it.
 - Letters from other alphabets that look like Latin letters, and other look-alike characters, are not converted in the text returned (they are only recognised when they spell the fence marker), so look-alike instructions pass through as text inside the fenced block.
 - Very complex style sheets cost time to evaluate; the work is capped, and when the cap is reached the remaining rules are ignored, which can only leave more text in.
