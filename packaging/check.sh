@@ -12,15 +12,20 @@
 #     e2e-settings.json (ruling R2);
 #   - the XPI's manifest has no experiment_apis, the add-on id, and the
 #     release version's X.Y.Z core, and the XPI carries LICENSE and NOTICE;
-#   - every host package (archive, .deb, .mcpb) carries THIRD_PARTY_LICENSES,
-#     the licences of the Go modules linked into the host;
+#   - every host package carries THIRD_PARTY_LICENSES, the licences of the
+#     Go modules linked into the host, at its exact place: next to the binary
+#     in each archive's top directory, /usr/share/doc/mcp-for-thunderbird/ in
+#     the .deb and the root of the .mcpb;
 #   - every host binary contains the native host name and the add-on id,
 #     and the linux/amd64 one reports `mcp-for-thunderbird <version>`;
 #   - the .deb installs to /usr/lib/mcp-for-thunderbird/ and the .mcpb
 #     manifests run the bundled binary with `connect`;
 #   - every SBOM is SPDX JSON whose creators name syft with a version
 #     (never "[not provided]").
-# Needs sh, python3 (3.9 or later) and sha256sum; dpkg-deb when present.
+# Needs sh, python3 (3.9 or later), sha256sum and dpkg-deb. Without dpkg-deb
+# the check fails, unless MFT_CHECK_SKIP_DEB=1 is set: then the .deb
+# contents are not checked and a note says so (the .deb files must still
+# exist and verify against SHA256SUMS).
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -38,6 +43,13 @@ fail() {
 version=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$dist/metadata.json")
 [ -n "$version" ] || fail "no version in metadata.json"
 core=${version%%-*}
+
+skip_deb=0
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+  [ "${MFT_CHECK_SKIP_DEB:-}" = 1 ] || fail "dpkg-deb not found; install it, or set MFT_CHECK_SKIP_DEB=1 to skip the .deb contents"
+  echo "check: dpkg-deb not found and MFT_CHECK_SKIP_DEB=1; .deb contents not checked" >&2
+  skip_deb=1
+fi
 
 # 1. Every artefact exists.
 want=""
@@ -63,9 +75,9 @@ done
 # 3. Archive contents: nothing internal, test-only or e2e-only.
 binaries=$(find "$dist" -mindepth 2 -maxdepth 2 -type f \( -name "$NAME" -o -name "$NAME.exe" \))
 [ "$(echo "$binaries" | wc -l)" -eq 7 ] || fail "expected 7 host binaries (6 targets + universal), found: $binaries"
-python3 -I - "$dist" "$version" "$core" "$ADDON_ID" $want <<'EOF' || exit 1
+python3 -I - "$dist" "$version" "$core" "$ADDON_ID" "$skip_deb" $want <<'EOF' || exit 1
 import io, json, re, subprocess, sys, tarfile, zipfile
-dist, version, core, addon_id, *files = sys.argv[1:]
+dist, version, core, addon_id, skip_deb, *files = sys.argv[1:]
 BAD = re.compile(r"(^|/)(\.superpowers|spikes|node_modules|test|tests|testdata)(/|$)|_test\.go$|\.test\.js$|(^|/)e2e-settings\.json$")
 
 def fail(msg):
@@ -80,10 +92,9 @@ def names(path):
         with zipfile.ZipFile(path) as z:
             return z.namelist()
     if path.endswith(".deb"):
-        try:
-            out = subprocess.run(["dpkg-deb", "--fsys-tarfile", path], check=True, capture_output=True).stdout
-        except FileNotFoundError:
+        if skip_deb == "1":
             return None
+        out = subprocess.run(["dpkg-deb", "--fsys-tarfile", path], check=True, capture_output=True).stdout
         with tarfile.open(fileobj=io.BytesIO(out)) as t:
             return t.getnames()
     return []
@@ -102,14 +113,29 @@ for f in files:
         continue
     n = names(path)
     if n is None:
-        print(f"check: dpkg-deb not found; {f} contents not checked", file=sys.stderr)
         continue
     for name in n:
         if BAD.search(name.removeprefix("./")):
             fail(f"{f} contains {name}")
-    if f.endswith((".tar.gz", ".zip", ".mcpb", ".deb")):
-        if not any(name.rstrip("/").split("/")[-1] == "THIRD_PARTY_LICENSES" for name in n):
-            fail(f"{f} lacks THIRD_PARTY_LICENSES")
+    # THIRD_PARTY_LICENSES at its exact place in each host package, and
+    # nowhere else.
+    licences = None
+    if f.endswith((".tar.gz", ".zip")):
+        top = f.removesuffix(".tar.gz").removesuffix(".zip")
+        binary = f"{top}/mcp-for-thunderbird" + (".exe" if "-windows-" in f else "")
+        if binary not in n:
+            fail(f"{f} lacks {binary}")
+        licences = f"{top}/THIRD_PARTY_LICENSES"
+    elif f.endswith(".deb"):
+        licences = "./usr/share/doc/mcp-for-thunderbird/THIRD_PARTY_LICENSES"
+    elif f.endswith(".mcpb"):
+        licences = "THIRD_PARTY_LICENSES"
+    if licences is not None:
+        if licences not in n:
+            fail(f"{f} lacks {licences}")
+        stray = [name for name in n if name != licences and name.rstrip("/").split("/")[-1] == "THIRD_PARTY_LICENSES"]
+        if stray:
+            fail(f"{f} carries THIRD_PARTY_LICENSES at {stray[0]}, want only {licences}")
     if f.endswith(".deb") and "./usr/lib/mcp-for-thunderbird/mcp-for-thunderbird" not in n:
         fail(f"{f} does not install /usr/lib/mcp-for-thunderbird/mcp-for-thunderbird")
     if f.endswith(".xpi"):

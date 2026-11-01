@@ -20,7 +20,7 @@ For a security problem, do not open a public issue or pull request; follow [SECU
 - Go 1.25 or later. With `GOTOOLCHAIN=auto`, Go fetches the exact version named in `host/go.mod`.
 - For the end-to-end tests on Linux: Thunderbird 153 or later, Docker, `xvfb-run`, `curl` and Python 3.
 - For the documentation check: bash.
-- For release builds: Python 3.9 or later (`packaging/check.sh` and its self-test use features added in Python 3.9), `sha256sum`, and `dpkg-deb` to check the `.deb`.
+- For release builds: Python 3.9 or later (`packaging/check.sh` and its self-test use features added in Python 3.9), `sha256sum`, and `dpkg-deb` to check the `.deb`. Without `dpkg-deb`, `check.sh` fails; set `MFT_CHECK_SKIP_DEB=1` to skip the `.deb` contents on purpose (the `.deb` files must still be present and match `SHA256SUMS`, and the check prints a note that their contents were not checked).
 
 ## Build and test
 
