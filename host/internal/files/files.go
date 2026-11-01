@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -72,17 +73,18 @@ func sanitise(name string) string {
 }
 
 // reserved reports whether Windows would open a device for name: CON,
-// PRN, AUX, NUL, COM1-9 or LPT1-9 (also with superscript 1-3), in any
-// case, alone or before any extension, ignoring trailing spaces. Such names
-// are prefixed on every platform, so a folder synced to Windows is safe too.
+// PRN, AUX, NUL, CONIN$, CONOUT$, COM1-9 or LPT1-9 (also with superscript
+// 1-3), in any case, alone or before any extension or stream name,
+// ignoring trailing spaces. Such names are prefixed on every platform, so
+// a folder synced to Windows is safe too.
 func reserved(name string) bool {
 	stem := name
-	if i := strings.IndexByte(stem, '.'); i >= 0 {
+	if i := strings.IndexAny(stem, ".:"); i >= 0 {
 		stem = stem[:i]
 	}
 	stem = strings.ToUpper(strings.TrimRight(stem, " "))
 	switch stem {
-	case "CON", "PRN", "AUX", "NUL":
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return true
 	}
 	if r := []rune(stem); len(r) == 4 && (string(r[:3]) == "COM" || string(r[:3]) == "LPT") {
@@ -198,17 +200,36 @@ func Save(dir, name string, data []byte) (string, error) {
 	return "", errors.New("files: too many files with the same name")
 }
 
+// localName reports whether name names an entry directly inside a
+// folder on goos. On Windows it also refuses names Windows would read as
+// something else: a colon (a drive or an NTFS alternate data stream such
+// as "a.txt:hidden"), a device name such as CON or NUL, and a name made
+// only of dots and spaces, which Windows trims to the folder or its parent.
+func localName(goos, name string) bool {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
+		strings.ContainsRune(name, 0) {
+		return false
+	}
+	if goos == "windows" {
+		if strings.ContainsRune(name, ':') || reserved(name) || strings.TrimRight(name, ". ") == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadForDraft reads a regular file named name from directly inside dir.
-// Path separators, "..", absolute names and symlinks that resolve outside dir
-// are refused with ErrOutside. Anything but a regular file (a folder, a FIFO,
+// Path separators, "..", absolute names, names Windows would read as a
+// device or another stream, and symlinks that resolve outside dir are
+// refused with ErrOutside. Anything but a regular file (a folder, a FIFO,
 // a device) is refused without being opened for reading, so it cannot
 // block the host.
 func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err := checkDir(dir); err != nil {
 		return nil, "", err
 	}
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
-		filepath.IsAbs(name) || filepath.VolumeName(name) != "" || strings.ContainsRune(name, 0) {
+	if !localName(runtime.GOOS, name) || !filepath.IsLocal(name) ||
+		filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
 		return nil, "", ErrOutside
 	}
 	realDir, err := filepath.EvalSymlinks(dir)
