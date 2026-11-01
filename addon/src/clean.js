@@ -128,24 +128,55 @@ export function cleanLine(s) {
 
 // ---- Authentication-Results ----
 
+// bare removes comments (nested) and quoted strings from a header value,
+// each with its backslash escapes (RFC 5322 CFWS and quoted-string, as RFC
+// 8601 uses them). A quoted string leaves "" so a property keeps a value;
+// one left open runs to the end, like an open comment.
+function bare(s) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quoted) {
+      if (c === "\\") i++;
+      else if (c === '"') {
+        quoted = false;
+        out += '""';
+      }
+    } else if (depth > 0) {
+      if (c === "\\") i++;
+      else if (c === "(") depth++;
+      else if (c === ")" && --depth === 0) out += " ";
+    } else if (c === '"') quoted = true;
+    else if (c === "(") depth = 1;
+    else out += c;
+  }
+  return out;
+}
+
+const RESINFO = /^\s*([a-z0-9][a-z0-9_-]*)\s*(?:\/\s*\d+\s*)?=\s*([a-z]+)/i;
+
 // authResults reads spf, dkim and dmarc from the topmost
 // Authentication-Results header, the one the receiving server added;
-// headers further down can come from the sender. Comments are ignored. With
-// several dkim results (several signatures) one pass is a pass.
+// headers further down can come from the sender. The value is read as RFC
+// 8601 lays it out: comments and quoted strings are removed, ";" splits it
+// into the authserv-id and one clause per result, and only the leading
+// method=result of each clause counts, so a property value (such as
+// smtp.mailfrom="x;dmarc=pass"@evil.example) cannot pose as a result.
+// With several dkim results (several signatures) one pass is a pass.
 export function authResults(headers) {
   const out = { spf: "none", dkim: "none", dmarc: "none" };
   const v = headers && typeof headers === "object" ? headers["authentication-results"] : undefined;
   const first = Array.isArray(v) ? v[0] : v;
   if (typeof first !== "string") return out;
-  let s = first.slice(0, 16_384);
-  for (let prev = ""; prev !== s; ) {
-    prev = s;
-    s = s.replace(/\([^()]*\)/g, " ");
-  }
-  const re = /(?:^|[;\s])(spf|dkim|dmarc)\s*=\s*([a-z]+)/giu;
-  for (const m of s.matchAll(re)) {
+  const clauses = bare(first.slice(0, 16_384)).split(";").slice(1);
+  for (const clause of clauses) {
+    const m = RESINFO.exec(clause);
+    if (!m) continue;
     const method = m[1].toLowerCase();
     const result = m[2].toLowerCase();
+    if (!Object.hasOwn(out, method)) continue;
     if (out[method] === "none" || (method === "dkim" && result === "pass")) out[method] = result;
   }
   return out;

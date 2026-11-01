@@ -149,6 +149,32 @@ test("TestAuthResultsParsed", () => {
   });
 });
 
+test("Authentication-Results: a quoted property value or a comment cannot pose as a result", () => {
+  const ar = (v) => authResults({ "authentication-results": [v, "forged.example; dmarc=pass"] });
+  // the spoof: a quoted local part holding ";dmarc=pass" before the real dmarc=fail
+  assert.deepEqual(ar('mx.work.example; spf=pass smtp.mailfrom="x;dmarc=pass"@evil.example; dkim=none; dmarc=fail header.from=evil.example'), {
+    spf: "pass",
+    dkim: "none",
+    dmarc: "fail",
+  });
+  // escaped quotes and parentheses inside a quoted string, quotes inside a comment
+  assert.deepEqual(ar('mx.example; spf=fail smtp.mailfrom="a\\";dmarc=pass (\\"x"@evil.example; dmarc=fail'), { spf: "fail", dkim: "none", dmarc: "fail" });
+  assert.deepEqual(ar('mx.example; spf=softfail (a "comment; dmarc=pass" (nested; dkim=pass) \\) dmarc=pass) smtp.mailfrom=x; dmarc=fail'), {
+    spf: "softfail",
+    dkim: "none",
+    dmarc: "fail",
+  });
+  // only the leading method=result of a clause counts
+  assert.deepEqual(ar("mx.example; spf=pass smtp.mailfrom=x dmarc=pass; dmarc=fail"), { spf: "pass", dkim: "none", dmarc: "fail" });
+  assert.deepEqual(ar("mx.example; spf=pass policy.dmarc=pass"), { spf: "pass", dkim: "none", dmarc: "none" });
+  // the authserv-id clause is not a result; a version, spaces and none are allowed
+  assert.deepEqual(ar("dmarc=pass; spf = fail"), { spf: "fail", dkim: "none", dmarc: "none" });
+  assert.deepEqual(ar("mx.example 1; dkim/1=pass header.d=x"), { spf: "none", dkim: "pass", dmarc: "none" });
+  assert.deepEqual(ar("mx.example; none"), { spf: "none", dkim: "none", dmarc: "none" });
+  // an unterminated quoted string or comment hides the rest
+  assert.deepEqual(ar('mx.example; spf=pass smtp.mailfrom="x; dmarc=pass'), { spf: "pass", dkim: "none", dmarc: "none" });
+});
+
 test("rgb() with spaces or a slash alpha, and CSS comments, do not hide text from the cleaner", () => {
   const html = `<div style="background:#fff">
     <p style="color:rgb(255 255 255)">HIDDEN1</p>
