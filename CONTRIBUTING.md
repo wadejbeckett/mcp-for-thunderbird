@@ -20,7 +20,7 @@ For a security problem, do not open a public issue or pull request; follow [SECU
 - Go 1.25 or later. With `GOTOOLCHAIN=auto`, Go fetches the exact version named in `host/go.mod`.
 - For the end-to-end tests on Linux: Thunderbird 140 ESR or later, Docker, `xvfb-run`, `curl` and Python 3.
 - For the documentation check: bash.
-- For release builds: Python 3.9 or later (`packaging/check.sh` and its self-test use features added in Python 3.9), `sha256sum`, and `dpkg-deb` to check the `.deb`.
+- For release builds: Python 3.9 or later (`packaging/check.sh` and its self-test use features added in Python 3.9), `sha256sum`, and `dpkg-deb` to check the `.deb`. Without `dpkg-deb`, `check.sh` fails; set `MFT_CHECK_SKIP_DEB=1` to skip the `.deb` contents on purpose (the `.deb` files must still be present and match `SHA256SUMS`, and the check prints a note that their contents were not checked).
 
 ## Build and test
 
@@ -48,6 +48,8 @@ After changing `host/go.mod`, regenerate the licences of the modules linked into
 ```
 sh packaging/third-party-licenses.sh
 ```
+
+The file lists every module with its version, and a module that `host/go.mod` replaces with its replacement too; it carries every `LICENSE*`, `LICENCE*` and `COPYING*` file at the root of each module. `sh packaging/third-party-licenses-selftest.sh` proves this on a small module of its own.
 
 Documentation check (product name, privacy statements, no internal references):
 
@@ -85,8 +87,8 @@ Release tags must be plain numbers, `vX.Y.Z` (for example `v1.0.0`), giving the 
 ## Releasing
 
 1. On `v1`, at the commit to release, check that the `test` and `platforms` workflows are green.
-2. Tag it `vX.Y.Z` and push the tag. The `platforms` workflow runs in release mode: GoReleaser creates a draft GitHub release with the archives, `.deb` packages, the `.xpi`, the `.mcpb` bundles, the SBOMs and `SHA256SUMS`; the Windows installers and the macOS pkg are built on their runners, added to `SHA256SUMS`, and uploaded to the draft by the `sums` job.
-3. When the end-to-end jobs are green, run the manual check in [PLATFORMS.md](docs/PLATFORMS.md) from the draft, then publish the draft release.
+2. Tag it `vX.Y.Z` and push the tag. The `platforms` workflow runs in release mode: its `release` job has GoReleaser create a draft GitHub release with the archives, `.deb` packages, the `.xpi`, the `.mcpb` bundles, the SBOMs and `SHA256SUMS`, then runs `packaging/check.sh` and its self-test; the Windows installers and the macOS pkg are built on their runners, added to `SHA256SUMS` and checked again by the `sums` job, and uploaded to the draft by the `publish` job. If the `release` job, an installer job or a check fails, the draft release is deleted, so no draft holds artefacts the checks rejected; the tag stays. Fix the cause, delete the tag (`git push --delete origin vX.Y.Z`, then `git tag -d vX.Y.Z`) and tag again. Only the `release` and `publish` jobs, which run only on a tag push, have write access to the repository; every other job reads only.
+3. When the end-to-end jobs are green, check the Thunderbird versions they ran against in each job's summary, run the manual check in [PLATFORMS.md](docs/PLATFORMS.md) from the draft, then publish the draft release.
 4. Submit the `.xpi` to addons.thunderbird.net, and link the listing from README.md and INSTALL.md once it is live.
 
 Release archives are not yet byte-for-byte reproducible: two builds of the same tag can differ in archive details such as timestamps. Until they are, a release is vouched for by its CI build log, `SHA256SUMS` and the software bill of materials for each archive, not by rebuilding it.
@@ -95,11 +97,19 @@ Every GitHub Actions step is pinned to a full commit SHA, with the version in a 
 
 GitHub Actions runs the add-on tests and the documentation check on Linux, and the host tests on Linux, Windows and macOS, for every push and pull request (`.github/workflows/test.yml`). A second workflow (`.github/workflows/platforms.yml`) builds the installers and runs end-to-end tests on Windows and macOS. A third (`.github/workflows/e2e-linux.yml`) runs the Linux end-to-end tests on Thunderbird 140 ESR and the current release.
 
+## Security checks
+
+Three more workflows check the code and the workflows themselves:
+
+- **CodeQL** (`.github/workflows/codeql.yml`) scans the Go code and the JavaScript for security problems on every push to `v1` and `main`, on pull requests and once a week. Findings appear in the repository's Security tab.
+- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`) rates the repository's supply-chain practices, such as pinned dependencies and token permissions, on every push to `main` and once a week, and publishes the result.
+- **zizmor** (`.github/workflows/zizmor.yml`) checks the GitHub Actions workflows for problems such as untrusted input in commands, credentials left in a checkout and excessive permissions, on every push and pull request that changes `.github/workflows/`. It fails on any finding.
+
 ## Safety rules for the end-to-end tests
 
 The end-to-end tests start a real Thunderbird. Run them so they can never touch your own mail:
 
-- **Never against your own profile.** `run.sh` makes a throwaway profile and work folder whose names start with `mft-e2e`, under `$TMPDIR` (or `/tmp`). It refuses any other name, and any path under `~/.thunderbird`.
+- **Never against your own profile.** `run.sh` makes a new work folder for each run with `mktemp -d`, named `mft-e2e.` and random characters, under `$TMPDIR`, else `$XDG_RUNTIME_DIR`, else `/tmp`, with the throwaway profile inside it. It stops unless the folder and the profile belong to you and only you can open them (mode 0700). `MFT_E2E_DIR` and `MFT_E2E_PROFILE` choose other folders, whose names must start with `mft-e2e`; it refuses any other name, and any path under `~/.thunderbird`.
 - **A throwaway home.** On Linux, Thunderbird runs with `HOME` set to a throwaway folder, so the native messaging registration and the connection file never land in your real home folder.
 - **Only the test mail server.** Test mail goes to GreenMail, a mail server in a Docker container that listens only on `127.0.0.1`. Never point a test at a real mail account or a real address.
 - **Only its own Thunderbird.** Thunderbird runs under its own Xvfb display with `--no-remote`, and the harness stops only the process group it started. Your own Thunderbird keeps running.

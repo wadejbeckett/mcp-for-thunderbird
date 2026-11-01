@@ -8,12 +8,16 @@
 # against Thunderbird with the host installed by those installers.
 # Everything installed here is installed on the throwaway runner only.
 #
-# A push of a release tag (vX.Y.Z) runs the same jobs in release mode:
-# GoReleaser creates a draft GitHub release with the archives, .deb, .xpi,
-# .mcpb, SBOMs and SHA256SUMS, and the sums job adds the Windows installers
-# and the macOS pkg to SHA256SUMS and uploads them to that draft. The
-# release stays a draft until the maintainer checks the end-to-end jobs and
-# publishes it (CONTRIBUTING.md, Releasing).
+# A push of a release tag (vX.Y.Z) runs the same jobs in release mode: the
+# release job (in place of build) has GoReleaser create a draft GitHub
+# release with the archives, .deb, .xpi, .mcpb, SBOMs and SHA256SUMS, and
+# the sums job adds the Windows installers and the macOS pkg to SHA256SUMS
+# and checks everything again; the publish job then uploads them to that
+# draft. When the release job, an installer job or a check fails, the draft
+# is deleted and the tag is kept. The release stays a draft until the
+# maintainer checks the end-to-end jobs and publishes it (CONTRIBUTING.md,
+# Releasing). Only the release and publish jobs, which run only on a tag
+# push, may write to the repository.
 
 name: platforms
 
@@ -28,6 +32,9 @@ on:
         type: choice
         options: [both, windows, macos]
         default: both
+      e2e_tests:
+        description: "go test -run pattern for the end-to-end jobs (empty: TestE2ERead$|TestE2EOrganise$)"
+        default: ""
   push:
     branches: [v1]
     tags: ["v[0-9]+.[0-9]+.[0-9]+"] # path filters do not apply to tag pushes
@@ -52,32 +59,71 @@ env:
   # Central publishes it.
   GREENMAIL_URL: https://repo1.maven.org/maven2/com/icegreen/greenmail-standalone/2.1.14/greenmail-standalone-2.1.14.jar
   GREENMAIL_SHA256: 0381392f3a44e4d8ae78051778440f58820d01acaf5757c3f43649deda8c1d23
-  PSUTIL_VERSION: "7.0.0"
   # Inno Setup from Chocolatey, the version the runner image carried when
   # it was pinned.
   INNOSETUP_VERSION: "6.7.1"
 
 jobs:
+  # Branch pushes and runs by hand: a snapshot, with read-only access.
   build:
-    if: ${{ !inputs.reuse_run }}
+    if: ${{ !inputs.reuse_run && !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # a tag push creates the draft release; a branch push publishes nothing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: host/go.mod
-          cache-dependency-path: host/go.sum
+          cache: false # this workflow also builds releases; no shared cache
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-      - name: GoReleaser (snapshot, or a draft release on a tag), check.sh and its self-test
+      - name: GoReleaser snapshot, check.sh and its self-test
+        run: sh packaging/build.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # A release tag: the draft release. The only build that may write.
+  release:
+    if: ${{ !inputs.reuse_run && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # GoReleaser creates the draft release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: host/go.mod
+          cache: false # a release is built without a cache
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: GoReleaser draft release, check.sh and its self-test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: sh packaging/build.sh ${{ startsWith(github.ref, 'refs/tags/v') && '--clean' || '' }}
+        run: sh packaging/build.sh --clean
+      # GoReleaser uploads the draft before check.sh runs: a draft holding
+      # artefacts that check.sh rejected must not stay. The tag stays.
+      - name: Delete the draft release when the build or a check failed
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx true; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+            echo "deleted the draft release $GITHUB_REF_NAME; the tag is kept"
+          else
+            echo "no draft release $GITHUB_REF_NAME to delete"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
@@ -85,13 +131,16 @@ jobs:
           retention-days: 7
 
   windows-installer:
-    needs: build
+    needs: [build, release]
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.release.result == 'success') }}
     runs-on: windows-latest
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
@@ -134,6 +183,11 @@ jobs:
           $m = Get-Content $manifest -Raw | ConvertFrom-Json
           "manifest: $($m | ConvertTo-Json -Compress)"
           if ($m.path -ne $exe -or $m.name -ne 'mcp_for_thunderbird' -or $m.allowed_extensions[0] -ne 'mcp-for-thunderbird@wadejbeckett.github.io') { throw "manifest content" }
+          # The licences of the linked Go modules travel with the program.
+          foreach ($f in 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES') {
+            if (-not (Test-Path -PathType Leaf "$app\$f")) { throw "the installed app folder lacks $f" }
+          }
+          "installed: LICENSE, NOTICE and THIRD_PARTY_LICENSES next to the program"
 
           # The uninstaller hands over to a copy of itself; wait for the files to go.
           Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
@@ -163,10 +217,13 @@ jobs:
           retention-days: 7
 
   macos-pkg:
-    needs: build
+    needs: [build, release]
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.release.result == 'success') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
@@ -179,7 +236,11 @@ jobs:
           chmod +x "$bin" # artifacts lose the execute bit
           lipo -archs "$bin"
           sh packaging/macos/build-pkg.sh "$version" "$bin" dist-mac
-          pkgutil --payload-files dist-mac/*.pkg
+          pkgutil --payload-files dist-mac/*.pkg | tee payload.txt
+          # The licences of the linked Go modules travel with the program.
+          for f in mcp-for-thunderbird LICENSE NOTICE THIRD_PARTY_LICENSES; do
+            grep -qxE "(\./)?$f" payload.txt || { echo "the pkg payload lacks $f"; exit 1; }
+          done
       - name: Install for the current user; check ownership and registration
         run: |
           set -eu
@@ -189,6 +250,7 @@ jobs:
           # Thunderbird's per-user folder (not Firefox's Application Support one).
           manifest="$HOME/Library/Mozilla/NativeMessagingHosts/mcp_for_thunderbird.json"
           ls -la "$app" "$manifest"
+          [ -f "$app/THIRD_PARTY_LICENSES" ] || { echo "$app lacks THIRD_PARTY_LICENSES"; exit 1; }
           for f in "$app" "$app"/* "$manifest"; do
             owner=$(stat -f %Su "$f")
             [ "$owner" = "$me" ] || { echo "$f is owned by $owner, not $me"; exit 1; }
@@ -210,11 +272,14 @@ jobs:
 
   sums:
     needs: [windows-installer, macos-pkg]
+    # build or release is always skipped, and a skipped job further up
+    # skips a job with no condition, so the condition is explicit.
+    if: ${{ !cancelled() && needs.windows-installer.result == 'success' && needs.macos-pkg.result == 'success' }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # upload to the draft release on a tag
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artefacts
@@ -227,11 +292,6 @@ jobs:
           sh packaging/add-sums.sh dist dist/*-setup.exe dist/*-macos.pkg
           sh packaging/check.sh dist
           grep -E 'setup\.exe|macos\.pkg' dist/SHA256SUMS
-      - name: Add the installers, the pkg and the completed SHA256SUMS to the draft release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/*-setup.exe dist/*-macos.pkg dist/SHA256SUMS --clobber
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-candidate
@@ -247,6 +307,44 @@ jobs:
             dist/*.spdx.json
           retention-days: 7
 
+  # A release tag: completes the draft release with the installers, the
+  # pkg and the completed SHA256SUMS once sums has checked them, or deletes
+  # the draft (keeping the tag) when the release, the installers or a check
+  # failed. Besides release, the only job that may write.
+  publish:
+    needs: [release, windows-installer, macos-pkg, sums]
+    if: ${{ always() && !inputs.reuse_run && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload to, or delete, the draft release
+    steps:
+      - if: ${{ needs.sums.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate
+          path: release-candidate
+      - name: Add the installers, the pkg and the completed SHA256SUMS to the draft release
+        if: ${{ needs.sums.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd release-candidate
+          gh release upload "$GITHUB_REF_NAME" ./*-setup.exe ./*-macos.pkg SHA256SUMS --clobber
+      - name: Delete the draft release when a build or a check failed
+        if: ${{ needs.sums.result != 'success' || failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx true; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+            echo "deleted the draft release $GITHUB_REF_NAME; the tag is kept"
+          else
+            echo "no draft release $GITHUB_REF_NAME to delete"
+          fi
+          exit 1 # the release is not complete
+
   e2e-windows:
     needs: windows-installer
     if: ${{ !cancelled() && (needs.windows-installer.result == 'success' || inputs.reuse_run) && inputs.e2e != 'macos' }}
@@ -256,10 +354,12 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: test/e2e/go.mod
-          cache-dependency-path: test/e2e/go.sum
+          cache: false # this workflow also builds releases; no shared cache
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -283,9 +383,10 @@ jobs:
           $tb = "$env:ProgramFiles\Mozilla Thunderbird\thunderbird.exe"
           $v = (Get-Item $tb).VersionInfo.ProductVersion
           "Thunderbird $v"
+          "- Thunderbird installed by Chocolatey: $v" >> $env:GITHUB_STEP_SUMMARY
           if ([int]($v.Split('.')[0]) -lt 153) { throw "Thunderbird $v is older than 153" }
           "MFT_E2E_THUNDERBIRD=$tb" >> $env:GITHUB_ENV
-          python -m pip install --disable-pip-version-check "psutil==$env:PSUTIL_VERSION"
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: -r test/e2e/platform/requirements.txt
           $jar = "$env:RUNNER_TEMP\greenmail-standalone.jar"
           curl.exe -fsSL -o $jar $env:GREENMAIL_URL
           if ((Get-FileHash $jar -Algorithm SHA256).Hash -ne $env:GREENMAIL_SHA256) { throw "GreenMail checksum mismatch" }
@@ -296,7 +397,11 @@ jobs:
           $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "setup exited $($p.ExitCode)" }
           "MFT_E2E_BIN=$env:LOCALAPPDATA\Programs\MCP for Thunderbird\mcp-for-thunderbird.exe" >> $env:GITHUB_ENV
+      # TestE2ERead and TestE2EOrganise unless e2e_tests names others; the
+      # job summary records the tests and the Thunderbird version.
       - name: End-to-end tests
+        env:
+          MFT_E2E_RUN: ${{ inputs.e2e_tests }}
         run: python test/e2e/platform/e2e.py run -v
 
   e2e-macos:
@@ -305,10 +410,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: test/e2e/go.mod
-          cache-dependency-path: test/e2e/go.sum
+          cache: false # this workflow also builds releases; no shared cache
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -334,9 +441,10 @@ jobs:
           app=$(ls -d /Applications/Thunderbird*.app | head -1)
           v=$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString)
           echo "Thunderbird $v at $app"
+          echo "- Thunderbird installed by Homebrew: $v" >>"$GITHUB_STEP_SUMMARY"
           [ "${v%%.*}" -ge 153 ] || { echo "Thunderbird $v is older than 153"; exit 1; }
           echo "MFT_E2E_THUNDERBIRD=$app/Contents/MacOS/thunderbird" >>"$GITHUB_ENV"
-          python -m pip install --disable-pip-version-check "psutil==$PSUTIL_VERSION"
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: -r test/e2e/platform/requirements.txt
           jar="$RUNNER_TEMP/greenmail-standalone.jar"
           curl -fsSL -o "$jar" "$GREENMAIL_URL"
           echo "$GREENMAIL_SHA256  $jar" | shasum -a 256 -c -
@@ -346,5 +454,9 @@ jobs:
           set -eu
           installer -pkg dist-mac/*.pkg -target CurrentUserHomeDirectory
           echo "MFT_E2E_BIN=$HOME/Library/Application Support/MCP for Thunderbird/mcp-for-thunderbird" >>"$GITHUB_ENV"
+      # TestE2ERead and TestE2EOrganise unless e2e_tests names others; the
+      # job summary records the tests and the Thunderbird version.
       - name: End-to-end tests
+        env:
+          MFT_E2E_RUN: ${{ inputs.e2e_tests }}
         run: python test/e2e/platform/e2e.py run -v

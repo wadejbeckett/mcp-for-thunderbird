@@ -18,13 +18,28 @@
 # Its version is passed to the tests as MFT_E2E_TB_VERSION: on 140 ESR they
 # expect no mail_draft or mail_send (addon/src/features.js).
 #
+# The work directory is new for each run (workdir.sh): mktemp -d makes
+# mft-e2e.XXXXXXXX under $TMPDIR, else $XDG_RUNTIME_DIR, else /tmp, and the
+# profile is mft-e2e-profile inside it. MFT_E2E_DIR and MFT_E2E_PROFILE override them
+# (names starting mft-e2e). Either way the run stops unless both
+# directories are owned by the current user and private (mode 0700).
+#
 # usage: test/e2e/run.sh [go test args, e.g. -run TestE2ERead -v]
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-export MFT_E2E_DIR=${MFT_E2E_DIR:-${TMPDIR:-/tmp}/mft-e2e}
-export MFT_E2E_PROFILE=${MFT_E2E_PROFILE:-${TMPDIR:-/tmp}/mft-e2e-profile}
+# shellcheck source=workdir.sh
+. "$here/workdir.sh"
+fresh_dir=0
+if [ -z "${MFT_E2E_DIR:-}" ]; then
+  MFT_E2E_DIR=$(e2e_new_workdir)
+  fresh_dir=1
+  # Until teardown takes over, an early stop removes the empty directory.
+  trap 'rmdir "$MFT_E2E_DIR" 2>/dev/null || true' EXIT
+fi
+export MFT_E2E_DIR
+export MFT_E2E_PROFILE=${MFT_E2E_PROFILE:-$MFT_E2E_DIR/mft-e2e-profile}
 export GOTOOLCHAIN=${GOTOOLCHAIN:-auto}
 export MFT_E2E_THUNDERBIRD=${MFT_E2E_THUNDERBIRD:-thunderbird}
 
@@ -45,6 +60,8 @@ for d in "$MFT_E2E_DIR" "$MFT_E2E_PROFILE"; do
 done
 
 log() { printf '[e2e] %s\n' "$*" >&2; }
+
+private() { e2e_private "$1" || exit 1; }
 
 greenmail_up() {
   if docker compose version >/dev/null 2>&1; then
@@ -87,8 +104,16 @@ if "$here/tb.sh" running; then
   echo "run.sh: an e2e Thunderbird from an earlier run is still running; stop it with test/e2e/tb.sh stop" >&2
   exit 1
 fi
-rm -rf "$MFT_E2E_DIR" "$MFT_E2E_PROFILE"
-mkdir -p "$MFT_E2E_DIR/bin" "$MFT_E2E_DIR/attachments" "$MFT_E2E_DIR/home"
+if [ "$fresh_dir" = 1 ]; then
+  private "$MFT_E2E_DIR"
+else
+  rm -rf "$MFT_E2E_DIR" "$MFT_E2E_PROFILE"
+  (umask 077 && mkdir -p "$MFT_E2E_DIR")
+  private "$MFT_E2E_DIR"
+fi
+(umask 077 && mkdir -p "$MFT_E2E_DIR/bin" "$MFT_E2E_DIR/attachments" "$MFT_E2E_DIR/home" "$MFT_E2E_PROFILE")
+private "$MFT_E2E_PROFILE"
+log "work directory: $MFT_E2E_DIR"
 trap teardown EXIT INT TERM
 
 # --version reads only the program's application.ini; HOME is the
@@ -153,6 +178,9 @@ node "$repo/packaging/build-xpi.mjs" --e2e-settings "$MFT_E2E_DIR/e2e-settings.j
 
 log "building the profile"
 "$here/make-profile.sh" "$MFT_E2E_DIR/mcp-for-thunderbird-e2e.xpi" "$MFT_E2E_DIR/bin/mcp-for-thunderbird" >/dev/null
+# make-profile.sh recreates the profile directory; keep it private.
+chmod 700 "$MFT_E2E_PROFILE"
+private "$MFT_E2E_PROFILE"
 
 log "starting Thunderbird"
 "$here/tb.sh" start

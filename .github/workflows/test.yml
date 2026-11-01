@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - run: bash docs/check-docs.sh
       - run: bash docs/check-docs-selftest.sh
       - name: Every action is pinned to a commit SHA
@@ -28,6 +30,8 @@ jobs:
           if grep -nE '^\s*(-\s*)?uses:' .github/workflows/*.yml | grep -vE 'uses: [^@[:space:]]+@[0-9a-f]{40} # v[0-9]'; then
             echo "pin these actions to a full commit SHA with a version comment"; exit 1
           fi
+      - name: The e2e harness work directory is new and private (test/e2e/run.sh)
+        run: bash test/e2e/workdir-selftest.sh
 
   addon:
     runs-on: ubuntu-latest
@@ -36,6 +40,8 @@ jobs:
         working-directory: addon
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -56,6 +62,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: host/go.mod
@@ -64,6 +72,9 @@ jobs:
       - name: THIRD_PARTY_LICENSES matches go.mod
         if: runner.os == 'Linux'
         run: sh ../packaging/third-party-licenses.sh --check
+      - name: third-party-licenses.sh handles replaced modules and several licence files
+        if: runner.os == 'Linux'
+        run: sh ../packaging/third-party-licenses-selftest.sh
       # The Windows-only tests (owner-only DACLs, HKCU registration) must
       # really run there, not be skipped or filtered out.
       - name: Windows-only tests ran

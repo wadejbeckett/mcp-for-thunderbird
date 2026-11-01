@@ -8,7 +8,10 @@
 # Writes THIRD_PARTY_LICENSES at the repository root: the licence of the Go
 # toolchain (its standard library and runtime are linked into the host) and
 # of every Go module linked into the host binary on Linux, macOS or Windows,
-# each with its version and its full licence text from the module cache.
+# each with its version and the full text of every licence file at its
+# root (LICENSE*, LICENCE*, COPYING*). A module that host/go.mod replaces
+# is listed with its replacement ("path version => replacement") and its
+# licences are read from the replacement's directory, local paths included.
 # The MIT and BSD licences of those modules require their notices to travel
 # with binary copies, so every host package (archives, .deb, .mcpb, Windows
 # installer, macOS pkg) ships this file next to LICENSE and NOTICE.
@@ -16,22 +19,31 @@
 # Run it after changing host/go.mod and commit the result. With --check it
 # writes nothing and exits 1 when the tracked file differs from a fresh one;
 # packaging/build.sh and the test workflow run that check.
-# Needs sh, go (the pinned toolchain downloads itself) and cmp.
+# packaging/third-party-licenses-selftest.sh proves replaced modules and
+# modules with several licence files are handled; it points the script at
+# its own module with MFT_LICENSES_MODULE (default host/) and
+# MFT_LICENSES_OUT (default THIRD_PARTY_LICENSES).
+# Needs sh, go (the pinned toolchain downloads itself), find, sort and cmp.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-out="$root/THIRD_PARTY_LICENSES"
+out="${MFT_LICENSES_OUT:-$root/THIRD_PARTY_LICENSES}"
 export GOTOOLCHAIN="${MFT_GOTOOLCHAIN:-go1.25.14}"
-cd "$root/host"
+cd "${MFT_LICENSES_MODULE:-$root/host}"
 
 tmp=$(mktemp)
 mods="$tmp.mods"
-trap 'rm -f "$tmp" "$mods"' EXIT
+files="$tmp.files"
+trap 'rm -f "$tmp" "$mods" "$files"' EXIT
 
-main=$(go list -m)
+# One line per linked module other than the main one, fields separated by
+# "|": path, version, the replacement if any, and last the directory go
+# builds it from (the replacement's when go.mod replaces it, so a local
+# path works too). Module paths cannot hold "|"; the directory comes last
+# so read gives it whole.
 for os in linux darwin windows; do
-  GOOS=$os go list -deps -f '{{if and .Module (not .Standard)}}{{.Module.Path}} {{.Module.Version}}{{end}}' ./cmd/mcp-for-thunderbird
-done | awk -v main="$main" 'NF == 2 && $1 != main' | sort -u >"$mods"
+  GOOS=$os go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}|{{.Version}}|{{with .Replace}}{{.Path}}{{with .Version}} {{.}}{{end}}{{end}}|{{.Dir}}{{end}}{{end}}' ./cmd/mcp-for-thunderbird
+done | awk -F '|' 'NF >= 4' | sort -u >"$mods"
 [ -s "$mods" ] || { echo "third-party-licenses: no modules found" >&2; exit 1; }
 
 rule="======================================================================"
@@ -50,17 +62,28 @@ rule="======================================================================"
   echo "$rule"
   echo
   cat "$(go env GOROOT)/LICENSE"
-  while read -r path version; do
-    dir=$(go list -m -f '{{.Dir}}' "$path@$version")
-    [ -n "$dir" ] || { echo "third-party-licenses: no module directory for $path@$version" >&2; exit 1; }
-    licence=$(find "$dir" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \) | sort | head -n 1)
-    [ -n "$licence" ] || { echo "third-party-licenses: no licence file in $path@$version ($dir)" >&2; exit 1; }
+  while IFS='|' read -r path version replace dir; do
+    name="$path $version"
+    [ -z "$replace" ] || name="$name => $replace"
+    [ -n "$dir" ] && [ -d "$dir" ] || { echo "third-party-licenses: no module directory for $name" >&2; exit 1; }
+    find "$dir" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \) | LC_ALL=C sort >"$files"
+    [ -s "$files" ] || { echo "third-party-licenses: no licence file in $name ($dir)" >&2; exit 1; }
+    count=$(wc -l <"$files")
     echo
     echo "$rule"
-    echo "$path $version"
+    echo "$name"
     echo "$rule"
-    echo
-    cat "$licence"
+    first=1
+    while IFS= read -r licence; do
+      echo
+      if [ "$count" -gt 1 ]; then
+        [ "$first" = 1 ] || echo
+        echo "--- ${licence##*/} ---"
+        echo
+      fi
+      first=0
+      cat "$licence"
+    done <"$files"
   done <"$mods"
 } >"$tmp"
 
