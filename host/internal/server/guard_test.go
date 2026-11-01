@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -161,12 +162,8 @@ func TestRateLimit429(t *testing.T) {
 		t.Fatalf("limited %d of 60, want about 20 (burst 40)", limited)
 	}
 
-	// A different MCP session has its own bucket (R4).
-	r := goodRequest("{}")
-	r.Header.Set("Mcp-Session-Id", "other-session")
-	if w := serve(g, r); w.Code != http.StatusOK {
-		t.Fatalf("other session: status %d, want 200", w.Code)
-	}
+	// A session id the host never issued shares one bucket with all the
+	// others like it; it is not a fresh burst (see TestSessionBuckets).
 
 	// Unauthenticated requests are refused before they reach the limiter.
 	bad := goodRequest("{}")
@@ -232,5 +229,53 @@ func TestStalledBodyCutOff(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("a stalled body reached the handler")
+	}
+}
+
+// issuing answers like the SDK's initialize: with the session id it issues.
+func issuing(id string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Mcp-Session-Id") == "" {
+			w.Header().Set("Mcp-Session-Id", id)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// R4: a session the host issued has its own bucket; session ids a client
+// makes up share one, so they cannot buy fresh bursts, and an id of any
+// length makes a short key.
+func TestSessionBuckets(t *testing.T) {
+	g := Guard(testToken, testPort, issuing("issued-1"))
+	if w := serve(g, goodRequest("{}")); w.Code != http.StatusOK {
+		t.Fatalf("initialize: status %d", w.Code)
+	}
+	limited := 0
+	for i := 0; i < 60; i++ {
+		r := goodRequest("{}")
+		r.Header.Set("Mcp-Session-Id", "made-up-"+strconv.Itoa(i))
+		if serve(g, r).Code == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if limited < 10 {
+		t.Fatalf("made-up session ids: %d of 60 limited, want them to share one bucket", limited)
+	}
+	r := goodRequest("{}")
+	r.Header.Set("Mcp-Session-Id", "issued-1")
+	if w := serve(g, r); w.Code != http.StatusOK {
+		t.Fatalf("issued session: status %d, want 200 from its own bucket", w.Code)
+	}
+
+	known := &sessions{m: map[string]time.Time{}}
+	r = goodRequest("{}")
+	r.Header.Set("Mcp-Session-Id", strings.Repeat("x", 10000))
+	if k := clientKey(r, known); len(k) > 64 {
+		t.Fatalf("key of %d bytes for a long session id", len(k))
+	}
+	known.add("abc")
+	r.Header.Set("Mcp-Session-Id", "abc")
+	if k := clientKey(r, known); k == "s:unknown" || len(k) > 64 {
+		t.Fatalf("issued session key = %q", k)
 	}
 }
