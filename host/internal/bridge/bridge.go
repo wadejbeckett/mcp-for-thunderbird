@@ -202,6 +202,18 @@ func (b *Bridge) write(ctx context.Context, expire <-chan time.Time, raw []byte)
 		return false, nativemsg.ErrTooLarge
 	}
 	w := writeReq{raw: raw, done: make(chan error, 1)}
+	// A select picks at random among ready cases, so a caller that has
+	// already given up is turned away before the writer is offered the
+	// frame: otherwise a cancelled call could still be sent.
+	select {
+	case <-expire:
+		return false, errWriteTimeout
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-b.done:
+		return false, errClosed
+	default:
+	}
 	select {
 	case b.writes <- w:
 	case <-expire:
