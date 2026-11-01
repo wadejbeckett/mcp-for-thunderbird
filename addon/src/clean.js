@@ -186,9 +186,13 @@ function normColor(raw) {
     if (a[3] !== undefined && parseFloat(a[3]) === 0) return TRANSPARENT;
     return "#" + hex2(ch(a[0])) + hex2(ch(a[1])) + hex2(ch(a[2]));
   }
-  // other colour functions compare in one canonical spelling
+  // other colour functions compare in one canonical spelling; an alpha
+  // of 0 (after "/", or hsla's fourth argument) is transparent
   if (/^(?:hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(.*\)$/.test(v)) {
-    return v.replace(/\s*([(),/])\s*/g, "$1").replace(/\s+/g, " ");
+    const canon = v.replace(/\s*([(),/])\s*/g, "$1").replace(/\s+/g, " ");
+    const alpha = /\/([\d.]+%?)\)$/.exec(canon) || /^hsla?\((?:[^,()]*,){3}([\d.]+%?)\)$/.exec(canon);
+    if (alpha && parseFloat(alpha[1]) === 0) return TRANSPARENT;
+    return canon;
   }
   if (/\s/.test(v)) return null;
   if (v === TRANSPARENT) return TRANSPARENT;
@@ -354,7 +358,7 @@ const MAX_RULES = 500;
 const MAX_SELECTOR = 200;
 export const STYLE_BUDGET = { query: 1_000_000, apply: 200_000 };
 const SHEET_PROPS = new Set([
-  "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "width", "height",
+  "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "background-clip", "-webkit-background-clip", "width", "height",
   "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top",
 ]);
 
@@ -486,10 +490,14 @@ class Lines {
 
 const MAX_URL = 2048;
 
-// unreadable says text in this context cannot be read: under MIN_PX, or
-// in a colour too close to its background.
+// unreadable says text in this context cannot be read: under MIN_PX, in
+// a transparent colour (transparent, alpha 0) unless the element paints
+// its background through the text (background-clip: text, gradient
+// headings), or in a colour too close to its background.
 function unreadable(ctx) {
-  return ctx.px < MIN_PX || Boolean(ctx.color && ctx.bg && alike(ctx.color, ctx.bg));
+  if (ctx.px < MIN_PX) return true;
+  if (ctx.color === TRANSPARENT) return !ctx.clipText;
+  return Boolean(ctx.color && ctx.bg && alike(ctx.color, ctx.bg));
 }
 
 // htmlToText turns HTML into readable plain text (see the file comment).
@@ -501,7 +509,7 @@ export function htmlToText(html) {
   const sheet = sheetStyles(doc);
   const out = new Lines();
   // Mail is read on a white pane unless it sets its own background.
-  const stack = [{ node: doc, ctx: { color: null, bg: PANE, px: DEFAULT_PX, pre: false } }];
+  const stack = [{ node: doc, ctx: { color: null, bg: PANE, px: DEFAULT_PX, pre: false, clipText: false } }];
   while (stack.length > 0) {
     const item = stack.pop();
     if (item.exit) {
@@ -525,10 +533,11 @@ export function htmlToText(html) {
       const colorDecl = st.has("color") ? st.get("color") : tag === "font" ? node.getAttribute("color") : null;
       let color = ctx.color;
       if (colorDecl === CONFLICT) color = null;
-      else if (colorDecl != null) {
-        const c = normColor(colorDecl);
-        color = c === TRANSPARENT ? null : c;
-      }
+      else if (colorDecl != null) color = normColor(colorDecl);
+      // background-clip is not inherited, but a background clipped to
+      // the text shows through the descendants' text as well.
+      const clipDecl = [st.get("background-clip"), st.get("-webkit-background-clip")];
+      const clipText = ctx.clipText || clipDecl.some((v) => v === CONFLICT || (typeof v === "string" && /\btext\b/.test(v)));
       let bg = ctx.bg;
       const bgc = st.get("background-color");
       const short = st.get("background");
@@ -548,7 +557,7 @@ export function htmlToText(html) {
       if (image === CONFLICT || (image && image !== "none") || (typeof short === "string" && /url\s*\(/.test(short)) || node.getAttribute("background")) {
         bg = null;
       }
-      next = { color, bg, px: fontPx(st.get("font-size"), ctx.px), pre: ctx.pre || tag === "pre" };
+      next = { color, bg, px: fontPx(st.get("font-size"), ctx.px), pre: ctx.pre || tag === "pre", clipText };
 
       if (tag === "br") {
         out.newline();

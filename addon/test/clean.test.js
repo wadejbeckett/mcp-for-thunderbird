@@ -139,12 +139,33 @@ test("rgb() with spaces or a slash alpha, and CSS comments, do not hide text fro
     <p style="display:/**/none">HIDDEN2</p>
     <p style="display: none /* unterminated">HIDDEN2b</p>
     <p style="color:red /* ; display:none */">Shown red.</p>
-    <div style="background:#000"><p style="color:rgb(0 0 0 / 0)">Shown transparent.</p></div>`;
+    <div style="background:#000"><p style="color:rgb(0 0 0 / 0)">HIDDEN-TRANSPARENT</p></div>`;
   const text = htmlToText(html);
   assert.doesNotMatch(text, /HIDDEN/);
   assert.match(text, /Shown\./);
   assert.match(text, /Shown red\./);
-  assert.match(text, /Shown transparent\./);
+});
+
+test("text in a transparent colour is hidden, on any background, unless the background is clipped to it", () => {
+  const html = `<div style="background:#000">
+    <p style="color:transparent">HIDDEN-KEYWORD</p>
+    <p style="color:rgba(255,0,0,0)">HIDDEN-RGBA</p>
+    <p style="color:rgb(10 20 30 / 0%)">HIDDEN-RGB-PERCENT</p>
+    <p style="color:#ff000000">HIDDEN-HEX8</p>
+    <p style="color:#f000">HIDDEN-HEX4</p>
+    <p style="color:hsla(0, 100%, 50%, 0)">HIDDEN-HSLA</p>
+    <p style="color:hsl(0 100% 50% / 0)">HIDDEN-HSL-SLASH</p>
+    <p><font color="transparent">HIDDEN-FONT</font></p>
+    <div style="color:transparent"><span>HIDDEN-INHERITED</span><span style="color:#fff">Shown reset.</span></div>
+    </div>
+    <style>.t { color: transparent }</style><p class="t">HIDDEN-SHEET</p>
+    <h1 style="background:linear-gradient(red,blue);-webkit-background-clip:text;color:transparent">Shown gradient <b>heading</b>.</h1>
+    <p style="color:rgba(0,0,0,0.5)">Shown half.</p>`;
+  const text = htmlToText(html);
+  assert.doesNotMatch(text, /HIDDEN/);
+  assert.match(text, /Shown reset\./);
+  assert.match(text, /Shown gradient heading\./);
+  assert.match(text, /Shown half\./);
 });
 
 test("R21: tag characters, U+034F and U+180E are removed; line and paragraph separators become newlines", () => {
