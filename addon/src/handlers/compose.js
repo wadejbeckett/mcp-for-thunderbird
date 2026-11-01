@@ -240,6 +240,20 @@ function done(v, what) {
   return v;
 }
 
+// changing runs fn, a call that changes something in Thunderbird (opens a
+// window, saves or sends). If the budget was already spent when its turn
+// came, call answers TIMEOUT without running fn: nothing was changed, so the
+// failure is the plain one, without mayHaveCompleted. A timeout once fn has
+// started may have completed (done, with what).
+async function changing(run, fn, what) {
+  let started = false;
+  const v = await call(run, () => {
+    started = true;
+    return fn();
+  });
+  return done(started ? v : answered(v), what);
+}
+
 function headerValues(full, name) {
   const v = full && full.headers ? full.headers[name] : undefined;
   return (Array.isArray(v) ? v : v === undefined ? [] : [v]).filter((x) => typeof x === "string");
@@ -437,7 +451,7 @@ async function replyDraft(run, kind, h, a, who, drafts) {
   );
 
   const file = new File(buildMessage(lines, html, atts), "draft.eml", { type: "message/rfc822" });
-  done(await call(run, () => tb().messages.import(file, drafts.id, { read: true })), "the draft may have been saved");
+  await changing(run, () => tb().messages.import(file, drafts.id, { read: true }), "the draft may have been saved");
   // The opaque id names the draft by the Message-ID set here; it resolves
   // through messages.query({headerMessageId}) like any other id.
   return { draftId: encodeId(drafts.accountId, drafts.path, mid) };
@@ -487,7 +501,7 @@ async function newDraft(run, a, identity, drafts) {
   };
   if (a.attachments.length) details.attachments = files(a.attachments);
   const since = Date.now();
-  const res = done(await call(run, () => tb().messages.saveMessage(details, { mode: "draft" })), "the draft may have been saved");
+  const res = await changing(run, () => tb().messages.saveMessage(details, { mode: "draft" }), "the draft may have been saved");
   let h = res && Array.isArray(res.messages) ? res.messages.find((m) => m && m.folder && m.headerMessageId) : null;
   // The draft is saved: a failed lookup gives no id rather than an error,
   // so the client does not save it again.
@@ -558,15 +572,16 @@ async function mailCompose(args, ctx) {
   if (a.attachments.length) details.attachments = files(a.attachments);
   // Once Thunderbird may have opened the window, a failure carries
   // mayHaveCompleted, so a client does not open a second window by trying
-  // again.
-  const tab = done(
-    await call(run, () =>
+  // again. A budget spent before the window was asked for opens nothing
+  // and says so plainly (changing).
+  const tab = await changing(
+    run,
+    () =>
       kind === "new"
         ? tb().compose.beginNew(details)
         : kind === "forward"
           ? tb().compose.beginForward(h.id, "forwardInline", details)
           : tb().compose.beginReply(h.id, kind === "reply_all" ? "replyToAll" : "replyToSender", details),
-    ),
     "the compose window may have opened",
   );
   if (html) {
@@ -613,7 +628,7 @@ async function mailSend(args, ctx) {
   const { identity } = await identityOf(run, accountFor(args, s, null));
   const details = { identityId: identity.id, to: checked.to, cc: checked.cc, bcc: checked.bcc, subject: oneLine(a.subject), body: textToHtml(a.body) };
   if (a.attachments.length) details.attachments = files(a.attachments);
-  done(await call(run, () => tb().messages.sendMessage(details, { mode: "sendNow" })), "the message may have been sent");
+  await changing(run, () => tb().messages.sendMessage(details, { mode: "sendNow" }), "the message may have been sent");
   return { sent: true };
 }
 

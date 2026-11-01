@@ -576,6 +576,60 @@ test("mail_compose: a timeout of the call that opens the window may have complet
   }
 });
 
+// spendBudgetIn makes the mock method obj[name] answer and then move the
+// clock past the call's budget, so the next Thunderbird call finds the
+// budget spent before it starts. It returns a function that undoes both.
+function spendBudgetIn(obj, name) {
+  const real = obj[name];
+  const now = Date.now;
+  obj[name] = async (...args) => {
+    const v = await real(...args);
+    const at = now() + COMPOSE.budgetMs + 1000;
+    Date.now = () => at;
+    return v;
+  };
+  return () => {
+    obj[name] = real;
+    Date.now = now;
+  };
+}
+
+test("mail_compose with the budget spent before the window is asked for opens nothing and says so", async () => {
+  const o = original();
+  for (const args of [{ kind: "new", body: "Hi" }, { kind: "reply", id: o.id, body: "Hi" }]) {
+    mock.calls.compose.length = 0;
+    const undo = spendBudgetIn(mock.messenger.accounts, "get");
+    let e;
+    try {
+      e = await composeDirect(args);
+    } finally {
+      undo();
+    }
+    assert.equal(e.code, "thunderbird_error", args.kind);
+    assert.doesNotMatch(e.message, /may have opened/, args.kind);
+    assert.notEqual(e.mayHaveCompleted, true, args.kind);
+    assert.equal(mock.calls.compose.length, 0, args.kind);
+  }
+});
+
+test("mail_send with the budget spent before the send sends nothing and says so", async () => {
+  await save({ send: { enabled: true, allow: ["@allowed.com"] } });
+  const undo = spendBudgetIn(mock.messenger.accounts, "get");
+  let e;
+  try {
+    await HANDLERS.mail_send({ to: ["a@allowed.com"], subject: "s", body: "b" }, { client: "test", settings: await load(), tool: "mail_send" });
+  } catch (err) {
+    e = err;
+  } finally {
+    undo();
+  }
+  assert.ok(e, "mail_send did not fail");
+  assert.equal(e.code, "thunderbird_error");
+  assert.doesNotMatch(e.message, /may have been sent/);
+  assert.notEqual(e.mayHaveCompleted, true);
+  assert.equal(mock.calls.sendMessage.length, 0);
+});
+
 // ---- attachment names ----
 
 test("baseName cuts long names on code points and keeps the extension", () => {
