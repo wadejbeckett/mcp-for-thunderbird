@@ -116,6 +116,9 @@ release:
   github:
     owner: wadejbeckett
     name: mcp-for-thunderbird
+  # GoReleaser creates a new draft even when a release with the tag
+  # exists, so the platforms workflow's release job refuses such a tag
+  # before this runs, and acts only on the draft id it records afterwards.
   draft: true
   prerelease: auto
   extra_files:
