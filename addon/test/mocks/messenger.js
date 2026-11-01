@@ -593,9 +593,6 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   return mock;
 }
 
-// parseMailboxes splits a mailbox list as Thunderbird's header parser does
-// for these tests: commas outside quotes and angle brackets separate
-// mailboxes, and only the part in angle brackets is the address.
 // The bodies of an open compose window (getComposeDetails), by how the
 // window was opened.
 export const COMPOSE_SIGNATURE = '<div class="moz-signature">-- <br>Me Myself<br>Example Ltd</div>';
@@ -603,6 +600,9 @@ export const COMPOSE_NEW_BODY = `<p><br></p>${COMPOSE_SIGNATURE}`;
 export const COMPOSE_REPLY_BODY = '<div class="moz-cite-prefix">On a day, A wrote:<br></div><blockquote type="cite">old</blockquote>';
 export const COMPOSE_FORWARD_BODY = '<div class="moz-forward-container"><br><br>-------- Forwarded Message --------</div>';
 
+// parseMailboxes splits a mailbox list as Thunderbird's header parser does
+// for these tests: commas outside quotes and angle brackets separate
+// mailboxes, and only the part in angle brackets is the address.
 export function parseMailboxes(text) {
   const parts = [];
   let cur = "";
