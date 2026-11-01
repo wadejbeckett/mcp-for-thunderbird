@@ -90,6 +90,14 @@ Every GitHub Actions step is pinned to a full commit SHA, with the version in a 
 
 GitHub Actions runs the add-on tests and the documentation check on Linux, and the host tests on Linux, Windows and macOS, for every push and pull request (`.github/workflows/test.yml`). A second workflow (`.github/workflows/platforms.yml`) builds the installers and runs end-to-end tests on Windows and macOS.
 
+## Security checks
+
+Three more workflows check the code and the workflows themselves:
+
+- **CodeQL** (`.github/workflows/codeql.yml`) scans the Go code and the JavaScript for security problems on every push to `v1` and `main`, on pull requests and once a week. Findings appear in the repository's Security tab.
+- **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`) rates the repository's supply-chain practices, such as pinned dependencies and token permissions, on every push to `main` and once a week, and publishes the result.
+- **zizmor** (`.github/workflows/zizmor.yml`) checks the GitHub Actions workflows for problems such as untrusted input in commands, credentials left in a checkout and excessive permissions, on every push and pull request that changes `.github/workflows/`. It fails on any finding.
+
 ## Safety rules for the end-to-end tests
 
 The end-to-end tests start a real Thunderbird. Run them so they can never touch your own mail:
