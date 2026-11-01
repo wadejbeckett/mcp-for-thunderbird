@@ -5,9 +5,9 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { DOMParser } from "linkedom";
-import { install, fetchFrom } from "./mocks/messenger.js";
-import { dispatch } from "../src/rpc.js";
-import { save } from "../src/settings.js";
+import { install, fetchFrom, COMPOSE_SIGNATURE } from "./mocks/messenger.js";
+import { dispatch, HANDLERS } from "../src/rpc.js";
+import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
 import { isAllowed, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
@@ -474,7 +474,11 @@ test("TestComposeOpensWindow", async () => {
   // signature); the text is put at the top of the open window instead.
   assert.deepEqual(args[0], { identityId: "id1", to: ["x@example.test"], cc: [], bcc: [], subject: "S" });
   const setNew = mock.calls.compose.find(([f]) => f === "setComposeDetails");
-  assert.match(setNew[1][1].body, /^<html><head><\/head><body><p>Hello<br>there<\/p>/);
+  const newBody = setNew[1][1].body;
+  assert.match(newBody, /^<html><head><\/head><body><p>Hello<br>there<\/p>/);
+  // the text goes above the identity's signature, which stays as it was
+  assert.ok(newBody.includes(COMPOSE_SIGNATURE), newBody);
+  assert.ok(newBody.indexOf("<p>Hello<br>there</p>") < newBody.indexOf('<div class="moz-signature">'), newBody);
 
   const o = original();
   r = await call("mail_compose", { kind: "reply_all", id: o.id, body: "Yes" });
@@ -494,4 +498,80 @@ test("TestComposeOpensWindow", async () => {
   assert.deepEqual(fwd[1][2].to, ["y@example.test"]);
 
   assert.equal(mock.calls.sendMessage.length + mock.calls.saveMessage.length + mock.calls.import.length, 0);
+});
+
+// composeDirect calls the handler itself, so the test sees the error the
+// handler throws, mayHaveCompleted included.
+async function composeDirect(args) {
+  try {
+    await HANDLERS.mail_compose(args, { client: "test", settings: await load(), tool: "mail_compose" });
+  } catch (e) {
+    return e;
+  }
+  assert.fail("mail_compose did not fail");
+}
+
+const composeCalls = (name) => mock.calls.compose.filter(([f]) => f === name).length;
+
+test("mail_compose: a failure after the window opened says so and may have completed", async () => {
+  const o = original();
+  const cases = [
+    ["getComposeDetails rejects", () => (mock.messenger.compose.getComposeDetails = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
+    ["setComposeDetails rejects", () => (mock.messenger.compose.setComposeDetails = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
+    ["getComposeDetails never answers", () => (mock.messenger.compose.getComposeDetails = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
+    ["setComposeDetails never answers", () => (mock.messenger.compose.setComposeDetails = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
+  ];
+  const budget = COMPOSE.budgetMs;
+  COMPOSE.budgetMs = 300;
+  try {
+    const working = { ...mock.messenger.compose };
+    for (const [what, breakIt, message] of cases) {
+      for (const args of [{ kind: "new", body: "Hi" }, { kind: "reply", id: o.id, body: "Hi" }]) {
+        Object.assign(mock.messenger.compose, working);
+        mock.calls.compose.length = 0;
+        breakIt();
+        const e = await composeDirect(args);
+        assert.equal(e.code, "thunderbird_error", what);
+        assert.match(e.message, message, what);
+        assert.equal(e.mayHaveCompleted, true, what);
+        // the window was opened once and is not opened again
+        assert.equal(composeCalls("beginNew") + composeCalls("beginReply"), 1, what);
+        // through dispatch the client is told the same
+        mock.calls.compose.length = 0;
+        const r = await call("mail_compose", args);
+        assert.equal(r.ok, false);
+        assert.match(r.error.message, message, what);
+      }
+    }
+  } finally {
+    COMPOSE.budgetMs = budget;
+  }
+});
+
+test("mail_compose fails when Thunderbird opens the window without reporting its tab", async () => {
+  for (const ret of [undefined, null, {}, { windowId: 3 }]) {
+    mock.messenger.compose.beginNew = async (...args) => {
+      mock.calls.compose.push(["beginNew", args]);
+      return ret;
+    };
+    const e = await composeDirect({ kind: "new", body: "Hi" });
+    assert.equal(e.code, "thunderbird_error", JSON.stringify(ret));
+    assert.match(e.message, /^The compose window opened, but Thunderbird did not report the window it opened, so the text was not put in it\./);
+    assert.equal(e.mayHaveCompleted, true);
+  }
+  assert.equal(composeCalls("setComposeDetails"), 0);
+});
+
+test("mail_compose: a timeout of the call that opens the window may have completed", async () => {
+  const budget = COMPOSE.budgetMs;
+  COMPOSE.budgetMs = 300;
+  try {
+    mock.messenger.compose.beginNew = () => new Promise(() => {});
+    const e = await composeDirect({ kind: "new", body: "Hi" });
+    assert.equal(e.code, "thunderbird_error");
+    assert.match(e.message, /the compose window may have opened/);
+    assert.equal(e.mayHaveCompleted, true);
+  } finally {
+    COMPOSE.budgetMs = budget;
+  }
 });
