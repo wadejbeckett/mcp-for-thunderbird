@@ -903,3 +903,33 @@ func resolvedDir(t *testing.T, d string) string {
 	}
 	return r
 }
+
+// A copy of the program under another file name still recognises the
+// entries it wrote.
+func TestRenamedProgramOwnsItsEntry(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(entry{Command: filepath.Join(filepath.Dir(binPath), filepath.Base(self)), Args: []string{"connect"}}).ourShape() {
+		t.Fatalf("%s not recognised", filepath.Base(self))
+	}
+	for _, e := range []entry{
+		{Command: oldBin, Args: []string{"connect"}},
+		{Command: `C:\Program Files\MCP\MCP-for-Thunderbird.EXE`, Args: []string{"connect"}},
+	} {
+		if !e.ourShape() {
+			t.Errorf("%+v not recognised", e)
+		}
+	}
+	for _, e := range []entry{
+		{Command: "mcp-for-thunderbird", Args: []string{"connect"}},
+		{Command: oldBin, Args: []string{"connect", "--instance", "x"}},
+		{Command: oldBin},
+		{Command: "/usr/bin/other", Args: []string{"connect"}},
+	} {
+		if e.ourShape() {
+			t.Errorf("%+v recognised", e)
+		}
+	}
+}

@@ -179,14 +179,24 @@ func (e entry) matches(binPath string) bool {
 }
 
 // ourCommand reports whether cmd is a path to the host program (any
-// folder), as setup writes it.
+// folder), as setup writes it: named mcp-for-thunderbird, or named as the
+// running program is.
 func ourCommand(cmd string) bool {
 	i := strings.LastIndexAny(cmd, `/\`)
 	if i < 0 {
 		return false
 	}
 	base := cmd[i+1:]
-	return strings.EqualFold(base, EntryName) || strings.EqualFold(base, EntryName+".exe")
+	names := []string{EntryName, EntryName + ".exe"}
+	if self, err := os.Executable(); err == nil {
+		names = append(names, filepath.Base(self))
+	}
+	for _, n := range names {
+		if strings.EqualFold(base, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // ourShape reports whether e has the shape setup writes, perhaps for
