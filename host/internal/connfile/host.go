@@ -32,9 +32,10 @@ func HostRunning(pid int) bool {
 }
 
 // hostName reports whether name, a process's program name as the platform
-// reports it, is the host's.
+// reports it, is the host's. Both sides are cut to the length the platform
+// keeps, so a full name and a kernel-truncated one compare alike.
 func hostName(name string) bool {
-	name = normaliseName(name)
+	name = truncateName(normaliseName(name))
 	if name == "" {
 		return false
 	}
