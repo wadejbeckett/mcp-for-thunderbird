@@ -51,7 +51,7 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 ## Supported versions
 
 - Thunderbird 153 or later, on Windows, macOS and Linux. Earlier versions lack the add-on interfaces MCP for Thunderbird needs to save drafts without opening a window.
-- Tested on Thunderbird ESR 153.4 on Linux; Thunderbird 158 on Windows and Thunderbird 157 on macOS are covered by the end-to-end tests that run in CI.
+- Tested on Thunderbird ESR 153.4 on Linux with the full end-to-end suite (run locally). In CI, Thunderbird 158 on Windows and Thunderbird 157 on macOS pass the reading and organising end-to-end tests (`TestE2ERead` and `TestE2EOrganise`); the other end-to-end tests (folder search, drafts and sending, the injection defaults, connect mode and the toolbar) run on Linux only. [docs/PLATFORMS.md](docs/PLATFORMS.md) lists what runs where.
 - Account types: tested with IMAP. MCP for Thunderbird uses only Thunderbird's general mail interfaces, so other account types Thunderbird supports, such as Gmail and Microsoft 365 over IMAP, should behave the same. Exchange accounts added with Thunderbird's built-in Exchange support have not been tested.
 - Linux: Thunderbird downloaded from thunderbird.net, and distribution packages that are not a Snap or Flatpak, work. The Snap (what `apt install thunderbird` gives you on current Ubuntu) has not been tested, and the Flatpak is not supported; see [INSTALL.md](INSTALL.md).
 
