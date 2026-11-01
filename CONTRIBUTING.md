@@ -49,6 +49,8 @@ After changing `host/go.mod`, regenerate the licences of the modules linked into
 sh packaging/third-party-licenses.sh
 ```
 
+The file lists every module with its version, and a module that `host/go.mod` replaces with its replacement too; it carries every `LICENSE*`, `LICENCE*` and `COPYING*` file at the root of each module. `sh packaging/third-party-licenses-selftest.sh` proves this on a small module of its own.
+
 Documentation check (product name, privacy statements, no internal references):
 
 ```

@@ -64,6 +64,9 @@ jobs:
       - name: THIRD_PARTY_LICENSES matches go.mod
         if: runner.os == 'Linux'
         run: sh ../packaging/third-party-licenses.sh --check
+      - name: third-party-licenses.sh handles replaced modules and several licence files
+        if: runner.os == 'Linux'
+        run: sh ../packaging/third-party-licenses-selftest.sh
       # The Windows-only tests (owner-only DACLs, HKCU registration) must
       # really run there, not be skipped or filtered out.
       - name: Windows-only tests ran
