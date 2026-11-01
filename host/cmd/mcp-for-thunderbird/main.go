@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -363,8 +365,11 @@ var (
 // so this host waits up to takeoverWait for the other to stop (it clears
 // its port on exit) and then refuses to start (errOtherHost). A file whose
 // PID has exited, or now belongs to another program after a crash, is
-// stale: it is logged and taken over. The file read last is returned so
-// its port can be tried first.
+// stale: it is logged and taken over. So is a file whose port nobody
+// listens on: a host saves the file only once it listens, so the PID
+// is then not serving this instance (for example a reused PID that now
+// runs a connect proxy). The file read last is returned so its port can
+// be tried first.
 func waitForOtherHost(ctx context.Context, instance string) (*connfile.Conn, error) {
 	deadline := time.Now().Add(takeoverWait)
 	logged := false
@@ -373,7 +378,7 @@ func waitForOtherHost(ctx context.Context, instance string) (*connfile.Conn, err
 		if err != nil || old.Port == 0 || old.PID == os.Getpid() || old.PID <= 0 {
 			return old, err
 		}
-		if !connfile.HostRunning(old.PID) {
+		if !connfile.HostRunning(old.PID) || portFree(old.Port) {
 			if logged {
 				logger.Printf("the other host has stopped; taking over the connection file")
 			}
@@ -393,6 +398,17 @@ func waitForOtherHost(ctx context.Context, instance string) (*connfile.Conn, err
 		case <-time.After(takeoverPoll):
 		}
 	}
+}
+
+// portFree reports whether port can be listened on at 127.0.0.1, so no
+// host is serving on it.
+func portFree(port int) bool {
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
 }
 
 // safe keeps an add-on-supplied version string to a short printable token.

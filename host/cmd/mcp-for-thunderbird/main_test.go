@@ -645,3 +645,36 @@ func TestHTTPServerTimeouts(t *testing.T) {
 		t.Fatalf("ReadTimeout %v WriteTimeout %v would cut open streams", hs.ReadTimeout, hs.WriteTimeout)
 	}
 }
+
+// A file naming a running host program that does not listen on the file's
+// port (a reused PID now running another host or a connect proxy) is not
+// a live host for this instance: it is taken over at once.
+func TestFileOfHostNotListeningTakenOver(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	a := startHost(t, bin, dir)
+	a.send(t, hello("first", 1))
+	if w := readFrame(t, a.stdout); w["ok"] != true {
+		t.Fatalf("first welcome = %v", w)
+	}
+	aport, _, apid := connFile(t, dir, "first")
+	free := 47110
+	for free == aport || !portFree(free) {
+		free++
+		if free > 47119 {
+			t.Skip("no free port in 47110-47119")
+		}
+	}
+	writeConnFile(t, dir, "second", free, strings.Repeat("ef", 32), apid)
+	b := startHost(t, bin, dir)
+	start := time.Now()
+	b.send(t, hello("second", 1))
+	if w := readFrame(t, b.stdout); w["ok"] != true {
+		t.Fatalf("welcome = %v", w)
+	}
+	if el := time.Since(start); el > takeoverWait {
+		t.Fatalf("waited %v for a host that does not serve this port", el)
+	}
+	b.stop(t)
+	a.stop(t)
+}
