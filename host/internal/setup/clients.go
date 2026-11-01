@@ -510,25 +510,36 @@ func claudeCodeState(binPath string) (bool, bool, error) {
 
 // claudeCodeAdd adds our entry. An entry setup wrote for another copy of
 // the host program (an upgrade into a new folder) is replaced; any other
-// entry is reported and left alone.
+// entry is reported and left alone. Everything that can be checked is
+// checked before the old entry is removed, and if the new one still cannot
+// be added, the old one is added back.
 func claudeCodeAdd(binPath string) error {
-	_, raw, ok, err := claudeCodeEntry()
+	old, raw, ok, err := claudeCodeEntry()
 	if err != nil {
 		return err
 	}
-	if ok {
-		if !ourJSONEntry(raw, true) {
-			return errors.New("Claude Code already has an mcp-for-thunderbird entry that setup did not write, or one with settings added to it; it was left unchanged (remove it with `claude mcp remove --scope user mcp-for-thunderbird` and set up again to replace it)")
-		}
-		if err := runClaude("mcp", "remove", "--scope", "user", EntryName); err != nil {
-			return err
-		}
+	if ok && !ourJSONEntry(raw, true) {
+		return errors.New("Claude Code already has an mcp-for-thunderbird entry that setup did not write, or one with settings added to it; it was left unchanged (remove it with `claude mcp remove --scope user mcp-for-thunderbird` and set up again to replace it)")
 	}
-	if err := runClaude("mcp", "add", "--scope", "user", EntryName, "--", binPath, "connect"); err != nil {
-		if ok {
-			return fmt.Errorf("the old entry was removed but the new one could not be added: %w", err)
-		}
+	add := []string{"mcp", "add", "--scope", "user", EntryName, "--", binPath, "connect"}
+	if err := claudeReady(add); err != nil {
 		return err
+	}
+	if !ok {
+		return runClaude(add...)
+	}
+	readd := append([]string{"mcp", "add", "--scope", "user", EntryName, "--", old.Command}, old.Args...)
+	if err := claudeReady(readd); err != nil {
+		return err
+	}
+	if err := runClaude("mcp", "remove", "--scope", "user", EntryName); err != nil {
+		return err
+	}
+	if err := runClaude(add...); err != nil {
+		if rerr := runClaude(readd...); rerr != nil {
+			return fmt.Errorf("the old entry was removed but the new one could not be added (%v), and adding the old one back failed too (%v); a copy of .claude.json from before the change is next to it, named with .bak- and the date and time", err, rerr)
+		}
+		return fmt.Errorf("the new entry could not be added, so the old one was put back: %w", err)
 	}
 	return nil
 }
@@ -547,6 +558,19 @@ func claudeCodeRemove() error {
 	return runClaude("mcp", "remove", "--scope", "user", EntryName)
 }
 
+// claudeShim is checkShim for this OS; tests replace it.
+var claudeShim = func(path string, args []string) error { return checkShim(runtime.GOOS, path, args) }
+
+// claudeReady reports whether runClaude(args...) can start claude: it is
+// on PATH and the arguments can be passed to it safely.
+func claudeReady(args []string) error {
+	path, err := exec.LookPath("claude")
+	if err != nil {
+		return errors.New("claude was not found on PATH")
+	}
+	return claudeShim(path, args)
+}
+
 // runClaude backs up ~/.claude.json and runs the claude found on PATH.
 // Its output is captured, never passed to our stdout (which may carry
 // native-messaging frames).
@@ -555,13 +579,13 @@ func runClaude(args ...string) error {
 	if err != nil {
 		return errors.New("claude was not found on PATH")
 	}
+	if err := claudeShim(path, args); err != nil {
+		return err
+	}
 	if p, err := claudeJSON(); err == nil {
 		if err := backup(p); err != nil {
 			return fmt.Errorf("backing up .claude.json: %w", err)
 		}
-	}
-	if err := checkShim(runtime.GOOS, path, args); err != nil {
-		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()

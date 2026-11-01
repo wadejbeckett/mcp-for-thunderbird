@@ -774,6 +774,84 @@ func TestClaudeCodeUpgradeReplacesOwnEntry(t *testing.T) {
 	}
 }
 
+// fakeClaudeFailingAdd is fakeClaude whose "mcp add" exits 1, the first
+// time only or every time; other runs succeed. (The sandbox PATH has no
+// other programs, so the script uses shell built-ins only.)
+func fakeClaudeFailingAdd(t *testing.T, bin string, always bool) string {
+	t.Helper()
+	logf := fakeClaude(t, bin, 0)
+	failed := filepath.Join(t.TempDir(), "failed")
+	fail := "[ -e '" + failed + "' ] || { : >'" + failed + "'; echo 'add refused' >&2; exit 1; }\n"
+	if always {
+		fail = "echo 'add refused' >&2; exit 1\n"
+	}
+	script := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >>'" + logf + "'; done\n" +
+		"printf -- '--end--\\n' >>'" + logf + "'\n" +
+		"[ \"$2\" = add ] || exit 0\n" + fail
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return logf
+}
+
+// When the new Claude Code entry cannot be added after the old one was
+// removed, the old one is added back and the failure is reported.
+func TestClaudeCodeUpgradeAddFailurePutsOldBack(t *testing.T) {
+	removeOld := "mcp\nremove\n--scope\nuser\nmcp-for-thunderbird\n--end--\n"
+	addNew := "mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + binPath + "\nconnect\n--end--\n"
+	addOld := "mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + oldBin + "\nconnect\n--end--\n"
+	for _, c := range []struct {
+		always bool
+		error  string
+	}{
+		{false, "the old one was put back"},
+		{true, "a copy of .claude.json from before the change"},
+	} {
+		home, bin := sandbox(t)
+		logf := fakeClaudeFailingAdd(t, bin, c.always)
+		cj := filepath.Join(home, ".claude.json")
+		old, _ := json.Marshal(oldBin)
+		os.WriteFile(cj, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"type":"stdio","command":`+string(old)+`,"args":["connect"],"env":{}}}}`), 0o600)
+		s := status(t, Configure([]string{"claude-code"}, binPath), "claude-code")
+		if s.Configured || !strings.Contains(s.Error, c.error) || !strings.Contains(s.Error, "add refused") {
+			t.Errorf("always %v: %+v", c.always, s)
+		}
+		if b, _ := os.ReadFile(logf); string(b) != removeOld+addNew+addOld {
+			t.Errorf("always %v: claude args:\n%s\nwant:\n%s", c.always, b, removeOld+addNew+addOld)
+		}
+		if bk := backups(t, cj); len(bk) == 0 {
+			t.Errorf("always %v: no backup of .claude.json", c.always)
+		}
+	}
+}
+
+// A check that would make the new add fail runs before the old entry is
+// removed, so a refused add leaves the old entry in place.
+func TestClaudeCodeUpgradeCheckedBeforeRemove(t *testing.T) {
+	home, bin := sandbox(t)
+	logf := fakeClaude(t, bin, 0)
+	// Pretend claude is a Windows .cmd shim, which cannot take an &.
+	orig := claudeShim
+	claudeShim = func(path string, args []string) error { return checkShim("windows", path+".cmd", args) }
+	t.Cleanup(func() { claudeShim = orig })
+	cj := filepath.Join(home, ".claude.json")
+	old, _ := json.Marshal(oldBin)
+	content := `{"mcpServers":{"mcp-for-thunderbird":{"type":"stdio","command":` + string(old) + `,"args":["connect"],"env":{}}}}`
+	os.WriteFile(cj, []byte(content), 0o600)
+	amp := filepath.Join(filepath.Dir(binPath)+"&x", "mcp-for-thunderbird")
+	s := status(t, Configure([]string{"claude-code"}, amp), "claude-code")
+	if s.Configured || !strings.Contains(s.Error, "cannot be passed to claude safely") {
+		t.Fatalf("configure: %+v", s)
+	}
+	if _, err := os.Stat(logf); !os.IsNotExist(err) {
+		b, _ := os.ReadFile(logf)
+		t.Fatalf("claude ran: %s", b)
+	}
+	if b, _ := os.ReadFile(cj); string(b) != content {
+		t.Fatalf(".claude.json changed:\n%s", b)
+	}
+}
+
 // An entry a person wrote (here the HTTP address form, or connect pinned
 // to one profile) is never replaced or removed by setup, in any app.
 func TestHandWrittenEntryKept(t *testing.T) {
