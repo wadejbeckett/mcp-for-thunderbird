@@ -445,6 +445,23 @@ test("a thread lists a message once however many folders hold a copy (Gmail labe
   }
 });
 
+test("mail_thread looks up its message within the call's budget", async () => {
+  SEARCH.budgetMs = 150;
+  const m = mock.addMessage("a1", "INBOX", { subject: "Plan", date: ago(1), headerMessageId: "slow@x" });
+  mock.messenger.folders.query = () => new Promise(() => {});
+  const t0 = Date.now();
+  let timer;
+  const r = await Promise.race([
+    call("mail_thread", { id: idOf(m) }),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ error: { code: "test: no answer within 2 s" } }), 2000);
+    }),
+  ]);
+  clearTimeout(timer);
+  assert.equal(r.error.code, "thunderbird_error");
+  assert.ok(Date.now() - t0 < 1000);
+});
+
 test("thread is marked truncated when its budget runs out", async () => {
   SEARCH.budgetMs = 200;
   const { reply } = threadFixture();

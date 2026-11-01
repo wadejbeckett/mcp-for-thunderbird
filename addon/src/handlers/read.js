@@ -495,7 +495,7 @@ const threadKey = (h) => stripAngleBrackets(h.headerMessageId || "") || `#${h.id
 async function mailThread(args, ctx) {
   const s = ctx.settings;
   const run = newRun();
-  const msg = await resolveId(args.id);
+  const msg = answered(await call(run, () => resolveId(args.id)));
   const accountId = msg.folder.accountId;
   assertFolderAllowed(accountId, msg.folder.path, s);
   const own = stripAngleBrackets(msg.headerMessageId);
