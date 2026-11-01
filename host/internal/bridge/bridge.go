@@ -508,8 +508,11 @@ func (b *Bridge) dispatch(f frame) {
 			onConfig(f.AttachmentDir)
 		}
 	case "rotate_token":
+		// Run in the read loop, not in a goroutine, so a token_request
+		// the add-on sends right after is answered with the new key (or
+		// with none, when the host refused the rotation).
 		if onRotate != nil {
-			go onRotate()
+			onRotate()
 		}
 	case "token_request":
 		if onToken != nil {

@@ -467,3 +467,29 @@ func TestAnswerTimeStartsAfterBlobs(t *testing.T) {
 		t.Fatalf("call with a slow blob transfer: %v", err)
 	}
 }
+
+// A token_request sent straight after rotate_token is answered with the
+// key the rotation made, so the add-on can tell a rotation from a refusal.
+func TestTokenRequestAfterRotateSeesNewKey(t *testing.T) {
+	b, f := newPair(t)
+	var mu sync.Mutex
+	tok := "old"
+	b.OnRotate(func() {
+		time.Sleep(50 * time.Millisecond) // a slow file write
+		mu.Lock()
+		tok = "new"
+		mu.Unlock()
+	})
+	b.OnTokenRequest(func() (string, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return tok, "http://127.0.0.1:47110/mcp"
+	})
+	b.Start()
+	f.send(map[string]any{"type": "rotate_token"})
+	f.send(map[string]any{"type": "token_request"})
+	if m := f.recv(); m["type"] != "token" || m["token"] != "new" {
+		t.Fatalf("token after rotate = %v, want the new key", m)
+	}
+}
+
