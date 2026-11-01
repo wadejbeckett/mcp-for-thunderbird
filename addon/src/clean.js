@@ -716,7 +716,13 @@ export function htmlToText(html) {
       if (BLOCK.has(tag)) {
         out.block();
         next.hideLine = indent ? out.done.length : -1;
-        stack.push({ exit: () => out.block() });
+        // Text after a child block is past its parent's first line.
+        stack.push({
+          exit: () => {
+            out.block();
+            ctx.hideLine = -1;
+          },
+        });
       } else if (CELL.has(tag)) {
         next.hideLine = indent ? out.done.length : -1;
         stack.push({ exit: () => out.text(" ", false) });

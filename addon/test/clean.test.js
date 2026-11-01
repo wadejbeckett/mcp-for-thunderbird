@@ -326,6 +326,7 @@ test("off-screen and clipped text is hidden: indents, far offsets on any side, c
     <div class="off">HIDDEN-SHEET-RIGHT</div><div class="cp">HIDDEN-SHEET-INSET</div>
     <p style="text-indent:-9999px">HIDDEN-FIRST-LINE<br>Shown second line.</p>
     <div style="text-indent:-9999px"><p style="text-indent:0">Shown indent reset.</p></div>
+    <div style="text-indent:-9999px"><h1>HIDDEN-LOGO</h1>Shown after a block.</div>
     <p style="text-indent:2em">Shown indented.</p>
     <p style="text-indent:-1em;padding-left:1em">Shown hanging indent.</p>
     <div style="clip:rect(0 0 0 0)">Shown clip without position.</div>
@@ -337,7 +338,7 @@ test("off-screen and clipped text is hidden: indents, far offsets on any side, c
     <div style="margin-left:-20px">Shown margin.</div>`;
   const text = htmlToText(html);
   assert.doesNotMatch(text, /HIDDEN/);
-  for (const s of ["second line", "indent reset", "indented", "hanging indent", "clip without position", "wide clip", "inset", "scaled", "nudged", "percent", "margin"]) {
+  for (const s of ["second line", "indent reset", "after a block", "indented", "hanging indent", "clip without position", "wide clip", "inset", "scaled", "nudged", "percent", "margin"]) {
     assert.match(text, new RegExp(`Shown ${s}\\.`), s);
   }
 });
