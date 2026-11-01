@@ -206,8 +206,9 @@ const ELSEWHERE = "Thunderbird may archive this account's mail into a folder of 
 // without identities such as Local Folders, any identity. That folder may be
 // in another account. The add-on API does not say which folder an identity
 // archives into, but Thunderbird marks each identity's archive folder with
-// the "archive" special use, so the marked folders stand for the possible
-// targets. A marked folder in another account that has identities of its
+// the "archive" special use (nsMsgIdentity::setFolderPref moves the Archive
+// flag to the folder an identity is set to, once that folder exists), so the
+// marked folders stand for the possible targets. A marked folder in another account that has identities of its
 // own is taken to be that account's. One in an account without identities
 // (other than a feed account, whose archive folder holds its own feed items)
 // can belong to any identity, so it blocks archiving from every other
