@@ -83,6 +83,8 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and contributing
 - [docs/PLATFORMS.md](docs/PLATFORMS.md): what has been tested on each system
 
+Releases are published to the [official MCP Registry](https://registry.modelcontextprotocol.io/), which MCP directories and apps read, as `io.github.wadejbeckett/mcp-for-thunderbird`. Links to the registry entry and to directory listings will be added here once they are live.
+
 ## Support this project
 
 MCP for Thunderbird is free software from Noiz. If it is useful to you, the main way to support its development is a donation in Monero (XMR):

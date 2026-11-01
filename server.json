@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.wadejbeckett/mcp-for-thunderbird",
+  "title": "MCP for Thunderbird",
+  "description": "Work with the mail in Thunderbird from AI apps, within limits set in the Thunderbird add-on.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/wadejbeckett/mcp-for-thunderbird",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/wadejbeckett/mcp-for-thunderbird/releases/download/v0.1.0/mcp-for-thunderbird-0.1.0-darwin-all.mcpb",
+      "fileSha256": "5423f734db662bf656bc1d0ead278b66c01e0bef6513b9316b8e040904c53498",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/wadejbeckett/mcp-for-thunderbird/releases/download/v0.1.0/mcp-for-thunderbird-0.1.0-windows-amd64.mcpb",
+      "fileSha256": "b0f8e35999b97324b2e9a6b3a5d90f1200002752f6cb5c1bba188ed945ac7856",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/wadejbeckett/mcp-for-thunderbird/releases/download/v0.1.0/mcp-for-thunderbird-0.1.0-windows-arm64.mcpb",
+      "fileSha256": "bceb8fad63a4af21d853cf4a7efba0149fb301c074be0751802c2470d25c8dda",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
