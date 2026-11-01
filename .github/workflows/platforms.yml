@@ -272,6 +272,9 @@ jobs:
 
   sums:
     needs: [windows-installer, macos-pkg]
+    # build or release is always skipped, and a skipped job further up
+    # skips a job with no condition, so the condition is explicit.
+    if: ${{ !cancelled() && needs.windows-installer.result == 'success' && needs.macos-pkg.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
