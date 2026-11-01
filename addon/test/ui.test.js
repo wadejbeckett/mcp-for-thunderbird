@@ -13,7 +13,7 @@ import { HANDLERS } from "../src/rpc.js";
 import { isAllowed } from "../src/handlers/compose.js";
 import { levelToGroups, parseAllowlist, renderState, isAbsolutePath, RESTART_NOTE, isAllMail, allMailAccounts } from "../ui/logic.js";
 import { initPopup } from "../ui/popup.js";
-import { initOptions } from "../ui/options.js";
+import { initOptions, broadFolder } from "../ui/options.js";
 import { initSetup } from "../ui/setup.js";
 
 globalThis.MFT_NO_AUTOSTART = true;
@@ -345,6 +345,51 @@ test("the attachment folder must be an absolute path", async () => {
   assert.equal(p.$("attachment-dir-error").textContent, "");
   assert.equal((await load()).attachmentDir, "/home/u/MCP");
   assert.deepEqual(mock.lastPort().sentOfType("config").at(-1), { type: "config", attachmentDir: "/home/u/MCP" });
+});
+
+test("broadFolder refuses roots and home folders from the path as written", () => {
+  const broad = [
+    "/",
+    "//",
+    "/.",
+    "/tmp/..",
+    "/home",
+    "/home/anna",
+    "/home/anna/",
+    "/home/anna/MCP/..",
+    "/Users",
+    "/Users/anna",
+    "/users/anna",
+    "/root",
+    "/var/home",
+    "/var/home/anna",
+    "C:\\",
+    "c:/",
+    "C:\\..",
+    "D:\\Data\\..\\..",
+    "C:\\Users",
+    "C:\\Users\\Anna",
+    "c:/users/anna/",
+    "C:\\Documents and Settings\\Anna",
+    "\\\\server\\share",
+    "\\\\server\\share\\",
+    "\\\\server\\share\\x\\..",
+  ];
+  for (const p of broad) assert.equal(broadFolder(p), true, p);
+  const fine = ["/home/anna/MCP", "/Users/anna/MCP-attachments", "/root/mcp", "/var/home/anna/MCP", "/srv/mcp", "/tmp", "/home\\anna", "C:\\Users\\Anna\\MCP", "D:\\MCP", "\\\\server\\share\\MCP"];
+  for (const p of fine) assert.equal(broadFolder(p), false, p);
+});
+
+test("the attachment folder cannot be a root or a home folder", async () => {
+  const p = await options({ accounts: { a1: true }, attachmentDir: "/home/u/MCP" });
+  for (const dir of ["/", "C:\\", "/home/u", "C:\\Users\\U\\", "/Users/u/../u"]) {
+    p.$("attachment-dir").value = dir;
+    p.fire(p.$("form"), "submit");
+    await flush();
+    assert.match(p.$("attachment-dir-error").textContent, /not the top of a drive or of the file system, and not a home folder itself/, dir);
+    assert.match(p.$("save-status").textContent, /Nothing was saved/, dir);
+    assert.equal((await load()).attachmentDir, "/home/u/MCP", dir);
+  }
 });
 
 test("ticking accounts quickly lists each folder once", async () => {
