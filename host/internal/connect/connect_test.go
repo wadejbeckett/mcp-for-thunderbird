@@ -376,13 +376,19 @@ func TestUpstreamDisappearsNotifies(t *testing.T) {
 	}
 	u.hs.CloseClientConnections()
 	u.hs.Close()
-	select {
-	case <-changed:
-	case <-time.After(6 * time.Second):
-		t.Fatal("no list_changed within 6 s")
-	}
-	if names := listNames(t, cs); len(names) != 0 {
-		t.Fatalf("tools after = %v", names)
+	deadline := time.After(6 * time.Second)
+	for {
+		select {
+		case <-changed:
+		case <-deadline:
+			t.Fatalf("no list_changed that empties the tool list within 6 s; tools = %v", listNames(t, cs))
+		}
+		// A list_changed left over from start-up (the first sync) can
+		// arrive first; the one that follows the upstream going away
+		// leaves the list empty.
+		if len(listNames(t, cs)) == 0 {
+			break
+		}
 	}
 	if res := callTool(t, cs, "mail_accounts"); !res.IsError || resultText(res) != ClosedMessage {
 		t.Fatalf("call = %v %q", res.IsError, resultText(res))

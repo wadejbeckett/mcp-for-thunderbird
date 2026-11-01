@@ -68,6 +68,13 @@ func processStart(pid int) (string, bool) {
 		return "", false
 	}
 	defer windows.CloseHandle(h)
+	// An exited process stays queryable while any handle to it is open
+	// (its parent's, for one), but it has no start any more that a live
+	// PID could match.
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil || code != stillActive {
+		return "", false
+	}
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
 		return "", false
