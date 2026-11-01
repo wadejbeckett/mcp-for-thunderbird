@@ -37,6 +37,9 @@ var (
 	ErrTooLarge = errors.New("files: attachment is larger than 50 MiB")
 	// ErrNoDir means no usable absolute attachment folder is configured.
 	ErrNoDir = errors.New("files: no attachment folder is set")
+	// ErrNotRegular means the name is a folder, FIFO, device or other
+	// special file, which is never read.
+	ErrNotRegular = errors.New("files: not a regular file")
 )
 
 func checkDir(dir string) error {
@@ -197,7 +200,9 @@ func Save(dir, name string, data []byte) (string, error) {
 
 // ReadForDraft reads a regular file named name from directly inside dir.
 // Path separators, "..", absolute names and symlinks that resolve outside dir
-// are refused with ErrOutside.
+// are refused with ErrOutside. Anything but a regular file (a folder, a FIFO,
+// a device) is refused without being opened for reading, so it cannot
+// block the host.
 func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err := checkDir(dir); err != nil {
 		return nil, "", err
@@ -218,7 +223,20 @@ func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return nil, "", ErrOutside
 	}
-	f, err := os.Open(realFile)
+	// realFile has no links left, so Lstat describes the file itself.
+	before, err := os.Lstat(realFile)
+	if err != nil {
+		return nil, "", err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, "", ErrNotRegular
+	}
+	if before.Size() > MaxSize {
+		return nil, "", ErrTooLarge
+	}
+	// openFlags never waits for a writer, should the file have been
+	// swapped for a FIFO since the check above.
+	f, err := os.OpenFile(realFile, os.O_RDONLY|openFlags, 0)
 	if err != nil {
 		return nil, "", err
 	}
@@ -227,8 +245,8 @@ func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if !st.Mode().IsRegular() {
-		return nil, "", errors.New("files: not a regular file")
+	if !st.Mode().IsRegular() || !os.SameFile(before, st) {
+		return nil, "", ErrNotRegular
 	}
 	if st.Size() > MaxSize {
 		return nil, "", ErrTooLarge
