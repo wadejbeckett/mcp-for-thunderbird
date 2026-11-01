@@ -545,3 +545,18 @@ func TestSetToolsRemovesDisabledGroup(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// An add-on on a Thunderbird that lacks a tool's interface (Thunderbird
+// 140 ESR and mail_draft) answers not_supported; the code reaches the
+// client as it is.
+func TestNotSupportedErrorCodeKept(t *testing.T) {
+	h := newHarness(t, []string{"mail_search"})
+	h.addon.setReply(func(map[string]any) map[string]any {
+		return map[string]any{"ok": false, "error": map[string]any{"code": "not_supported", "message": "Needs Thunderbird 153 or later."}}
+	})
+	cs := h.connect(t, nil)
+	res, err := call(t, cs, "mail_search", map[string]any{})
+	if err != nil || !res.IsError || text(res) != "not_supported: Needs Thunderbird 153 or later." {
+		t.Fatalf("err=%v text=%q", err, text(res))
+	}
+}
