@@ -178,6 +178,31 @@ func (e entry) matches(binPath string) bool {
 	return e.Command == binPath && reflect.DeepEqual(e.Args, []string{"connect"})
 }
 
+// ourCommand reports whether cmd is a path to the host program (any
+// folder), as setup writes it.
+func ourCommand(cmd string) bool {
+	i := strings.LastIndexAny(cmd, `/\`)
+	if i < 0 {
+		return false
+	}
+	base := cmd[i+1:]
+	return strings.EqualFold(base, EntryName) || strings.EqualFold(base, EntryName+".exe")
+}
+
+// ourShape reports whether e has the shape setup writes, perhaps for
+// another copy of the host program: command is the host program in any
+// folder, args ["connect"]. Any other entry (an HTTP address, other
+// arguments such as --instance) was written by hand.
+func (e entry) ourShape() bool {
+	return ourCommand(e.Command) && reflect.DeepEqual(e.Args, []string{"connect"})
+}
+
+// ourJSONEntry reports whether raw is an entry of our shape.
+func ourJSONEntry(raw json.RawMessage) bool {
+	var e entry
+	return json.Unmarshal(raw, &e) == nil && e.ourShape()
+}
+
 func jsonClient(name string, path func() (string, bool, error)) client {
 	return client{
 		name: name,
@@ -217,6 +242,9 @@ func jsonClient(name string, path func() (string, bool, error)) client {
 			if servers == nil {
 				servers = &object{}
 			}
+			if old, ok := servers.get(EntryName); ok && !ourJSONEntry(old) {
+				return fmt.Errorf("%s already has an mcp-for-thunderbird entry that setup did not write; it was left unchanged (remove that entry and set up again to replace it)", filepath.Base(p))
+			}
 			raw, _ := json.Marshal(entry{Command: binPath, Args: []string{"connect"}})
 			servers.set(EntryName, raw)
 			doc.set("mcpServers", servers.encode(""))
@@ -235,9 +263,14 @@ func jsonClient(name string, path func() (string, bool, error)) client {
 			if err != nil || servers == nil {
 				return err
 			}
-			if !servers.del(EntryName) {
+			old, ok := servers.get(EntryName)
+			if !ok {
 				return nil
 			}
+			if !ourJSONEntry(old) {
+				return fmt.Errorf("the mcp-for-thunderbird entry in %s was not written by setup; it was left in place", filepath.Base(p))
+			}
+			servers.del(EntryName)
 			doc.set("mcpServers", servers.encode(""))
 			return replace(p, append(doc.encode(""), '\n'), 0o600)
 		},
@@ -406,50 +439,70 @@ func claudeJSON() (string, error) {
 }
 
 // claudeCodeEntry reads our entry from ~/.claude.json, if any.
-func claudeCodeEntry() (e entry, ok bool, err error) {
+func claudeCodeEntry() (e entry, raw json.RawMessage, ok bool, err error) {
 	p, err := claudeJSON()
 	if err != nil {
-		return e, false, err
+		return e, nil, false, err
 	}
 	doc, err := readJSONFile(p)
 	if err != nil {
-		return e, false, err
+		return e, nil, false, err
 	}
 	servers, err := doc.object("mcpServers")
 	if err != nil || servers == nil {
-		return e, false, err
+		return e, nil, false, err
 	}
-	raw, ok := servers.get(EntryName)
+	raw, ok = servers.get(EntryName)
 	if !ok {
-		return e, false, nil
+		return e, nil, false, nil
 	}
 	_ = json.Unmarshal(raw, &e)
-	return e, true, nil
+	return e, raw, true, nil
 }
 
 func claudeCodeState(binPath string) (bool, bool, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return false, false, nil
 	}
-	e, ok, err := claudeCodeEntry()
+	e, _, ok, err := claudeCodeEntry()
 	if err != nil {
 		return true, false, err
 	}
 	return true, ok && e.matches(binPath), nil
 }
 
+// claudeCodeAdd adds our entry. An entry setup wrote for another copy of
+// the host program (an upgrade into a new folder) is replaced; any other
+// entry is reported and left alone.
 func claudeCodeAdd(binPath string) error {
-	if _, ok, err := claudeCodeEntry(); err != nil {
+	_, raw, ok, err := claudeCodeEntry()
+	if err != nil {
 		return err
-	} else if ok {
-		return errors.New("Claude Code already has a different mcp-for-thunderbird entry; remove it with `claude mcp remove --scope user mcp-for-thunderbird` and try again")
 	}
-	return runClaude("mcp", "add", "--scope", "user", EntryName, "--", binPath, "connect")
+	if ok {
+		if !ourJSONEntry(raw) {
+			return errors.New("Claude Code already has an mcp-for-thunderbird entry that setup did not write; it was left unchanged (remove it with `claude mcp remove --scope user mcp-for-thunderbird` and set up again to replace it)")
+		}
+		if err := runClaude("mcp", "remove", "--scope", "user", EntryName); err != nil {
+			return err
+		}
+	}
+	if err := runClaude("mcp", "add", "--scope", "user", EntryName, "--", binPath, "connect"); err != nil {
+		if ok {
+			return fmt.Errorf("the old entry was removed but the new one could not be added: %w", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func claudeCodeRemove() error {
-	if _, ok, err := claudeCodeEntry(); err != nil || !ok {
+	_, raw, ok, err := claudeCodeEntry()
+	if err != nil || !ok {
 		return err
+	}
+	if !ourJSONEntry(raw) {
+		return errors.New("Claude Code's mcp-for-thunderbird entry was not written by setup; it was left in place")
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
 		return errors.New("claude was not found on PATH; remove the entry with: claude mcp remove --scope user mcp-for-thunderbird")
@@ -581,22 +634,27 @@ func codexState(binPath string) (bool, bool, error) {
 const codexHeader = "[mcp_servers." + EntryName + "]"
 
 // codexAdd appends our table as text so the user's comments and layout
-// stay as they are. A different entry of ours is reported, not replaced.
+// stay as they are. A table setup wrote for another copy of the host
+// program (an upgrade into a new folder) is removed first; any other
+// entry of that name is reported, not replaced.
 func codexAdd(binPath string) error {
 	_, p, err := codexPath()
 	if err != nil {
 		return err
 	}
-	_, _, ok, err := codexEntry(p)
+	cmd, args, ok, err := codexEntry(p)
 	if err != nil {
 		return err
-	}
-	if ok {
-		return errors.New("config.toml already has a different mcp-for-thunderbird entry; it was left unchanged")
 	}
 	old, err := os.ReadFile(p)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
+	}
+	if ok {
+		if !(entry{cmd, args}).ourShape() {
+			return errors.New("config.toml already has an mcp-for-thunderbird entry that setup did not write; it was left unchanged (remove that table and set up again to replace it)")
+		}
+		old = codexWithout(old)
 	}
 	var b bytes.Buffer
 	b.Write(old)
@@ -614,20 +672,34 @@ func codexAdd(binPath string) error {
 }
 
 // codexRemove deletes our table (and its sub-tables) as text, keeping
-// comments that belong to the next table.
+// comments that belong to the next table. A table setup did not write is
+// left in place.
 func codexRemove() error {
 	_, p, err := codexPath()
 	if err != nil {
 		return err
 	}
-	_, _, ok, err := codexEntry(p)
+	cmd, args, ok, err := codexEntry(p)
 	if err != nil || !ok {
 		return err
+	}
+	if !(entry{cmd, args}).ourShape() {
+		return errors.New("the mcp-for-thunderbird entry in config.toml was not written by setup; it was left in place")
 	}
 	old, err := os.ReadFile(p)
 	if err != nil {
 		return err
 	}
+	nb := codexWithout(old)
+	if err := checkCodex(nb, "", false); err != nil {
+		return err
+	}
+	return replace(p, nb, 0o600)
+}
+
+// codexWithout returns old with our table and its sub-tables removed as
+// text.
+func codexWithout(old []byte) []byte {
 	lines := strings.SplitAfter(string(old), "\n")
 	ours := func(l string) bool {
 		h := strings.TrimSpace(l)
@@ -672,11 +744,7 @@ func codexRemove() error {
 		out = append(out, lines[k:j]...)
 		i = j
 	}
-	nb := []byte(strings.Join(out, ""))
-	if err := checkCodex(nb, "", false); err != nil {
-		return err
-	}
-	return replace(p, nb, 0o600)
+	return []byte(strings.Join(out, ""))
 }
 
 // checkCodex parses new content and confirms our entry is present with

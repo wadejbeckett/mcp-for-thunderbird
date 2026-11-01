@@ -365,8 +365,9 @@ func TestCursorMerge(t *testing.T) {
 	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("new file: %v", m)
 	}
-	// Existing with another server and a stale entry of ours: merged, ours replaced.
-	os.WriteFile(p, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/old"},"b":{"url":"http://x"}},"x":true}`), 0o600)
+	// Existing with another server and a stale entry of ours (an older
+	// copy of the program): merged, ours replaced.
+	os.WriteFile(p, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/old/mcp-for-thunderbird","args":["connect"]},"b":{"url":"http://x"}},"x":true}`), 0o600)
 	if s := status(t, detect(binPath), "cursor"); !s.Found || s.Configured {
 		t.Fatalf("stale entry reported configured: %+v", s)
 	}
@@ -569,7 +570,7 @@ func TestDetectMissing(t *testing.T) {
 
 func TestCodexRemoveMiddleKeepsNeighbours(t *testing.T) {
 	home, _ := sandbox(t)
-	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
+	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
 	p := codexSetup(t, home, orig)
 	for _, s := range Uninstall() {
 		if s.Error != "" {
@@ -678,7 +679,7 @@ func TestSymlinkedConfigKeepsLink(t *testing.T) {
 
 func TestClaudeCodeRemoveWithoutClaudeReported(t *testing.T) {
 	home, _ := sandbox(t)
-	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/x","args":["connect"]}}}`), 0o600)
+	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/x/mcp-for-thunderbird","args":["connect"]}}}`), 0o600)
 	s := status(t, Uninstall(), "claude-code")
 	if !strings.Contains(s.Error, "claude mcp remove --scope user mcp-for-thunderbird") {
 		t.Fatalf("missing claude not reported: %+v", s)
@@ -720,6 +721,106 @@ func TestWindowsShimMetacharactersRefused(t *testing.T) {
 	}
 	if err := checkShim("linux", "/usr/bin/claude.cmd", args); err != nil {
 		t.Fatalf("non-Windows refused: %v", err)
+	}
+}
+
+// oldBin is where an earlier version of the program lived, as a package
+// manager with versioned folders (Homebrew's Cellar) leaves it.
+var oldBin = filepath.Join(string(filepath.Separator)+"opt", "homebrew", "Cellar", "mcp-for-thunderbird", "1.0.0", "bin", "mcp-for-thunderbird")
+
+// After an upgrade into a new folder, setting up again replaces the
+// table setup wrote for the old folder and keeps everything else.
+func TestCodexUpgradeReplacesOwnEntry(t *testing.T) {
+	home, _ := sandbox(t)
+	old := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = " + tomlString(oldBin) + "\nargs = [\"connect\"]\n\n# next\n[mcp_servers.other]\ncommand = \"x\"\n"
+	p := codexSetup(t, home, old)
+	if s := status(t, Configure([]string{"codex"}, binPath), "codex"); !s.Configured || s.Error != "" {
+		t.Fatalf("configure: %+v", s)
+	}
+	b, _ := os.ReadFile(p)
+	want := "model = \"o3\"\n\n\n# next\n[mcp_servers.other]\ncommand = \"x\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = " + binTOML + "\nargs = [\"connect\"]\n"
+	if string(b) != want {
+		t.Fatalf("config.toml:\n%s\nwant:\n%s", b, want)
+	}
+	if bk := backups(t, p); len(bk) != 1 {
+		t.Fatalf("backups: %v", bk)
+	}
+	if s := status(t, detect(binPath), "codex"); !s.Configured {
+		t.Fatalf("detect after: %+v", s)
+	}
+}
+
+func TestClaudeCodeUpgradeReplacesOwnEntry(t *testing.T) {
+	home, bin := sandbox(t)
+	logf := fakeClaude(t, bin, 0)
+	cj := filepath.Join(home, ".claude.json")
+	old, _ := json.Marshal(oldBin)
+	os.WriteFile(cj, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"type":"stdio","command":`+string(old)+`,"args":["connect"],"env":{}}}}`), 0o600)
+	if s := status(t, Configure([]string{"claude-code"}, binPath), "claude-code"); !s.Configured || s.Error != "" {
+		t.Fatalf("configure: %+v", s)
+	}
+	b, _ := os.ReadFile(logf)
+	want := "mcp\nremove\n--scope\nuser\nmcp-for-thunderbird\n--end--\n" +
+		"mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + binPath + "\nconnect\n--end--\n"
+	if string(b) != want {
+		t.Fatalf("claude args:\n%s\nwant:\n%s", b, want)
+	}
+}
+
+// An entry a person wrote (here the HTTP address form, or connect pinned
+// to one profile) is never replaced or removed by setup, in any app.
+func TestHandWrittenEntryKept(t *testing.T) {
+	handJSON := `{"mcpServers":{"mcp-for-thunderbird":{"url":"http://127.0.0.1:47110/mcp","headers":{"Authorization":"Bearer k"}}}}`
+	pinned := `{"mcpServers":{"mcp-for-thunderbird":{"command":` + binJSON + `,"args":["connect","--instance","abc"]}}}`
+	for _, content := range []string{handJSON, pinned} {
+		home, bin := sandbox(t)
+		logf := filepath.Join(t.TempDir(), "none")
+		if runtime.GOOS != "windows" {
+			logf = fakeClaude(t, bin, 0)
+		}
+		files := map[string]string{
+			"claude-desktop": claudeDesktopConfig(t, home, content),
+			"cursor":         filepath.Join(home, ".cursor", "mcp.json"),
+			"claude-code":    filepath.Join(home, ".claude.json"),
+			"codex":          filepath.Join(home, ".codex", "config.toml"),
+		}
+		os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+		os.WriteFile(files["cursor"], []byte(content), 0o600)
+		os.WriteFile(files["claude-code"], []byte(content), 0o600)
+		toml := "[mcp_servers.mcp-for-thunderbird]\nurl = \"http://127.0.0.1:47110/mcp\"\n"
+		if content == pinned {
+			toml = "[mcp_servers.mcp-for-thunderbird]\ncommand = " + binTOML + "\nargs = [\"connect\", \"--instance\", \"abc\"]\n"
+		}
+		codexSetup(t, home, toml)
+		names := []string{"claude-desktop", "cursor", "codex"}
+		if runtime.GOOS != "windows" {
+			names = append(names, "claude-code")
+		}
+		for _, n := range names {
+			if s := status(t, Configure([]string{n}, binPath), n); s.Error == "" || s.Configured {
+				t.Errorf("%s: hand-written entry replaced: %+v", n, s)
+			}
+			if s := status(t, Uninstall(), n); !strings.Contains(s.Error, "left in place") {
+				t.Errorf("%s: uninstall did not report the kept entry: %+v", n, s)
+			}
+		}
+		for n, f := range files {
+			b, _ := os.ReadFile(f)
+			want := content
+			if n == "codex" {
+				want = toml
+			}
+			if string(b) != want {
+				t.Errorf("%s changed:\n%s", n, b)
+			}
+			if bk := backups(t, f); len(bk) != 0 {
+				t.Errorf("%s backed up on refusal: %v", n, bk)
+			}
+		}
+		if _, err := os.Stat(logf); !os.IsNotExist(err) {
+			b, _ := os.ReadFile(logf)
+			t.Errorf("claude ran: %s", b)
+		}
 	}
 }
 
