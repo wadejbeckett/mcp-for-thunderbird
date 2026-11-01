@@ -455,9 +455,9 @@ func TestCodexPathQuoted(t *testing.T) {
 	if s := status(t, Configure([]string{"codex"}, win), "codex"); !s.Configured || s.Error != "" {
 		t.Fatalf("configure: %+v", s)
 	}
-	cmd, args, ok, err := codexEntry(p)
-	if err != nil || !ok || cmd != win || !reflect.DeepEqual(args, []string{"connect"}) {
-		t.Fatalf("round trip: %q %v %v %v", cmd, args, ok, err)
+	e, ok, err := codexEntry(p)
+	if err != nil || !ok || e.Command != win || !reflect.DeepEqual(e.Args, []string{"connect"}) || e.other {
+		t.Fatalf("round trip: %+v %v %v", e, ok, err)
 	}
 }
 
@@ -569,8 +569,15 @@ func TestDetectMissing(t *testing.T) {
 }
 
 func TestCodexRemoveMiddleKeepsNeighbours(t *testing.T) {
+	// codexWithout drops the table with its sub-tables. (Uninstall does
+	// not reach it with a sub-table: an env table makes the entry
+	// hand-edited, as TestHandEditedEntryKept checks.)
+	withSub := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
+	if got, want := string(codexWithout([]byte(withSub))), "model = \"o3\"\n\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"; got != want {
+		t.Fatalf("codexWithout:\n%q\nwant:\n%q", got, want)
+	}
 	home, _ := sandbox(t)
-	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
+	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
 	p := codexSetup(t, home, orig)
 	for _, s := range Uninstall() {
 		if s.Error != "" {
@@ -767,6 +774,84 @@ func TestClaudeCodeUpgradeReplacesOwnEntry(t *testing.T) {
 	}
 }
 
+// fakeClaudeFailingAdd is fakeClaude whose "mcp add" exits 1, the first
+// time only or every time; other runs succeed. (The sandbox PATH has no
+// other programs, so the script uses shell built-ins only.)
+func fakeClaudeFailingAdd(t *testing.T, bin string, always bool) string {
+	t.Helper()
+	logf := fakeClaude(t, bin, 0)
+	failed := filepath.Join(t.TempDir(), "failed")
+	fail := "[ -e '" + failed + "' ] || { : >'" + failed + "'; echo 'add refused' >&2; exit 1; }\n"
+	if always {
+		fail = "echo 'add refused' >&2; exit 1\n"
+	}
+	script := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >>'" + logf + "'; done\n" +
+		"printf -- '--end--\\n' >>'" + logf + "'\n" +
+		"[ \"$2\" = add ] || exit 0\n" + fail
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return logf
+}
+
+// When the new Claude Code entry cannot be added after the old one was
+// removed, the old one is added back and the failure is reported.
+func TestClaudeCodeUpgradeAddFailurePutsOldBack(t *testing.T) {
+	removeOld := "mcp\nremove\n--scope\nuser\nmcp-for-thunderbird\n--end--\n"
+	addNew := "mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + binPath + "\nconnect\n--end--\n"
+	addOld := "mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + oldBin + "\nconnect\n--end--\n"
+	for _, c := range []struct {
+		always bool
+		error  string
+	}{
+		{false, "the old one was put back"},
+		{true, "the earliest of the copies of .claude.json"},
+	} {
+		home, bin := sandbox(t)
+		logf := fakeClaudeFailingAdd(t, bin, c.always)
+		cj := filepath.Join(home, ".claude.json")
+		old, _ := json.Marshal(oldBin)
+		os.WriteFile(cj, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"type":"stdio","command":`+string(old)+`,"args":["connect"],"env":{}}}}`), 0o600)
+		s := status(t, Configure([]string{"claude-code"}, binPath), "claude-code")
+		if s.Configured || !strings.Contains(s.Error, c.error) || !strings.Contains(s.Error, "add refused") {
+			t.Errorf("always %v: %+v", c.always, s)
+		}
+		if b, _ := os.ReadFile(logf); string(b) != removeOld+addNew+addOld {
+			t.Errorf("always %v: claude args:\n%s\nwant:\n%s", c.always, b, removeOld+addNew+addOld)
+		}
+		if bk := backups(t, cj); len(bk) == 0 {
+			t.Errorf("always %v: no backup of .claude.json", c.always)
+		}
+	}
+}
+
+// A check that would make the new add fail runs before the old entry is
+// removed, so a refused add leaves the old entry in place.
+func TestClaudeCodeUpgradeCheckedBeforeRemove(t *testing.T) {
+	home, bin := sandbox(t)
+	logf := fakeClaude(t, bin, 0)
+	// Pretend claude is a Windows .cmd shim, which cannot take an &.
+	orig := claudeShim
+	claudeShim = func(path string, args []string) error { return checkShim("windows", path+".cmd", args) }
+	t.Cleanup(func() { claudeShim = orig })
+	cj := filepath.Join(home, ".claude.json")
+	old, _ := json.Marshal(oldBin)
+	content := `{"mcpServers":{"mcp-for-thunderbird":{"type":"stdio","command":` + string(old) + `,"args":["connect"],"env":{}}}}`
+	os.WriteFile(cj, []byte(content), 0o600)
+	amp := filepath.Join(filepath.Dir(binPath)+"&x", "mcp-for-thunderbird")
+	s := status(t, Configure([]string{"claude-code"}, amp), "claude-code")
+	if s.Configured || !strings.Contains(s.Error, "cannot be passed to claude safely") {
+		t.Fatalf("configure: %+v", s)
+	}
+	if _, err := os.Stat(logf); !os.IsNotExist(err) {
+		b, _ := os.ReadFile(logf)
+		t.Fatalf("claude ran: %s", b)
+	}
+	if b, _ := os.ReadFile(cj); string(b) != content {
+		t.Fatalf(".claude.json changed:\n%s", b)
+	}
+}
+
 // An entry a person wrote (here the HTTP address form, or connect pinned
 // to one profile) is never replaced or removed by setup, in any app.
 func TestHandWrittenEntryKept(t *testing.T) {
@@ -821,6 +906,79 @@ func TestHandWrittenEntryKept(t *testing.T) {
 			b, _ := os.ReadFile(logf)
 			t.Errorf("claude ran: %s", b)
 		}
+	}
+}
+
+// An entry of setup's shape that a person has added keys to (env,
+// disabled, enabled = false, a timeout, an env sub-table) is hand-edited:
+// setup after an upgrade neither replaces it (which would drop those
+// keys) nor removes it, and reports it.
+func TestHandEditedEntryKept(t *testing.T) {
+	old, _ := json.Marshal(oldBin)
+	jsonCases := []string{
+		`{"command":` + string(old) + `,"args":["connect"],"env":{"A":"1"}}`,
+		`{"command":` + string(old) + `,"args":["connect"],"disabled":true}`,
+		`{"command":` + string(old) + `,"args":["connect"],"env":{}}`,
+	}
+	claudeCases := []string{
+		`{"type":"stdio","command":` + string(old) + `,"args":["connect"],"env":{"A":"1"}}`,
+		`{"type":"stdio","command":` + string(old) + `,"args":["connect"],"env":{},"disabled":true}`,
+		`{"type":"http","command":` + string(old) + `,"args":["connect"],"env":{}}`,
+	}
+	tomlHead := "[mcp_servers.mcp-for-thunderbird]\ncommand = " + tomlString(oldBin) + "\nargs = [\"connect\"]\n"
+	codexCases := []string{
+		tomlHead + "enabled = false\n",
+		tomlHead + "tool_timeout_sec = 30\n",
+		tomlHead + "startup_timeout_sec = 20\n",
+		tomlHead + "\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n",
+		"[mcp_servers]\nmcp-for-thunderbird = { command = " + tomlString(oldBin) + ", args = [\"connect\"], enabled = false }\n",
+	}
+	type file struct{ name, path, content string }
+	check := func(t *testing.T, fs []file, logf string) {
+		t.Helper()
+		for _, f := range fs {
+			if s := status(t, Configure([]string{f.name}, binPath), f.name); s.Error == "" || s.Configured {
+				t.Errorf("%s: hand-edited entry replaced: %+v", f.name, s)
+			}
+			if s := status(t, Uninstall(), f.name); !strings.Contains(s.Error, "left in place") {
+				t.Errorf("%s: uninstall did not report the kept entry: %+v", f.name, s)
+			}
+			if b, _ := os.ReadFile(f.path); string(b) != f.content {
+				t.Errorf("%s changed:\n%s\nwas:\n%s", f.name, b, f.content)
+			}
+			if bk := backups(t, f.path); len(bk) != 0 {
+				t.Errorf("%s backed up on refusal: %v", f.name, bk)
+			}
+		}
+		if _, err := os.Stat(logf); !os.IsNotExist(err) {
+			b, _ := os.ReadFile(logf)
+			t.Errorf("claude ran: %s", b)
+		}
+	}
+	for _, e := range jsonCases {
+		home, _ := sandbox(t)
+		content := `{"mcpServers":{"mcp-for-thunderbird":` + e + `}}`
+		os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+		cursor := filepath.Join(home, ".cursor", "mcp.json")
+		os.WriteFile(cursor, []byte(content), 0o600)
+		check(t, []file{
+			{"claude-desktop", claudeDesktopConfig(t, home, content), content},
+			{"cursor", cursor, content},
+		}, filepath.Join(t.TempDir(), "none"))
+	}
+	if runtime.GOOS != "windows" {
+		for _, e := range claudeCases {
+			home, bin := sandbox(t)
+			logf := fakeClaude(t, bin, 0)
+			content := `{"mcpServers":{"mcp-for-thunderbird":` + e + `}}`
+			cj := filepath.Join(home, ".claude.json")
+			os.WriteFile(cj, []byte(content), 0o600)
+			check(t, []file{{"claude-code", cj, content}}, logf)
+		}
+	}
+	for _, content := range codexCases {
+		home, _ := sandbox(t)
+		check(t, []file{{"codex", codexSetup(t, home, content), content}}, filepath.Join(t.TempDir(), "none"))
 	}
 }
 

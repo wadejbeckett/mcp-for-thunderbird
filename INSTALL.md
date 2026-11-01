@@ -150,7 +150,7 @@ MCP for Thunderbird can set up these AI apps for you:
 | Codex | adds `[mcp_servers.mcp-for-thunderbird]` to `~/.codex/config.toml` |
 | Cursor | adds `mcp-for-thunderbird` to `~/.cursor/mcp.json` |
 
-Each entry runs the host with the word `connect`, which links the AI app to Thunderbird and reads the access key by itself. No key is written into any AI app's settings. Before changing a file, setup saves a copy next to it named with `.bak-` and the date and time. It leaves every other entry in the file alone. An `mcp-for-thunderbird` entry that runs the host with `connect` from another folder, such as one setup wrote before an upgrade, is replaced. An `mcp-for-thunderbird` entry of any other kind, such as one you wrote by hand with the HTTP address or with `--instance`, is left as it is, and setup reports it.
+Each entry runs the host with the word `connect`, which links the AI app to Thunderbird and reads the access key by itself. No key is written into any AI app's settings. Before changing a file, setup saves a copy next to it named with `.bak-` and the date and time. It leaves every other entry in the file alone. Setup treats an `mcp-for-thunderbird` entry as its own only when it holds exactly what setup writes: the host program as the command, in any folder, the single argument `connect`, and no other setting. For Claude Code, the `"type": "stdio"` and empty `"env": {}` that `claude mcp add` records count as part of that entry. Such an entry for another folder, such as one setup wrote before an upgrade, is replaced. Every other `mcp-for-thunderbird` entry is left as it is, and setup reports it: for example one with the HTTP address, one with `--instance`, or one setup wrote that has had a setting added to it, such as `env`, `disabled`, `enabled` or a timeout. To have setup replace such an entry, remove it and run setup again.
 
 ### From the command line
 
@@ -194,13 +194,13 @@ A copied profile keeps the add-on's id. If the original and the copy run in two 
 
 ### Upgrading from a versioned folder
 
-Thunderbird finds the host through the full path of the program, recorded when you run `mcp-for-thunderbird setup`. Some package managers keep each version in its own folder and a link to the current version in their `bin` folder: Homebrew, for example, keeps the program under `Cellar/mcp-for-thunderbird/<version>/` and the link in `$(brew --prefix)/bin`. When setup is started through that link (for example as `mcp-for-thunderbird setup` with that `bin` folder on your command path), it records the link, which keeps working after an upgrade. When setup was started from the versioned folder, or by a version that recorded the versioned folder, run `mcp-for-thunderbird setup` again after the upgrade, and run `setup --clients=…` again for the AI apps you use. Setup replaces the entries it wrote for the old folder. The Windows installer, the macOS package and the `.deb` install to a fixed folder and need nothing extra.
+Thunderbird finds the host through the full path of the program, recorded when you run `mcp-for-thunderbird setup`. Some package managers keep each version in its own folder and a link to the current version in their `bin` folder: Homebrew, for example, keeps the program under `Cellar/mcp-for-thunderbird/<version>/` and the link in `$(brew --prefix)/bin`. When setup is started through that link (for example as `mcp-for-thunderbird setup` with that `bin` folder on your command path), it records the link, which keeps working after an upgrade. When setup was started from the versioned folder, or by a version that recorded the versioned folder, run `mcp-for-thunderbird setup` again after the upgrade, and run `setup --clients=…` again for the AI apps you use. Setup replaces the entries it wrote for the old folder. An entry that has had a setting added to it since setup wrote it is left as it is and reported, as described under Connecting AI apps above. The Windows installer, the macOS package and the `.deb` install to a fixed folder and need nothing extra.
 
 ## Uninstalling
 
 First remove the add-on: in Thunderbird, open **Add-ons and Themes**, find MCP for Thunderbird, and choose **Remove**. Then remove the host:
 
-- **Windows:** open **Settings**, then **Apps**, then **Installed apps**. Find MCP for Thunderbird and choose **Uninstall**. This removes the program, its registration with Thunderbird, and its entries in your AI apps.
+- **Windows:** open **Settings**, then **Apps**, then **Installed apps**. Find MCP for Thunderbird and choose **Uninstall**. This removes the program and its registration with Thunderbird, and runs `setup --uninstall`, which removes the entries setup wrote in your AI apps as described below.
 - **macOS:** in Terminal, run
 
   ```
@@ -211,7 +211,7 @@ First remove the add-on: in Thunderbird, open **Add-ons and Themes**, find MCP f
 - **Linux (`.deb`):** run `mcp-for-thunderbird setup --uninstall` as each user who ran setup, then `sudo apt remove mcp-for-thunderbird`.
 - **Linux (`.tar.gz`):** run `~/.local/bin/mcp-for-thunderbird setup --uninstall`, then delete the program with `rm ~/.local/bin/mcp-for-thunderbird`.
 
-`setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry that setup wrote in each AI app, keeping a backup of each file it changes. An `mcp-for-thunderbird` entry you wrote by hand is left in place, and setup reports it. The Claude Code entry is removed through the `claude` command; if that command is not on your command path at the time, remove the entry yourself with `claude mcp remove mcp-for-thunderbird` in a terminal.
+`setup --uninstall` removes the registration with Thunderbird and, in each AI app, the `mcp-for-thunderbird` entry that setup treats as its own (exactly what setup writes, as described under Connecting AI apps above), keeping a backup of each file it changes. Every other `mcp-for-thunderbird` entry, including one setup wrote that has had a setting added to it, is left in place, and setup reports it. The Claude Code entry is removed through the `claude` command; if that command is not on your command path at the time, remove the entry yourself with `claude mcp remove mcp-for-thunderbird` in a terminal.
 
 The host also keeps a small connection file, holding its port and access key while Thunderbird runs, in a folder you can delete afterwards:
 
