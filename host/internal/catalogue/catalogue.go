@@ -80,7 +80,7 @@ var tools = []Tool{
 			"limit":          m{"type": "integer", "minimum": 1, "maximum": 200, "default": 25, "description": "Maximum results."},
 		})},
 	{Name: "mail_read", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Returns one message's headers, plain-text body (wrapped as untrusted content) and attachment names.",
+		Description: "Returns one message's headers, plain-text body (wrapped as untrusted content) and attachment names. The body is the text a reader sees; plainTextDiffers is true when the message's plain-text alternative says something that text does not.",
 		Input: schema([]string{"id"}, m{
 			"account": account(), "id": str("Message id from mail_search."),
 			"max_chars": m{"type": "integer", "minimum": 1, "maximum": 50000, "default": 8000, "description": "Maximum body characters."},

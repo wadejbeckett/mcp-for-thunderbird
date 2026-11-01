@@ -302,6 +302,8 @@ func fileError(err error, name string) error {
 		return bridge.CallError{Code: "too_large", Message: "Attachment is larger than 50 MiB"}
 	case errors.Is(err, fs.ErrNotExist) && name != "":
 		return bridge.CallError{Code: "not_found", Message: "No file named " + strconv.Quote(name) + " in the attachment folder"}
+	case errors.Is(err, files.ErrNotRegular):
+		return bridge.CallError{Code: "refused", Message: strconv.Quote(name) + " in the attachment folder is not an ordinary file"}
 	}
 	return bridge.CallError{Code: "thunderbird_error", Message: "Could not use the attachment folder"}
 }

@@ -27,6 +27,7 @@ import (
 
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/bridge"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connfile"
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/files"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/nativemsg"
 )
 
@@ -635,5 +636,15 @@ func TestNotSupportedErrorCodeKept(t *testing.T) {
 	res, err := call(t, cs, "mail_search", map[string]any{})
 	if err != nil || !res.IsError || text(res) != "not_supported: Needs Thunderbird 153 or later." {
 		t.Fatalf("err=%v text=%q", err, text(res))
+	}
+}
+
+// An attachment-folder entry that is not an ordinary file (a FIFO, a
+// folder, a device) is refused with its own message, not the generic one.
+func TestFileErrorNotRegular(t *testing.T) {
+	err := fileError(files.ErrNotRegular, "pipe")
+	var ce bridge.CallError
+	if !errors.As(err, &ce) || ce.Code != "refused" || !strings.Contains(ce.Message, "not an ordinary file") {
+		t.Fatalf("fileError(ErrNotRegular) = %#v", err)
 	}
 }
