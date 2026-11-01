@@ -182,11 +182,54 @@ test("Authentication-Results: a quoted property value or a comment cannot pose a
   assert.deepEqual(ar("mx.example; spf=pass smtp.mailfrom=x dmarc=pass; dmarc=fail"), { spf: "pass", dkim: "none", dmarc: "fail" });
   assert.deepEqual(ar("mx.example; spf=pass policy.dmarc=pass"), { spf: "pass", dkim: "none", dmarc: "none" });
   // the authserv-id clause is not a result; a version, spaces and none are allowed
-  assert.deepEqual(ar("dmarc=pass; spf = fail"), { spf: "fail", dkim: "none", dmarc: "none" });
+  assert.deepEqual(ar("mx.example; spf = fail"), { spf: "fail", dkim: "none", dmarc: "none" });
   assert.deepEqual(ar("mx.example 1; dkim/1=pass header.d=x"), { spf: "none", dkim: "pass", dmarc: "none" });
   assert.deepEqual(ar("mx.example; none"), { spf: "none", dkim: "none", dmarc: "none" });
   // an unterminated quoted string or comment hides the rest
   assert.deepEqual(ar('mx.example; spf=pass smtp.mailfrom="x; dmarc=pass'), { spf: "pass", dkim: "none", dmarc: "none" });
+});
+
+test("Authentication-Results as Microsoft 365, Gmail, Fastmail and Postfix with OpenDKIM/OpenDMARC write it", () => {
+  const ar = (v) => authResults({ "authentication-results": [v] });
+  // Microsoft 365 (Exchange Online) writes no authserv-id
+  assert.deepEqual(
+    ar(
+      "spf=pass (sender IP is 40.107.22.55) smtp.mailfrom=contoso.com; dkim=pass (signature was verified) header.d=contoso.com;dmarc=pass action=none header.from=contoso.com;compauth=pass reason=100",
+    ),
+    { spf: "pass", dkim: "pass", dmarc: "pass" },
+  );
+  assert.deepEqual(
+    ar("spf=fail (sender IP is 203.0.113.9) smtp.mailfrom=contoso.com; dkim=none (message not signed) header.d=none;dmarc=fail action=quarantine header.from=contoso.com;compauth=fail reason=000"),
+    { spf: "fail", dkim: "none", dmarc: "fail" },
+  );
+  // Gmail
+  assert.deepEqual(
+    ar(
+      "mx.google.com;\r\n       dkim=pass header.i=@example.com header.s=20230601 header.b=AbCd1234;\r\n       spf=pass (google.com: domain of bounce@example.com designates 203.0.113.5 as permitted sender) smtp.mailfrom=bounce@example.com;\r\n       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com",
+    ),
+    { spf: "pass", dkim: "pass", dmarc: "pass" },
+  );
+  // Fastmail
+  assert.deepEqual(
+    ar(
+      "mx3.messagingengine.com; dkim=pass (2048-bit rsa key sha256) header.d=example.com header.i=@example.com header.b=AbCdEf header.a=rsa-sha256 header.s=fm1 x-bits=2048; dmarc=pass policy.published-domain-policy=none policy.applied-disposition=none policy.evaluated-disposition=none (p=none,d=none,d.eval=none) policy.policy-from=p header.from=example.com; iprev=pass smtp.remote-ip=203.0.113.5 (mail.example.com); spf=softfail smtp.mailfrom=sender@example.com smtp.helo=mail.example.com; x-aligned-from=pass (Address match); x-me-sender=none",
+    ),
+    { spf: "softfail", dkim: "pass", dmarc: "pass" },
+  );
+  // Postfix with policyd-spf, OpenDKIM and OpenDMARC (comments hold ";")
+  assert.deepEqual(ar("mail.example.org; spf=pass (sender SPF authorized) smtp.mailfrom=example.com (client-ip=203.0.113.5; helo=mx.example.com; envelope-from=a@example.com; receiver=<UNKNOWN>)"), {
+    spf: "pass",
+    dkim: "none",
+    dmarc: "none",
+  });
+  assert.deepEqual(ar('mail.example.org; dkim=pass (2048-bit key; unprotected) header.d=example.com header.i=@example.com header.b="AbCd1234"'), {
+    spf: "none",
+    dkim: "pass",
+    dmarc: "none",
+  });
+  assert.deepEqual(ar("mail.example.org; dmarc=fail (p=reject dis=none) header.from=example.com"), { spf: "none", dkim: "none", dmarc: "fail" });
+  // with no authserv-id, a quoted value still cannot pose as a result
+  assert.deepEqual(ar('spf=pass smtp.mailfrom="x;dmarc=pass"@evil.example; dmarc=fail header.from=evil.example'), { spf: "pass", dkim: "none", dmarc: "fail" });
 });
 
 test("rgb() with spaces or a slash alpha, and CSS comments, do not hide text from the cleaner", () => {

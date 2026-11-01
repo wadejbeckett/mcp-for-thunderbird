@@ -175,13 +175,17 @@ const RESINFO = /^\s*([a-z0-9][a-z0-9_-]*)\s*(?:\/\s*\d+\s*)?=\s*([a-z]+)/i;
 // into the authserv-id and one clause per result, and only the leading
 // method=result of each clause counts, so a property value (such as
 // smtp.mailfrom="x;dmarc=pass"@evil.example) cannot pose as a result.
+// Microsoft 365 (Exchange Online) writes no authserv-id, so the first
+// clause is taken as the authserv-id only when it is not a method=result
+// clause (an authserv-id holds no "=").
 // With several dkim results (several signatures) one pass is a pass.
 export function authResults(headers) {
   const out = { spf: "none", dkim: "none", dmarc: "none" };
   const v = headers && typeof headers === "object" ? headers["authentication-results"] : undefined;
   const first = Array.isArray(v) ? v[0] : v;
   if (typeof first !== "string") return out;
-  const clauses = bare(first.slice(0, 16_384)).split(";").slice(1);
+  const clauses = bare(first.slice(0, 16_384)).split(";");
+  if (!RESINFO.test(clauses[0])) clauses.shift();
   for (const clause of clauses) {
     const m = RESINFO.exec(clause);
     if (!m) continue;
