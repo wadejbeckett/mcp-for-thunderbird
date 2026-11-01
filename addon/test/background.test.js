@@ -115,6 +115,27 @@ test("tools are re-sent when settings change in storage", async () => {
   assert.deepEqual(port.sentOfType("config").at(-1), { type: "config", attachmentDir: "/elsewhere" });
 });
 
+test("an attachment folder changed while the hello is built still reaches the host", async () => {
+  // With direct send on, building the hello waits for Thunderbird's
+  // permission check; the folder is changed in exactly that gap.
+  await save({ send: { enabled: true, allow: ["x@example.org"] } });
+  const contains = mock.messenger.permissions.contains;
+  let changed = false;
+  mock.messenger.permissions.contains = async (arg) => {
+    if (!changed) {
+      changed = true;
+      await save({ attachmentDir: "/changed-meanwhile" });
+      await flush();
+    }
+    return contains(arg);
+  };
+  await bg.start();
+  await flush();
+  const port = mock.lastPort();
+  assert.equal(port.sentOfType("hello")[0].attachmentDir, "/home/u/MCP");
+  assert.deepEqual(port.sentOfType("config").at(-1), { type: "config", attachmentDir: "/changed-meanwhile" });
+});
+
 test("blobs are reassembled into call.args.attachments[i].data and freed after the call", async () => {
   await save({ groups: { compose: true } });
   let got;

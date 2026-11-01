@@ -165,8 +165,11 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     });
     helloSent = true;
     await showState();
-    // Settings may have changed while the hello was being built.
-    await refreshTools();
+    // Settings may have changed while the hello was being built, before
+    // onSettingsChanged could send them: catch up on tools and folder.
+    const now = await load();
+    await refreshTools(now);
+    syncConfig(now);
   }
 
   function scheduleReconnect() {
@@ -305,6 +308,12 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     paused = Boolean(s.paused);
     showState();
     await refreshTools(s);
+    syncConfig(s);
+  }
+
+  // syncConfig tells the host the attachment folder when it differs from
+  // the one the host was last given.
+  function syncConfig(s) {
     if (port && helloSent && s.attachmentDir !== lastDir) {
       lastDir = s.attachmentDir;
       send({ type: "config", attachmentDir: s.attachmentDir });
