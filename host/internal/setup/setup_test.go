@@ -455,9 +455,9 @@ func TestCodexPathQuoted(t *testing.T) {
 	if s := status(t, Configure([]string{"codex"}, win), "codex"); !s.Configured || s.Error != "" {
 		t.Fatalf("configure: %+v", s)
 	}
-	cmd, args, ok, err := codexEntry(p)
-	if err != nil || !ok || cmd != win || !reflect.DeepEqual(args, []string{"connect"}) {
-		t.Fatalf("round trip: %q %v %v %v", cmd, args, ok, err)
+	e, ok, err := codexEntry(p)
+	if err != nil || !ok || e.Command != win || !reflect.DeepEqual(e.Args, []string{"connect"}) || e.other {
+		t.Fatalf("round trip: %+v %v %v", e, ok, err)
 	}
 }
 
@@ -569,8 +569,15 @@ func TestDetectMissing(t *testing.T) {
 }
 
 func TestCodexRemoveMiddleKeepsNeighbours(t *testing.T) {
+	// codexWithout drops the table with its sub-tables. (Uninstall does
+	// not reach it with a sub-table: an env table makes the entry
+	// hand-edited, as TestHandEditedEntryKept checks.)
+	withSub := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
+	if got, want := string(codexWithout([]byte(withSub))), "model = \"o3\"\n\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"; got != want {
+		t.Fatalf("codexWithout:\n%q\nwant:\n%q", got, want)
+	}
 	home, _ := sandbox(t)
-	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
+	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
 	p := codexSetup(t, home, orig)
 	for _, s := range Uninstall() {
 		if s.Error != "" {
@@ -821,6 +828,79 @@ func TestHandWrittenEntryKept(t *testing.T) {
 			b, _ := os.ReadFile(logf)
 			t.Errorf("claude ran: %s", b)
 		}
+	}
+}
+
+// An entry of setup's shape that a person has added keys to (env,
+// disabled, enabled = false, a timeout, an env sub-table) is hand-edited:
+// setup after an upgrade neither replaces it (which would drop those
+// keys) nor removes it, and reports it.
+func TestHandEditedEntryKept(t *testing.T) {
+	old, _ := json.Marshal(oldBin)
+	jsonCases := []string{
+		`{"command":` + string(old) + `,"args":["connect"],"env":{"A":"1"}}`,
+		`{"command":` + string(old) + `,"args":["connect"],"disabled":true}`,
+		`{"command":` + string(old) + `,"args":["connect"],"env":{}}`,
+	}
+	claudeCases := []string{
+		`{"type":"stdio","command":` + string(old) + `,"args":["connect"],"env":{"A":"1"}}`,
+		`{"type":"stdio","command":` + string(old) + `,"args":["connect"],"env":{},"disabled":true}`,
+		`{"type":"http","command":` + string(old) + `,"args":["connect"],"env":{}}`,
+	}
+	tomlHead := "[mcp_servers.mcp-for-thunderbird]\ncommand = " + tomlString(oldBin) + "\nargs = [\"connect\"]\n"
+	codexCases := []string{
+		tomlHead + "enabled = false\n",
+		tomlHead + "tool_timeout_sec = 30\n",
+		tomlHead + "startup_timeout_sec = 20\n",
+		tomlHead + "\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n",
+		"[mcp_servers]\nmcp-for-thunderbird = { command = " + tomlString(oldBin) + ", args = [\"connect\"], enabled = false }\n",
+	}
+	type file struct{ name, path, content string }
+	check := func(t *testing.T, fs []file, logf string) {
+		t.Helper()
+		for _, f := range fs {
+			if s := status(t, Configure([]string{f.name}, binPath), f.name); s.Error == "" || s.Configured {
+				t.Errorf("%s: hand-edited entry replaced: %+v", f.name, s)
+			}
+			if s := status(t, Uninstall(), f.name); !strings.Contains(s.Error, "left in place") {
+				t.Errorf("%s: uninstall did not report the kept entry: %+v", f.name, s)
+			}
+			if b, _ := os.ReadFile(f.path); string(b) != f.content {
+				t.Errorf("%s changed:\n%s\nwas:\n%s", f.name, b, f.content)
+			}
+			if bk := backups(t, f.path); len(bk) != 0 {
+				t.Errorf("%s backed up on refusal: %v", f.name, bk)
+			}
+		}
+		if _, err := os.Stat(logf); !os.IsNotExist(err) {
+			b, _ := os.ReadFile(logf)
+			t.Errorf("claude ran: %s", b)
+		}
+	}
+	for _, e := range jsonCases {
+		home, _ := sandbox(t)
+		content := `{"mcpServers":{"mcp-for-thunderbird":` + e + `}}`
+		os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+		cursor := filepath.Join(home, ".cursor", "mcp.json")
+		os.WriteFile(cursor, []byte(content), 0o600)
+		check(t, []file{
+			{"claude-desktop", claudeDesktopConfig(t, home, content), content},
+			{"cursor", cursor, content},
+		}, filepath.Join(t.TempDir(), "none"))
+	}
+	if runtime.GOOS != "windows" {
+		for _, e := range claudeCases {
+			home, bin := sandbox(t)
+			logf := fakeClaude(t, bin, 0)
+			content := `{"mcpServers":{"mcp-for-thunderbird":` + e + `}}`
+			cj := filepath.Join(home, ".claude.json")
+			os.WriteFile(cj, []byte(content), 0o600)
+			check(t, []file{{"claude-code", cj, content}}, logf)
+		}
+	}
+	for _, content := range codexCases {
+		home, _ := sandbox(t)
+		check(t, []file{{"codex", codexSetup(t, home, content), content}}, filepath.Join(t.TempDir(), "none"))
 	}
 }
 

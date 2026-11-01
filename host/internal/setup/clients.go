@@ -172,6 +172,9 @@ func cursorPath() (string, bool, error) {
 type entry struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
+	// other is set when the entry has a key setup does not write (env,
+	// disabled, a timeout, or any other).
+	other bool
 }
 
 func (e entry) matches(binPath string) bool {
@@ -199,18 +202,42 @@ func ourCommand(cmd string) bool {
 	return false
 }
 
-// ourShape reports whether e has the shape setup writes, perhaps for
+// ourShape reports whether e is exactly what setup writes, perhaps for
 // another copy of the host program: command is the host program in any
-// folder, args ["connect"]. Any other entry (an HTTP address, other
-// arguments such as --instance) was written by hand.
+// folder, args ["connect"], and no other key. Any other entry (an HTTP
+// address, other arguments such as --instance, or one with env, disabled,
+// a timeout or any other key added) was written or edited by hand, and
+// setup neither replaces nor removes it.
 func (e entry) ourShape() bool {
-	return ourCommand(e.Command) && reflect.DeepEqual(e.Args, []string{"connect"})
+	return !e.other && ourCommand(e.Command) && reflect.DeepEqual(e.Args, []string{"connect"})
 }
 
-// ourJSONEntry reports whether raw is an entry of our shape.
-func ourJSONEntry(raw json.RawMessage) bool {
+// ourJSONEntry reports whether raw is an entry of our shape. For Claude
+// Code (claudeCode set) the "type": "stdio" and empty "env" that `claude
+// mcp add` records are part of that shape.
+func ourJSONEntry(raw json.RawMessage, claudeCode bool) bool {
+	o, err := parseObject(raw)
+	if err != nil {
+		return false
+	}
 	var e entry
-	return json.Unmarshal(raw, &e) == nil && e.ourShape()
+	if json.Unmarshal(raw, &e) != nil {
+		return false
+	}
+	for _, k := range o.keys {
+		var v bytes.Buffer
+		if json.Compact(&v, o.vals[k]) != nil {
+			return false
+		}
+		switch {
+		case k == "command" || k == "args":
+		case claudeCode && k == "type" && v.String() == `"stdio"`:
+		case claudeCode && k == "env" && v.String() == "{}":
+		default:
+			e.other = true
+		}
+	}
+	return e.ourShape()
 }
 
 func jsonClient(name string, path func() (string, bool, error)) client {
@@ -252,8 +279,8 @@ func jsonClient(name string, path func() (string, bool, error)) client {
 			if servers == nil {
 				servers = &object{}
 			}
-			if old, ok := servers.get(EntryName); ok && !ourJSONEntry(old) {
-				return fmt.Errorf("%s already has an mcp-for-thunderbird entry that setup did not write; it was left unchanged (remove that entry and set up again to replace it)", filepath.Base(p))
+			if old, ok := servers.get(EntryName); ok && !ourJSONEntry(old, false) {
+				return fmt.Errorf("%s already has an mcp-for-thunderbird entry that setup did not write, or one with settings added to it; it was left unchanged (remove that entry and set up again to replace it)", filepath.Base(p))
 			}
 			raw, _ := json.Marshal(entry{Command: binPath, Args: []string{"connect"}})
 			servers.set(EntryName, raw)
@@ -277,8 +304,8 @@ func jsonClient(name string, path func() (string, bool, error)) client {
 			if !ok {
 				return nil
 			}
-			if !ourJSONEntry(old) {
-				return fmt.Errorf("the mcp-for-thunderbird entry in %s was not written by setup; it was left in place", filepath.Base(p))
+			if !ourJSONEntry(old, false) {
+				return fmt.Errorf("the mcp-for-thunderbird entry in %s was not written by setup, or has settings added to it; it was left in place", filepath.Base(p))
 			}
 			servers.del(EntryName)
 			doc.set("mcpServers", servers.encode(""))
@@ -490,8 +517,8 @@ func claudeCodeAdd(binPath string) error {
 		return err
 	}
 	if ok {
-		if !ourJSONEntry(raw) {
-			return errors.New("Claude Code already has an mcp-for-thunderbird entry that setup did not write; it was left unchanged (remove it with `claude mcp remove --scope user mcp-for-thunderbird` and set up again to replace it)")
+		if !ourJSONEntry(raw, true) {
+			return errors.New("Claude Code already has an mcp-for-thunderbird entry that setup did not write, or one with settings added to it; it was left unchanged (remove it with `claude mcp remove --scope user mcp-for-thunderbird` and set up again to replace it)")
 		}
 		if err := runClaude("mcp", "remove", "--scope", "user", EntryName); err != nil {
 			return err
@@ -511,8 +538,8 @@ func claudeCodeRemove() error {
 	if err != nil || !ok {
 		return err
 	}
-	if !ourJSONEntry(raw) {
-		return errors.New("Claude Code's mcp-for-thunderbird entry was not written by setup; it was left in place")
+	if !ourJSONEntry(raw, true) {
+		return errors.New("Claude Code's mcp-for-thunderbird entry was not written by setup, or has settings added to it; it was left in place")
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
 		return errors.New("claude was not found on PATH; remove the entry with: claude mcp remove --scope user mcp-for-thunderbird")
@@ -592,19 +619,19 @@ func codexPath() (string, string, error) {
 	return dir, filepath.Join(dir, "config.toml"), nil
 }
 
-// codexEntry parses config.toml and returns our server's command and args.
-func codexEntry(p string) (cmd string, args []string, ok bool, err error) {
+// codexEntry parses config.toml and returns our server's entry.
+func codexEntry(p string) (e entry, ok bool, err error) {
 	b, err := os.ReadFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil, false, nil
+		return e, false, nil
 	}
 	if err != nil {
-		return "", nil, false, err
+		return e, false, err
 	}
 	return codexParse(b)
 }
 
-func codexParse(b []byte) (cmd string, args []string, ok bool, err error) {
+func codexParse(b []byte) (e entry, ok bool, err error) {
 	var doc struct {
 		MCPServers map[string]struct {
 			Command string   `toml:"command"`
@@ -612,10 +639,24 @@ func codexParse(b []byte) (cmd string, args []string, ok bool, err error) {
 		} `toml:"mcp_servers"`
 	}
 	if err := toml.Unmarshal(b, &doc); err != nil {
-		return "", nil, false, fmt.Errorf("config.toml could not be read (%v); it was left unchanged", firstLine(err.Error()))
+		return e, false, fmt.Errorf("config.toml could not be read (%v); it was left unchanged", firstLine(err.Error()))
 	}
-	e, ok := doc.MCPServers[EntryName]
-	return e.Command, e.Args, ok, nil
+	// The same table with every key, to see whether it has any key setup
+	// does not write (enabled, a timeout, an env sub-table).
+	var keys struct {
+		MCPServers map[string]map[string]any `toml:"mcp_servers"`
+	}
+	if err := toml.Unmarshal(b, &keys); err != nil {
+		return e, false, fmt.Errorf("config.toml could not be read (%v); it was left unchanged", firstLine(err.Error()))
+	}
+	s, ok := doc.MCPServers[EntryName]
+	e = entry{Command: s.Command, Args: s.Args}
+	for k := range keys.MCPServers[EntryName] {
+		if k != "command" && k != "args" {
+			e.other = true
+		}
+	}
+	return e, ok, nil
 }
 
 func firstLine(s string) string {
@@ -634,11 +675,11 @@ func codexState(binPath string) (bool, bool, error) {
 	if !exists(dir) && lookErr != nil {
 		return false, false, nil
 	}
-	cmd, args, ok, err := codexEntry(p)
+	e, ok, err := codexEntry(p)
 	if err != nil {
 		return true, false, err
 	}
-	return true, ok && (entry{cmd, args}).matches(binPath), nil
+	return true, ok && e.matches(binPath), nil
 }
 
 const codexHeader = "[mcp_servers." + EntryName + "]"
@@ -652,7 +693,7 @@ func codexAdd(binPath string) error {
 	if err != nil {
 		return err
 	}
-	cmd, args, ok, err := codexEntry(p)
+	e, ok, err := codexEntry(p)
 	if err != nil {
 		return err
 	}
@@ -661,8 +702,8 @@ func codexAdd(binPath string) error {
 		return err
 	}
 	if ok {
-		if !(entry{cmd, args}).ourShape() {
-			return errors.New("config.toml already has an mcp-for-thunderbird entry that setup did not write; it was left unchanged (remove that table and set up again to replace it)")
+		if !e.ourShape() {
+			return errors.New("config.toml already has an mcp-for-thunderbird entry that setup did not write, or one with settings added to it; it was left unchanged (remove that table and set up again to replace it)")
 		}
 		old = codexWithout(old)
 	}
@@ -689,12 +730,12 @@ func codexRemove() error {
 	if err != nil {
 		return err
 	}
-	cmd, args, ok, err := codexEntry(p)
+	e, ok, err := codexEntry(p)
 	if err != nil || !ok {
 		return err
 	}
-	if !(entry{cmd, args}).ourShape() {
-		return errors.New("the mcp-for-thunderbird entry in config.toml was not written by setup; it was left in place")
+	if !e.ourShape() {
+		return errors.New("the mcp-for-thunderbird entry in config.toml was not written by setup, or has settings added to it; it was left in place")
 	}
 	old, err := os.ReadFile(p)
 	if err != nil {
@@ -760,8 +801,8 @@ func codexWithout(old []byte) []byte {
 // checkCodex parses new content and confirms our entry is present with
 // binPath (want) or absent (!want) before anything is written.
 func checkCodex(b []byte, binPath string, want bool) error {
-	cmd, args, ok, err := codexParse(b)
-	if err != nil || ok != want || (want && !(entry{cmd, args}).matches(binPath)) {
+	e, ok, err := codexParse(b)
+	if err != nil || ok != want || (want && (e.other || !e.matches(binPath))) {
 		return errors.New("config.toml has a layout setup cannot change safely; it was left unchanged")
 	}
 	return nil
