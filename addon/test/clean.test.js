@@ -313,9 +313,56 @@ test("rules in <style> blocks hide text: class, id, element and grouped selector
     </body></html>`;
   const text = htmlToText(html);
   assert.doesNotMatch(text, /HIDDEN/);
-  assert.match(text, /Shown on desktop\./, "rules inside @media are not applied");
+  assert.match(text, /Shown on desktop\./, "a rule inside @media that hides does not hide");
   assert.match(text, /Shown\./);
   assert.match(text, /Shown inline wins\./);
+});
+
+test("a rule inside @media or @supports makes what it sets unknown, so it neither hides nor leaves a base rule hiding", () => {
+  // mobile-first: hidden by default, shown on wider screens
+  assert.equal(
+    htmlToText('<style>.d{display:none} @media screen and (min-width:600px){.d{display:block !important}}</style><div class="d">Desktop text</div>'),
+    "Desktop text",
+  );
+  // even over an inline display:none, which an !important rule beats
+  assert.equal(htmlToText('<style>@media screen{.d{display:block !important}}</style><div class="d" style="display:none">Inline hidden, media shown.</div>'), "Inline hidden, media shown.");
+  const html = `<style>
+    .w { color: #ffffff }
+    .base { display: none }
+    @supports (display: grid) {
+      @media (min-width: 480px) { .w { color: #000 } .base { display: block } }
+      @keyframes spin { from { opacity: 0 } to { opacity: 1 } }
+    }
+    @media print { .p { display: none } .q { font-size: 0 } }
+    @font-face { font-family: x; src: url(x.woff) }
+    @page { margin: 0 }
+    @import url(x.css);
+    .after { display: none }
+    </style>
+    <p class="w">Shown white on wide screens.</p>
+    <p class="base">Shown nested.</p>
+    <p class="p">Shown on screen.</p>
+    <p class="q">Shown full size.</p>
+    <p class="after">HIDDEN-AFTER</p>
+    <p class="anim">Shown animated.</p>`;
+  const text = htmlToText(html);
+  assert.match(text, /Shown white on wide screens\./);
+  assert.match(text, /Shown nested\./, "rules in @media nested in @supports count");
+  assert.match(text, /Shown on screen\./, "a media rule that hides does not hide");
+  assert.match(text, /Shown full size\./);
+  assert.match(text, /Shown animated\./, "@keyframes blocks are ignored");
+  assert.doesNotMatch(text, /HIDDEN/, "rules after the @-blocks still apply");
+  // an unclosed @media block runs to the end of the sheet
+  assert.equal(htmlToText('<style>.h{display:none} @media screen { .h { display:block }</style><p class="h">Shown.</p>'), "Shown.");
+});
+
+test("style sheet parsing is linear on deeply nested or many empty @-blocks", () => {
+  for (const css of ["@media a{".repeat(25_000), "@x{}".repeat(25_000), "@media a{}".repeat(10_000)]) {
+    const t0 = performance.now();
+    assert.equal(htmlToText(`<style>${css}</style><p>Shown.</p>`), "Shown.");
+    const ms = performance.now() - t0;
+    assert.ok(ms < 1000, `took ${ms} ms`);
+  }
 });
 
 test("a broken selector in a <style> block is skipped", () => {

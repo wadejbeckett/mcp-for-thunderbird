@@ -319,6 +319,9 @@ function parseDecls(text) {
 // conflicting property never hides anything (ruling R29: losing real text
 // is worse than leaving crafted hidden text inside the wrapper).
 const CONFLICT = Symbol("conflict");
+// STRONG is a sheet CONFLICT in which an !important rule takes part, so
+// the inline style cannot settle it either.
+const STRONG = Symbol("important conflict");
 
 const num = (v) => (v == null || v === CONFLICT ? NaN : parseFloat(v));
 const val = (st, k) => {
@@ -478,13 +481,17 @@ function prunes(st, em) {
 // Style sheet rules count as far as hiding goes: a rule's declarations
 // reach the elements its selectors match through querySelectorAll, inline
 // style over them. Rules that disagree on a property for one element make
-// it CONFLICT (specificity is not weighed). @-rules (@media, @supports and
-// the like) are not applied at all, so a sheet that hides text only inside
-// @media is not followed. The work is bounded: at most MAX_SHEET
-// characters and MAX_RULES rules; QUERY_BUDGET counts elements scanned
-// (the document's size per selector) and APPLY_BUDGET matched elements
-// times declarations; once either runs out the remaining rules are
-// ignored, which can only show more text.
+// it CONFLICT (specificity is not weighed). A rule inside @media,
+// @supports or @container applies only on some screens or in some
+// readers, so every property it sets on an element is CONFLICT: unknown,
+// so it hides nothing and it cancels what a plain rule hides (a
+// mobile-first sheet that hides a block and shows it again on wider
+// screens keeps its text). Other @-rules (@font-face, @keyframes,
+// @import, @page and the like) are ignored. The work is bounded: at most
+// MAX_SHEET characters and MAX_RULES rules; QUERY_BUDGET counts elements
+// scanned (the document's size per selector) and APPLY_BUDGET matched
+// elements times declarations; once either runs out the remaining rules
+// are ignored, which can only show more text.
 const MAX_SHEET = 100_000;
 const MAX_RULES = 500;
 const MAX_SELECTOR = 200;
@@ -495,36 +502,54 @@ const SHEET_PROPS = new Set([
   "margin-left", "margin-top", "text-indent", "clip", "clip-path", "transform", "scale", "translate",
 ]);
 
-// rules splits style sheet text into [selector, declarations] pairs,
-// skipping @-rules with their blocks.
+// CONDITIONAL names the @-rules whose rules apply only sometimes.
+const CONDITIONAL = /^@(?:media|supports|container)\b/i;
+
+// rules splits style sheet text into [selector, declarations, conditional]
+// triples, conditional for a rule inside an @media, @supports or
+// @container block (at any depth); other @-rules are skipped with their
+// blocks. Matching braces are found in one pass first, so the scan is
+// linear however deeply blocks nest.
 function rules(css) {
+  const close = new Map();
+  const opens = [];
+  for (let k = 0; k < css.length; k++) {
+    if (css[k] === "{") opens.push(k);
+    else if (css[k] === "}" && opens.length > 0) close.set(opens.pop(), k);
+  }
+  for (const k of opens) close.set(k, css.length); // unclosed: to the end
   const out = [];
-  let i = 0;
-  while (i < css.length && out.length < MAX_RULES) {
-    const open = css.indexOf("{", i);
-    const semi = css.indexOf(";", i);
-    const head = css.slice(i, open < 0 ? css.length : open).trim();
-    if (head.startsWith("@") && semi >= 0 && (open < 0 || semi < open)) {
-      i = semi + 1; // @import, @charset
+  const frames = [{ i: 0, end: css.length, cond: false }];
+  while (frames.length > 0 && out.length < MAX_RULES) {
+    const f = frames[frames.length - 1];
+    let k = f.i;
+    while (k < f.end && /\s/.test(css[k])) k++;
+    if (k >= f.end) {
+      frames.pop();
       continue;
     }
-    if (open < 0) break;
-    // the block runs to its matching brace
-    let depth = 1;
-    let j = open + 1;
-    while (j < css.length && depth > 0) {
-      if (css[j] === "{") depth++;
-      else if (css[j] === "}") depth--;
-      j++;
+    const at = css[k] === "@";
+    // a head runs to its block; an @-rule without one ends at ";"
+    while (k < f.end && css[k] !== "{" && !(at && css[k] === ";")) k++;
+    const head = css.slice(f.i, k).trim();
+    if (k >= f.end) {
+      frames.pop();
+      continue;
     }
-    if (!head.startsWith("@")) out.push([head, css.slice(open + 1, j - 1)]);
-    i = j;
+    if (css[k] === ";") {
+      f.i = k + 1; // @import, @charset
+      continue;
+    }
+    const end = close.get(k);
+    f.i = end + 1;
+    if (!at) out.push([head, css.slice(k + 1, end), f.cond]);
+    else if (CONDITIONAL.test(head)) frames.push({ i: k + 1, end, cond: true });
   }
   return out;
 }
 
 // sheetStyles maps each element a <style> rule reaches to prop ->
-// {v, imp} or CONFLICT (only the properties that can hide text).
+// {v, imp}, CONFLICT or STRONG (only the properties that can hide text).
 function sheetStyles(doc) {
   const out = new Map();
   let css = "";
@@ -540,7 +565,7 @@ function sheetStyles(doc) {
   const size = doc.getElementsByTagName("*").length;
   let query = STYLE_BUDGET.query;
   let apply = STYLE_BUDGET.apply;
-  for (const [selector, body] of rules(css)) {
+  for (const [selector, body, cond] of rules(css)) {
     const decls = [...parseDecls(body)].filter(([k]) => SHEET_PROPS.has(k));
     // :has() can cost a scan per element; very long selectors are skipped too.
     if (decls.length === 0 || !selector || selector.length > MAX_SELECTOR || /:has\s*\(/i.test(selector)) continue;
@@ -559,7 +584,11 @@ function sheetStyles(doc) {
       if (!st) out.set(el, (st = new Map()));
       for (const [k, d] of decls) {
         const had = st.get(k);
-        st.set(k, had === undefined ? d : had === CONFLICT || had.v !== d.v ? CONFLICT : { v: d.v, imp: had.imp || d.imp });
+        const known = had !== undefined && had !== CONFLICT && had !== STRONG;
+        const imp = d.imp || had === STRONG || (known && had.imp);
+        if (!cond && had === undefined) st.set(k, d);
+        else if (!cond && known && had.v === d.v) st.set(k, { v: d.v, imp });
+        else st.set(k, imp ? STRONG : CONFLICT);
       }
     }
   }
@@ -568,14 +597,14 @@ function sheetStyles(doc) {
 
 // styleOf gives an element's declarations, prop -> value or CONFLICT:
 // inline style over the sheet, except that an !important sheet value the
-// inline style disagrees with is a CONFLICT.
+// inline style disagrees with, or a STRONG one, is a CONFLICT.
 function styleOf(node, sheet) {
   const st = new Map();
   const fromSheet = sheet.get(node);
-  if (fromSheet) for (const [k, d] of fromSheet) st.set(k, d === CONFLICT ? CONFLICT : d.v);
+  if (fromSheet) for (const [k, d] of fromSheet) st.set(k, d === CONFLICT || d === STRONG ? CONFLICT : d.v);
   for (const [k, d] of parseDecls(node.getAttribute("style"))) {
     const s = fromSheet && fromSheet.get(k);
-    st.set(k, s && s !== CONFLICT && s.imp && s.v !== d.v ? CONFLICT : d.v);
+    st.set(k, s === STRONG || (s && s !== CONFLICT && s.imp && s.v !== d.v) ? CONFLICT : d.v);
   }
   return st;
 }
