@@ -94,7 +94,7 @@ GitHub Actions runs the add-on tests and the documentation check on Linux, and t
 
 The end-to-end tests start a real Thunderbird. Run them so they can never touch your own mail:
 
-- **Never against your own profile.** `run.sh` makes a throwaway profile and work folder whose names start with `mft-e2e`, under `$TMPDIR` (or `/tmp`). It refuses any other name, and any path under `~/.thunderbird`.
+- **Never against your own profile.** `run.sh` makes a new work folder for each run with `mktemp -d`, named `mft-e2e.` and random characters, under `$TMPDIR`, else `$XDG_RUNTIME_DIR`, else `/tmp`, with the throwaway profile inside it. It stops unless the folder and the profile belong to you and only you can open them (mode 0700). `MFT_E2E_DIR` and `MFT_E2E_PROFILE` choose other folders, whose names must start with `mft-e2e`; it refuses any other name, and any path under `~/.thunderbird`.
 - **A throwaway home.** On Linux, Thunderbird runs with `HOME` set to a throwaway folder, so the native messaging registration and the connection file never land in your real home folder.
 - **Only the test mail server.** Test mail goes to GreenMail, a mail server in a Docker container that listens only on `127.0.0.1`. Never point a test at a real mail account or a real address.
 - **Only its own Thunderbird.** Thunderbird runs under its own Xvfb display with `--no-remote`, and the harness stops only the process group it started. Your own Thunderbird keeps running.

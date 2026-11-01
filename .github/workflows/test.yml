@@ -28,6 +28,8 @@ jobs:
           if grep -nE '^\s*(-\s*)?uses:' .github/workflows/*.yml | grep -vE 'uses: [^@[:space:]]+@[0-9a-f]{40} # v[0-9]'; then
             echo "pin these actions to a full commit SHA with a version comment"; exit 1
           fi
+      - name: The e2e harness work directory is new and private (test/e2e/run.sh)
+        run: bash test/e2e/workdir-selftest.sh
 
   addon:
     runs-on: ubuntu-latest
