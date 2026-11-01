@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 20 October 2026.
+Last updated: 1 November 2026.
 
 This policy covers MCP for Thunderbird: the Thunderbird add-on and the host program it works with. MCP for Thunderbird lets AI apps on your computer, such as Claude Desktop, Claude Code, Codex or Cursor, work with the mail in Thunderbird, within limits you set in Thunderbird. MCP for Thunderbird is published by Wade J. Beckett, whose company is Noiz.
 
