@@ -82,7 +82,7 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and contributing
 - [docs/PLATFORMS.md](docs/PLATFORMS.md): what has been tested on each system
 
-Each published release is listed in the [official MCP Registry](https://registry.modelcontextprotocol.io/) as `io.github.wadejbeckett/mcp-for-thunderbird`, which MCP directories and apps read. Links to the registry entry and to directory listings will be added here once they are live.
+Releases are published to the [official MCP Registry](https://registry.modelcontextprotocol.io/), which MCP directories and apps read, as `io.github.wadejbeckett/mcp-for-thunderbird`. Links to the registry entry and to directory listings will be added here once they are live.
 
 ## Support this project
 
