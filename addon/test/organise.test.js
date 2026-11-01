@@ -17,7 +17,7 @@ const ACCOUNTS = [
     name: "Work",
     type: "imap",
     folders: ["INBOX", "Archives", "Trash", "Junk", "Trash/Old", "Work", "Private", "OnlyA1"],
-    specialUse: { INBOX: ["inbox"], Archives: ["archive"], Trash: ["trash"], Junk: ["junk"] },
+    specialUse: { INBOX: ["inbox"], Archives: ["archives"], Trash: ["trash"], Junk: ["junk"] },
     identities: [{ id: "id1", accountId: "a1", email: "work@example.org" }],
   },
   {
@@ -407,7 +407,7 @@ test("mail_archive is refused for an account without identities", async () => {
 });
 
 test("mail_archive is refused when an archive folder is in Local Folders", async () => {
-  const local = { id: "a4", name: "Local Folders", type: "none", folders: ["Inbox", "Archives"], specialUse: { Inbox: ["inbox"], Archives: ["archive"] } };
+  const local = { id: "a4", name: "Local Folders", type: "none", folders: ["Inbox", "Archives"], specialUse: { Inbox: ["inbox"], Archives: ["archives"] } };
   for (const ownArchive of [false, true]) {
     clearIdCache();
     const a1 = { ...ACCOUNTS[0], folders: ownArchive ? ACCOUNTS[0].folders : ["INBOX", "Trash"], specialUse: ownArchive ? ACCOUNTS[0].specialUse : { INBOX: ["inbox"] } };
@@ -431,7 +431,7 @@ test("mail_archive is refused when an archive folder is in Local Folders", async
 });
 
 test("another account's own archive folder does not block archiving", async () => {
-  const a2 = { ...ACCOUNTS[1], folders: [...ACCOUNTS[1].folders, "Archives"], specialUse: { ...ACCOUNTS[1].specialUse, Archives: ["archive"] } };
+  const a2 = { ...ACCOUNTS[1], folders: [...ACCOUNTS[1].folders, "Archives"], specialUse: { ...ACCOUNTS[1].specialUse, Archives: ["archives"] } };
   mock = install({ accounts: [ACCOUNTS[0], a2, ACCOUNTS[2]] });
   await save({ accounts: { a1: true, a3: true }, excludedFolders: [{ accountId: "a2", path: "Archives" }] });
   const m = add("a1", "INBOX", 1);

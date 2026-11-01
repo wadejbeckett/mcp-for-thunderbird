@@ -81,6 +81,20 @@ export class MockPort {
   }
 }
 
+// SPECIAL_USES is Thunderbird's MailFolderSpecialUse enum (schemas/folders.json
+// in omni.ja, the same in 140 ESR, 153 and 159). folders.query rejects any
+// other value, as Thunderbird's schema validation does, and so does a
+// fixture that gives a folder one.
+export const SPECIAL_USES = Object.freeze(["inbox", "drafts", "sent", "trash", "templates", "archives", "junk", "outbox"]);
+
+function checkSpecialUse(uses, where) {
+  for (const [i, u] of (uses || []).entries()) {
+    if (!SPECIAL_USES.includes(u)) {
+      throw new Error(`Type error for parameter ${where} (Error processing specialUse.${i}: Invalid enumeration value ${JSON.stringify(u)})`);
+    }
+  }
+}
+
 // createMessenger returns a fresh mock. `accounts` is a list of
 // {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]}}.
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
@@ -106,6 +120,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         isRoot: false,
         specialUse: (a.specialUse && a.specialUse[path]) || [],
       });
+      checkSpecialUse(folderList.at(-1).specialUse, `fixture ${a.id}:${path}`);
     }
   }
 
@@ -209,8 +224,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       },
     },
     folders: {
-      query: async (q = {}) =>
-        folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path) && (q.specialUse == null || q.specialUse.some((u) => f.specialUse.includes(u)))).map(clone),
+      query: async (q = {}) => {
+        checkSpecialUse(q.specialUse, "queryInfo");
+        return folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path) && (q.specialUse == null || q.specialUse.some((u) => f.specialUse.includes(u)))).map(clone);
+      },
       get: async (id) => {
         const f = folderList.find((x) => x.id === id);
         if (!f) throw new Error(`Folder not found: ${id}`);
@@ -331,7 +348,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          const f = folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archive"));
+          const f = folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
           if (f) h.folder = { ...f };
         }
       },

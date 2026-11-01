@@ -206,7 +206,7 @@ const ELSEWHERE = "Thunderbird may archive this account's mail into a folder of 
 // without identities such as Local Folders, any identity. That folder may be
 // in another account. The add-on API does not say which folder an identity
 // archives into, but Thunderbird marks each identity's archive folder with
-// the "archive" special use (nsMsgIdentity::setFolderPref moves the Archive
+// the "archives" special use (nsMsgIdentity::setFolderPref moves the Archive
 // flag to the folder an identity is set to, once that folder exists), so the
 // marked folders stand for the possible targets. A marked folder in another account that has identities of its
 // own is taken to be that account's. One in an account without identities
@@ -247,8 +247,8 @@ async function mailArchive(args, ctx) {
   const ids = idsArg(args);
   const run = newRun();
   const accounts = answered(await call(run, () => tb().accounts.list(false)));
-  const all = answered(await call(run, () => tb().folders.query({ specialUse: ["archive"] })));
-  const marked = (Array.isArray(all) ? all : []).filter((f) => f && realFolder(f, f.accountId) && hasUse(f, "archive"));
+  const all = answered(await call(run, () => tb().folders.query({ specialUse: ["archives"] })));
+  const marked = (Array.isArray(all) ? all : []).filter((f) => f && realFolder(f, f.accountId) && hasUse(f, "archives"));
   const checked = new Set();
   for (const accountId of accountsOf(ids)) {
     checkArchive(accountId, Array.isArray(accounts) ? accounts : [], marked, s);
