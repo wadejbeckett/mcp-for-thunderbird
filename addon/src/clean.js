@@ -235,7 +235,9 @@ function normColor(raw) {
   // other colour functions compare in one canonical spelling; an alpha
   // of 0 (after "/", or hsla's fourth argument) is transparent
   if (/^(?:hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(.*\)$/.test(v)) {
-    const canon = v.replace(/\s*([(),/])\s*/g, "$1").replace(/\s+/g, " ");
+    // white space collapsed first: /\s*([(),/])\s*/ would rescan a long
+    // run of it from every position (quadratic)
+    const canon = v.replace(/\s+/g, " ").replace(/ ?([(),/]) ?/g, "$1");
     const alpha = /\/([\d.]+%?)\)$/.exec(canon) || /^hsla?\((?:[^,()]*,){3}([\d.]+%?)\)$/.exec(canon);
     if (alpha && parseFloat(alpha[1]) === 0) return TRANSPARENT;
     return canon;
@@ -279,7 +281,9 @@ function alike(a, b) {
 // colorIn finds the colour in a `background` shorthand; null when it has
 // none (an image only).
 function colorIn(value) {
-  const tokens = String(value).toLowerCase().match(/#[0-9a-f]{3,8}\b|(?:rgba?|hsla?)\([^)]*\)|[a-z]+/g) || [];
+  // [^()]*, not [^)]*: an unclosed "rgb(" then stops at the next "(", so
+  // many of them do not each scan to the end (quadratic).
+  const tokens = String(value).toLowerCase().match(/#[0-9a-f]{3,8}\b|(?:rgba?|hsla?)\([^()]*\)|[a-z]+/g) || [];
   for (const t of tokens) {
     if (t === "url") continue;
     const c = normColor(t);
@@ -396,7 +400,9 @@ const tiny = (x) => /^-?[\d.]+%?$/.test(x) && Math.abs(parseFloat(x) / (x.endsWi
 // it flat (a matrix with no area) or moves it far off.
 function transformHides(v, em) {
   if (typeof v !== "string") return false;
-  for (const m of v.matchAll(/([a-z0-9]+)\(([^()]*)\)/g)) {
+  // a function name is matched only from the start of a word, so a long
+  // run of letters with no "(" is scanned once, not from every letter
+  for (const m of v.matchAll(/(?<![a-z0-9])([a-z0-9]+)\(([^()]*)\)/g)) {
     const [fn, a] = [m[1], args(m[2])];
     if (/^scale(?:x|y|3d)?$/.test(fn) && a.slice(0, 2).some(tiny)) return true;
     if (/^translate(?:x|y|3d)?$/.test(fn) && a.slice(0, 2).some((x) => farAway(x, em))) return true;
@@ -598,7 +604,9 @@ class Lines {
     this.line += t;
   }
   newline() {
-    this.done.push(this.line.replace(/\s+$/, ""));
+    // trimEnd, not /\s+$/: that regular expression is quadratic on a long
+    // run of white space (in <pre>) that does not end the line.
+    this.done.push(this.line.trimEnd());
     this.line = "";
   }
   block() {

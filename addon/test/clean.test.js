@@ -589,3 +589,20 @@ test("<style> rules with :has() or a selector over 200 characters are not applie
   assert.match(text, /Shown long\./);
   assert.doesNotMatch(text, /HIDDEN/);
 });
+
+test("cleaning is linear on 2 MiB of adversarial input: white space in <pre>, unclosed colour and transform functions", () => {
+  const n = 2 * 1024 * 1024;
+  const cases = {
+    pre: "<pre>" + " ".repeat(n) + "x\n</pre>",
+    hsl: '<p style="color:hsl(1' + " ".repeat(n) + 'x)">Shown.</p>',
+    background: '<p style="background:' + "rgb(".repeat(n / 4) + '">Shown.</p>',
+    transform: '<p style="transform:' + "a".repeat(n) + '">Shown.</p>',
+  };
+  for (const [k, html] of Object.entries(cases)) {
+    const t0 = performance.now();
+    const text = htmlToText(html);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 1000, `${k} took ${ms} ms`);
+    assert.equal(text, k === "pre" ? "x" : "Shown.", k);
+  }
+});
