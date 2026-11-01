@@ -6,6 +6,8 @@
 package files_test
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -30,5 +32,25 @@ func TestSavePrivateWindows(t *testing.T) {
 	// The folder that already existed is left alone.
 	if err := acl.Check(base); err == nil {
 		t.Errorf("existing folder %s was made owner-only", base)
+	}
+}
+
+// A name that reaches an NTFS alternate data stream or a device is
+// refused before anything is opened.
+func TestReadRefusesStreamsAndDevicesWindows(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Writing the stream may fail on a file system without streams; the
+	// read must be refused either way.
+	os.WriteFile(filepath.Join(dir, "a.txt:hidden"), []byte("stream"), 0o600)
+	for _, n := range []string{"a.txt:hidden", "a.txt::$DATA", "CON", "NUL", "CONIN$", "nul.txt", ".. ", "..."} {
+		if _, _, err := files.ReadForDraft(dir, n); !errors.Is(err, files.ErrOutside) {
+			t.Errorf("%q: %v", n, err)
+		}
+	}
+	if b, _, err := files.ReadForDraft(dir, "a.txt"); err != nil || string(b) != "main" {
+		t.Fatalf("a.txt: %q %v", b, err)
 	}
 }

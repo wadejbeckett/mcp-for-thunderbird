@@ -263,6 +263,9 @@ func TestSaveReservedNames(t *testing.T) {
 		"x/AUX.doc":   "_AUX.doc",
 		"lpt.txt":     "lpt.txt",
 		"notes.con":   "notes.con",
+		"CONIN$":      "_CONIN$",
+		"conout$.txt": "_conout$.txt",
+		"CONIN$x.txt": "CONIN$x.txt",
 	}
 	for in, want := range cases {
 		dir := t.TempDir()

@@ -365,8 +365,9 @@ func TestCursorMerge(t *testing.T) {
 	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("new file: %v", m)
 	}
-	// Existing with another server and a stale entry of ours: merged, ours replaced.
-	os.WriteFile(p, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/old"},"b":{"url":"http://x"}},"x":true}`), 0o600)
+	// Existing with another server and a stale entry of ours (an older
+	// copy of the program): merged, ours replaced.
+	os.WriteFile(p, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/old/mcp-for-thunderbird","args":["connect"]},"b":{"url":"http://x"}},"x":true}`), 0o600)
 	if s := status(t, detect(binPath), "cursor"); !s.Found || s.Configured {
 		t.Fatalf("stale entry reported configured: %+v", s)
 	}
@@ -569,7 +570,7 @@ func TestDetectMissing(t *testing.T) {
 
 func TestCodexRemoveMiddleKeepsNeighbours(t *testing.T) {
 	home, _ := sandbox(t)
-	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
+	orig := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = \"/x/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[mcp_servers.mcp-for-thunderbird.env]\nA = \"1\"\n\n# the next table\n[profiles.fast]\nmodel = \"o4\" # keep\n"
 	p := codexSetup(t, home, orig)
 	for _, s := range Uninstall() {
 		if s.Error != "" {
@@ -678,7 +679,7 @@ func TestSymlinkedConfigKeepsLink(t *testing.T) {
 
 func TestClaudeCodeRemoveWithoutClaudeReported(t *testing.T) {
 	home, _ := sandbox(t)
-	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/x","args":["connect"]}}}`), 0o600)
+	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"mcp-for-thunderbird":{"command":"/x/mcp-for-thunderbird","args":["connect"]}}}`), 0o600)
 	s := status(t, Uninstall(), "claude-code")
 	if !strings.Contains(s.Error, "claude mcp remove --scope user mcp-for-thunderbird") {
 		t.Fatalf("missing claude not reported: %+v", s)
@@ -720,5 +721,215 @@ func TestWindowsShimMetacharactersRefused(t *testing.T) {
 	}
 	if err := checkShim("linux", "/usr/bin/claude.cmd", args); err != nil {
 		t.Fatalf("non-Windows refused: %v", err)
+	}
+}
+
+// oldBin is where an earlier version of the program lived, as a package
+// manager with versioned folders (Homebrew's Cellar) leaves it.
+var oldBin = filepath.Join(string(filepath.Separator)+"opt", "homebrew", "Cellar", "mcp-for-thunderbird", "1.0.0", "bin", "mcp-for-thunderbird")
+
+// After an upgrade into a new folder, setting up again replaces the
+// table setup wrote for the old folder and keeps everything else.
+func TestCodexUpgradeReplacesOwnEntry(t *testing.T) {
+	home, _ := sandbox(t)
+	old := "model = \"o3\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = " + tomlString(oldBin) + "\nargs = [\"connect\"]\n\n# next\n[mcp_servers.other]\ncommand = \"x\"\n"
+	p := codexSetup(t, home, old)
+	if s := status(t, Configure([]string{"codex"}, binPath), "codex"); !s.Configured || s.Error != "" {
+		t.Fatalf("configure: %+v", s)
+	}
+	b, _ := os.ReadFile(p)
+	want := "model = \"o3\"\n\n\n# next\n[mcp_servers.other]\ncommand = \"x\"\n\n[mcp_servers.mcp-for-thunderbird]\ncommand = " + binTOML + "\nargs = [\"connect\"]\n"
+	if string(b) != want {
+		t.Fatalf("config.toml:\n%s\nwant:\n%s", b, want)
+	}
+	if bk := backups(t, p); len(bk) != 1 {
+		t.Fatalf("backups: %v", bk)
+	}
+	if s := status(t, detect(binPath), "codex"); !s.Configured {
+		t.Fatalf("detect after: %+v", s)
+	}
+}
+
+func TestClaudeCodeUpgradeReplacesOwnEntry(t *testing.T) {
+	home, bin := sandbox(t)
+	logf := fakeClaude(t, bin, 0)
+	cj := filepath.Join(home, ".claude.json")
+	old, _ := json.Marshal(oldBin)
+	os.WriteFile(cj, []byte(`{"mcpServers":{"mcp-for-thunderbird":{"type":"stdio","command":`+string(old)+`,"args":["connect"],"env":{}}}}`), 0o600)
+	if s := status(t, Configure([]string{"claude-code"}, binPath), "claude-code"); !s.Configured || s.Error != "" {
+		t.Fatalf("configure: %+v", s)
+	}
+	b, _ := os.ReadFile(logf)
+	want := "mcp\nremove\n--scope\nuser\nmcp-for-thunderbird\n--end--\n" +
+		"mcp\nadd\n--scope\nuser\nmcp-for-thunderbird\n--\n" + binPath + "\nconnect\n--end--\n"
+	if string(b) != want {
+		t.Fatalf("claude args:\n%s\nwant:\n%s", b, want)
+	}
+}
+
+// An entry a person wrote (here the HTTP address form, or connect pinned
+// to one profile) is never replaced or removed by setup, in any app.
+func TestHandWrittenEntryKept(t *testing.T) {
+	handJSON := `{"mcpServers":{"mcp-for-thunderbird":{"url":"http://127.0.0.1:47110/mcp","headers":{"Authorization":"Bearer k"}}}}`
+	pinned := `{"mcpServers":{"mcp-for-thunderbird":{"command":` + binJSON + `,"args":["connect","--instance","abc"]}}}`
+	for _, content := range []string{handJSON, pinned} {
+		home, bin := sandbox(t)
+		logf := filepath.Join(t.TempDir(), "none")
+		if runtime.GOOS != "windows" {
+			logf = fakeClaude(t, bin, 0)
+		}
+		files := map[string]string{
+			"claude-desktop": claudeDesktopConfig(t, home, content),
+			"cursor":         filepath.Join(home, ".cursor", "mcp.json"),
+			"claude-code":    filepath.Join(home, ".claude.json"),
+			"codex":          filepath.Join(home, ".codex", "config.toml"),
+		}
+		os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+		os.WriteFile(files["cursor"], []byte(content), 0o600)
+		os.WriteFile(files["claude-code"], []byte(content), 0o600)
+		toml := "[mcp_servers.mcp-for-thunderbird]\nurl = \"http://127.0.0.1:47110/mcp\"\n"
+		if content == pinned {
+			toml = "[mcp_servers.mcp-for-thunderbird]\ncommand = " + binTOML + "\nargs = [\"connect\", \"--instance\", \"abc\"]\n"
+		}
+		codexSetup(t, home, toml)
+		names := []string{"claude-desktop", "cursor", "codex"}
+		if runtime.GOOS != "windows" {
+			names = append(names, "claude-code")
+		}
+		for _, n := range names {
+			if s := status(t, Configure([]string{n}, binPath), n); s.Error == "" || s.Configured {
+				t.Errorf("%s: hand-written entry replaced: %+v", n, s)
+			}
+			if s := status(t, Uninstall(), n); !strings.Contains(s.Error, "left in place") {
+				t.Errorf("%s: uninstall did not report the kept entry: %+v", n, s)
+			}
+		}
+		for n, f := range files {
+			b, _ := os.ReadFile(f)
+			want := content
+			if n == "codex" {
+				want = toml
+			}
+			if string(b) != want {
+				t.Errorf("%s changed:\n%s", n, b)
+			}
+			if bk := backups(t, f); len(bk) != 0 {
+				t.Errorf("%s backed up on refusal: %v", n, bk)
+			}
+		}
+		if _, err := os.Stat(logf); !os.IsNotExist(err) {
+			b, _ := os.ReadFile(logf)
+			t.Errorf("claude ran: %s", b)
+		}
+	}
+}
+
+// Text after the closing brace would be dropped when the file is written
+// back, so such a file is refused and left as it is.
+func TestTrailingDataRefused(t *testing.T) {
+	for _, in := range []string{`{} x`, `{"a":1}}`, `{"a":1} {"b":2}`, `{"a":1}]`} {
+		if _, err := parseObject(json.RawMessage(in)); err == nil {
+			t.Errorf("%q accepted", in)
+		}
+	}
+	for _, in := range []string{`{}`, "{\"a\":1}\n\n", " \t{ }\r\n"} {
+		if _, err := parseObject(json.RawMessage(in)); err != nil {
+			t.Errorf("%q refused: %v", in, err)
+		}
+	}
+	home, _ := sandbox(t)
+	os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+	p := filepath.Join(home, ".cursor", "mcp.json")
+	orig := `{"mcpServers":{}} {"keep":"me"}`
+	os.WriteFile(p, []byte(orig), 0o600)
+	if s := status(t, Configure([]string{"cursor"}, binPath), "cursor"); s.Error == "" || s.Configured {
+		t.Fatalf("trailing data accepted: %+v", s)
+	}
+	if b, _ := os.ReadFile(p); string(b) != orig {
+		t.Fatalf("file changed:\n%s", b)
+	}
+}
+
+// Started through a package manager's bin link, the program records the
+// link, which survives upgrades; elsewhere it records the resolved path.
+func TestExecutableKeepsPackageManagerLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	_, bin := sandbox(t)
+	root := resolvedDir(t, t.TempDir())
+	cellar := filepath.Join(root, "Cellar", "mcp-for-thunderbird", "1.1.0", "bin")
+	os.MkdirAll(cellar, 0o755)
+	real := filepath.Join(cellar, "mcp-for-thunderbird")
+	os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755)
+	brewBin := filepath.Join(root, "bin")
+	os.MkdirAll(brewBin, 0o755)
+	link := filepath.Join(brewBin, "mcp-for-thunderbird")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", brewBin+string(os.PathListSeparator)+bin)
+	bins := []string{brewBin}
+	for _, c := range []struct{ exe, arg0, want string }{
+		{link, link, link},                  // macOS: the path it was started by
+		{real, "mcp-for-thunderbird", link}, // Linux: /proc/self/exe, started from PATH
+		{real, link, link},                  // Thunderbird starts the recorded link
+		{real, real, real},                  // started from the versioned folder
+		{link, link, link},
+	} {
+		if got, err := executable(c.exe, c.arg0, bins); err != nil || got != c.want {
+			t.Errorf("executable(%s, %s) = %s %v, want %s", c.exe, c.arg0, got, err, c.want)
+		}
+	}
+	// A link outside the package manager's bin folders is resolved.
+	if got, _ := executable(link, link, nil); got != real {
+		t.Errorf("unlisted folder: %s", got)
+	}
+	// A link in the bin folder that points at another binary is ignored.
+	other := filepath.Join(root, "other")
+	os.WriteFile(other, nil, 0o755)
+	os.Remove(link)
+	os.Symlink(other, link)
+	if got, _ := executable(real, "mcp-for-thunderbird", bins); got != real {
+		t.Errorf("foreign link used: %s", got)
+	}
+}
+
+func resolvedDir(t *testing.T, d string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// A copy of the program under another file name still recognises the
+// entries it wrote.
+func TestRenamedProgramOwnsItsEntry(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(entry{Command: filepath.Join(filepath.Dir(binPath), filepath.Base(self)), Args: []string{"connect"}}).ourShape() {
+		t.Fatalf("%s not recognised", filepath.Base(self))
+	}
+	for _, e := range []entry{
+		{Command: oldBin, Args: []string{"connect"}},
+		{Command: `C:\Program Files\MCP\MCP-for-Thunderbird.EXE`, Args: []string{"connect"}},
+	} {
+		if !e.ourShape() {
+			t.Errorf("%+v not recognised", e)
+		}
+	}
+	for _, e := range []entry{
+		{Command: "mcp-for-thunderbird", Args: []string{"connect"}},
+		{Command: oldBin, Args: []string{"connect", "--instance", "x"}},
+		{Command: oldBin},
+		{Command: "/usr/bin/other", Args: []string{"connect"}},
+	} {
+		if e.ourShape() {
+			t.Errorf("%+v recognised", e)
+		}
 	}
 }

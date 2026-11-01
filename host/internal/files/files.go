@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -37,6 +38,9 @@ var (
 	ErrTooLarge = errors.New("files: attachment is larger than 50 MiB")
 	// ErrNoDir means no usable absolute attachment folder is configured.
 	ErrNoDir = errors.New("files: no attachment folder is set")
+	// ErrNotRegular means the name is a folder, FIFO, device or other
+	// special file, which is never read.
+	ErrNotRegular = errors.New("files: not a regular file")
 )
 
 func checkDir(dir string) error {
@@ -69,17 +73,18 @@ func sanitise(name string) string {
 }
 
 // reserved reports whether Windows would open a device for name: CON,
-// PRN, AUX, NUL, COM1-9 or LPT1-9 (also with superscript 1-3), in any
-// case, alone or before any extension, ignoring trailing spaces. Such names
-// are prefixed on every platform, so a folder synced to Windows is safe too.
+// PRN, AUX, NUL, CONIN$, CONOUT$, COM1-9 or LPT1-9 (also with superscript
+// 1-3), in any case, alone or before any extension or stream name,
+// ignoring trailing spaces. Such names are prefixed on every platform, so
+// a folder synced to Windows is safe too.
 func reserved(name string) bool {
 	stem := name
-	if i := strings.IndexByte(stem, '.'); i >= 0 {
+	if i := strings.IndexAny(stem, ".:"); i >= 0 {
 		stem = stem[:i]
 	}
 	stem = strings.ToUpper(strings.TrimRight(stem, " "))
 	switch stem {
-	case "CON", "PRN", "AUX", "NUL":
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return true
 	}
 	if r := []rune(stem); len(r) == 4 && (string(r[:3]) == "COM" || string(r[:3]) == "LPT") {
@@ -195,15 +200,36 @@ func Save(dir, name string, data []byte) (string, error) {
 	return "", errors.New("files: too many files with the same name")
 }
 
+// localName reports whether name names an entry directly inside a
+// folder on goos. On Windows it also refuses names Windows would read as
+// something else: a colon (a drive or an NTFS alternate data stream such
+// as "a.txt:hidden"), a device name such as CON or NUL, and a name made
+// only of dots and spaces, which Windows trims to the folder or its parent.
+func localName(goos, name string) bool {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
+		strings.ContainsRune(name, 0) {
+		return false
+	}
+	if goos == "windows" {
+		if strings.ContainsRune(name, ':') || reserved(name) || strings.TrimRight(name, ". ") == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadForDraft reads a regular file named name from directly inside dir.
-// Path separators, "..", absolute names and symlinks that resolve outside dir
-// are refused with ErrOutside.
+// Path separators, "..", absolute names, names Windows would read as a
+// device or another stream, and symlinks that resolve outside dir are
+// refused with ErrOutside. Anything but a regular file (a folder, a FIFO,
+// a device) is refused without being opened for reading, so it cannot
+// block the host.
 func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err := checkDir(dir); err != nil {
 		return nil, "", err
 	}
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) ||
-		filepath.IsAbs(name) || filepath.VolumeName(name) != "" || strings.ContainsRune(name, 0) {
+	if !localName(runtime.GOOS, name) || !filepath.IsLocal(name) ||
+		filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
 		return nil, "", ErrOutside
 	}
 	realDir, err := filepath.EvalSymlinks(dir)
@@ -218,7 +244,20 @@ func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return nil, "", ErrOutside
 	}
-	f, err := os.Open(realFile)
+	// realFile has no links left, so Lstat describes the file itself.
+	before, err := os.Lstat(realFile)
+	if err != nil {
+		return nil, "", err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, "", ErrNotRegular
+	}
+	if before.Size() > MaxSize {
+		return nil, "", ErrTooLarge
+	}
+	// openFlags never waits for a writer, should the file have been
+	// swapped for a FIFO since the check above.
+	f, err := os.OpenFile(realFile, os.O_RDONLY|openFlags, 0)
 	if err != nil {
 		return nil, "", err
 	}
@@ -227,8 +266,8 @@ func ReadForDraft(dir, name string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if !st.Mode().IsRegular() {
-		return nil, "", errors.New("files: not a regular file")
+	if !st.Mode().IsRegular() || !os.SameFile(before, st) {
+		return nil, "", ErrNotRegular
 	}
 	if st.Size() > MaxSize {
 		return nil, "", ErrTooLarge
