@@ -724,6 +724,34 @@ func TestE2EOrganise(t *testing.T) {
 	}
 }
 
+// TestE2EArchive archives a message with mail_archive and checks the
+// server over IMAP: the message is in Archives, the folder identity id1
+// archives into (make-profile.sh), and no longer in INBOX.
+func TestE2EArchive(t *testing.T) {
+	cs := httpSession(t)
+	const (
+		subj = "Archive me"
+		id   = "archive-one@seed.test"
+	)
+	res, _ := searchUntil(t, cs, map[string]any{"text": "archive test"}, subj)
+	one := find(res, subj)
+	if one.ID == "" {
+		t.Fatalf("seed message: %+v", res)
+	}
+	var o organised
+	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{one.ID}}, &o)
+	o.only(t, "mail_archive", one.ID)
+	_, flags := imapWait(t, "archive", "Archives", id, func(found bool, _ string) bool { return found })
+	if strings.Contains(flags, `\Deleted`) {
+		t.Fatalf("archived message is marked deleted on the server: %q", flags)
+	}
+	imapWait(t, "archive", "INBOX", id, func(found bool, _ string) bool { return !found })
+	archived, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Archives"}, subj)
+	if p := find(archived, subj); p.Folder != "Archives" && p.Folder != "/Archives" {
+		t.Fatalf("archived message is in %q", p.Folder)
+	}
+}
+
 // imapUIDs returns the UIDs in mailbox matching an IMAP SEARCH criterion.
 func imapUIDs(t *testing.T, mailbox, criteria string) []string {
 	t.Helper()

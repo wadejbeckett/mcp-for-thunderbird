@@ -145,10 +145,10 @@ for f in "$here"/fixtures/seed/*.eml "$here"/fixtures/hostile/*.eml; do
   curl -s --fail -u test:test --upload-file "$MFT_E2E_DIR/seed.eml" "imap://127.0.0.1:3143/INBOX"
 done
 rm -f "$MFT_E2E_DIR/seed.eml"
-# Folders for TestE2EOrganise and TestE2EDraftAndSend: Thunderbird finds
-# Trash by name, the identity names Drafts and Sent (make-profile.sh), and
-# GreenMail starts with INBOX only.
-for folder in Trash Sorted Drafts Sent; do
+# Folders for TestE2EOrganise, TestE2EArchive and TestE2EDraftAndSend:
+# Thunderbird finds Trash by name, the identity names Drafts, Sent and
+# Archives (make-profile.sh), and GreenMail starts with INBOX only.
+for folder in Trash Sorted Drafts Sent Archives; do
   curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "CREATE $folder" >/dev/null
   curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "SUBSCRIBE $folder" >/dev/null
 done
