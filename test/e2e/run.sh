@@ -13,6 +13,11 @@
 # its own Xvfb, with HOME set to a throwaway directory; only that process
 # group is ever stopped. Mail goes only to GreenMail on 127.0.0.1.
 #
+# The Thunderbird is the one on PATH, or MFT_E2E_THUNDERBIRD (a program
+# path, such as one fetch-thunderbird.sh unpacked from a Mozilla tarball).
+# Its version is passed to the tests as MFT_E2E_TB_VERSION: on 140 ESR they
+# expect no mail_draft or mail_send (addon/src/features.js).
+#
 # usage: test/e2e/run.sh [go test args, e.g. -run TestE2ERead -v]
 set -euo pipefail
 
@@ -21,6 +26,7 @@ repo=$(cd "$here/../.." && pwd)
 export MFT_E2E_DIR=${MFT_E2E_DIR:-${TMPDIR:-/tmp}/mft-e2e}
 export MFT_E2E_PROFILE=${MFT_E2E_PROFILE:-${TMPDIR:-/tmp}/mft-e2e-profile}
 export GOTOOLCHAIN=${GOTOOLCHAIN:-auto}
+export MFT_E2E_THUNDERBIRD=${MFT_E2E_THUNDERBIRD:-thunderbird}
 
 CONTAINER=mft-greenmail
 IMAGE=greenmail/standalone@sha256:1ef95a966418cd09b7ea91d504d8c0826bbe7a2f6e679a75c601a831587c1626
@@ -82,8 +88,19 @@ if "$here/tb.sh" running; then
   exit 1
 fi
 rm -rf "$MFT_E2E_DIR" "$MFT_E2E_PROFILE"
-mkdir -p "$MFT_E2E_DIR/bin" "$MFT_E2E_DIR/attachments"
+mkdir -p "$MFT_E2E_DIR/bin" "$MFT_E2E_DIR/attachments" "$MFT_E2E_DIR/home"
 trap teardown EXIT INT TERM
+
+# --version reads only the program's application.ini; HOME is the
+# throwaway one all the same.
+tb_version=$(HOME="$MFT_E2E_DIR/home" "$MFT_E2E_THUNDERBIRD" --version 2>/dev/null |
+  sed -n 's/^Mozilla Thunderbird \([0-9][0-9a-z.]*\).*/\1/p' | head -n 1)
+if [ -z "$tb_version" ]; then
+  echo "run.sh: could not read the version of $MFT_E2E_THUNDERBIRD" >&2
+  exit 1
+fi
+export MFT_E2E_TB_VERSION=$tb_version
+log "Thunderbird $tb_version ($MFT_E2E_THUNDERBIRD)"
 
 log "starting GreenMail"
 started_greenmail=1
