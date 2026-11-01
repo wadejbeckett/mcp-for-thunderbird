@@ -77,9 +77,10 @@ jobs:
         with:
           go-version-file: host/go.mod
           cache: false # this workflow also builds releases; no shared cache
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          package-manager-cache: false
       - name: GoReleaser snapshot, check.sh and its self-test
         run: sh packaging/build.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -103,9 +104,10 @@ jobs:
         with:
           go-version-file: host/go.mod
           cache: false # a release is built without a cache
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          package-manager-cache: false
       - name: GoReleaser draft release, check.sh and its self-test
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -360,9 +362,10 @@ jobs:
         with:
           go-version-file: test/e2e/go.mod
           cache: false # this workflow also builds releases; no shared cache
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          package-manager-cache: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
@@ -416,9 +419,10 @@ jobs:
         with:
           go-version-file: test/e2e/go.mod
           cache: false # this workflow also builds releases; no shared cache
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          package-manager-cache: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
