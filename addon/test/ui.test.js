@@ -687,6 +687,25 @@ test("a reopened setup leaves groups alone when they match no level", async () =
   assert.deepEqual((await load()).groups, { read: false, organise: true, compose: true, contacts: false });
 });
 
+test("on Thunderbird 153 direct send can be turned on before messages.send is granted", async () => {
+  // messages.sendMessage exists only once the optional permission is
+  // granted, so it cannot tell whether this Thunderbird can send.
+  assert.equal(typeof mock.messenger.messages.sendMessage, "undefined");
+  const p = await options({ accounts: { a1: true }, groups: { read: true, organise: false, compose: true, contacts: false } });
+  assert.equal(p.$("draft-unsupported").hidden, true);
+  assert.equal(p.$("send-unsupported").hidden, true);
+  assert.equal(p.$("send-enabled").disabled, false);
+  p.tick(p.$("send-enabled"));
+  assert.deepEqual(mock.permissionRequests, [["messages.send"]]);
+  await flush();
+  assert.equal(p.$("send-enabled").checked, true);
+  p.$("send-allow").value = "a@example.com";
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.equal((await load()).send.enabled, true);
+  assert.equal(port.sentOfType("tools").at(-1).tools.includes("mail_send"), true);
+});
+
 test("on Thunderbird 140 the options say why drafts open in a window and keep direct send off", async () => {
   let p = await options({ accounts: { a1: true } });
   assert.equal(p.$("draft-unsupported").hidden, true);
@@ -694,9 +713,13 @@ test("on Thunderbird 140 the options say why drafts open in a window and keep di
   assert.equal(p.$("send-enabled").disabled, false);
 
   // What Thunderbird 140 ESR lacks (mocks/messenger.js, release 140).
-  delete mock.messenger.messages.saveMessage;
-  delete mock.messenger.messages.sendMessage;
+  bg.stop();
+  mock = install({ release: 140, accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }], manifest: { version: "1.2.3", manifest_version: 3 } });
+  bg = createBackground();
+  await bg.start();
+  mock.lastPort().receive({ type: "welcome", protocol: 1, version: "1.2.3", port: 47110, ok: true });
   p = await options({ accounts: { a1: true }, send: { enabled: true, allow: ["a@example.com"] } });
+  assert.match(p.$("send-unsupported").textContent, /Thunderbird 153 or later/);
   assert.equal(p.$("draft-unsupported").hidden, false);
   assert.match(p.$("draft-unsupported").textContent, /Thunderbird 153 or later/);
   assert.equal(p.$("send-unsupported").hidden, false);

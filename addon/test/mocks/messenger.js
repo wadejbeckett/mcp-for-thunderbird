@@ -520,6 +520,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         requested.push([...permissions]);
         if (denyRequests.value) return false;
         for (const p of permissions) perms.add(p);
+        syncSend();
         messenger.permissions.onAdded.fire({ permissions, origins: [] });
         return true;
       },
@@ -565,6 +566,16 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     }
     return out;
   }
+
+  // On 153 and later messages.sendMessage exists only while the optional
+  // messages.send permission is granted (docs/SPIKES.md section 4): it
+  // appears when the permission is added and is gone once it is removed.
+  const sendMessage = messenger.messages.sendMessage;
+  function syncSend() {
+    if (release >= 153 && perms.has("messages.send")) messenger.messages.sendMessage = sendMessage;
+    else delete messenger.messages.sendMessage;
+  }
+  syncSend();
 
   // release below 153 stands for Thunderbird 140 ESR: it has no
   // messages.saveMessage or sendMessage, and rejects the messages.save and
@@ -614,10 +625,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     optionsOpened: () => optionsOpened,
     grant(p) {
       perms.add(p);
+      syncSend();
       messenger.permissions.onAdded.fire({ permissions: [p], origins: [] });
     },
     revoke(p) {
       perms.delete(p);
+      syncSend();
       messenger.permissions.onRemoved.fire({ permissions: [p], origins: [] });
     },
     openLists: () => [...lists.keys()],
