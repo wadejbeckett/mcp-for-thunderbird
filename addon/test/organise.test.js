@@ -339,3 +339,42 @@ test("mail_move refuses the Outbox and folders below it as a target", async () =
   const ok = await call("mail_move", { ids: [m.id], folder: "Inbox" });
   assert.deepEqual(ok.content, { done: [m.id], failed: [] });
 });
+
+test("mail_tag calls running together on one message keep both changes", async () => {
+  const m = add("a1", "INBOX", 1);
+  const update = globalThis.messenger.messages.update;
+  let entered = false;
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  globalThis.messenger.messages.update = async (id, props) => {
+    if (!entered) {
+      entered = true;
+      await gate;
+    }
+    return update(id, props);
+  };
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const first = call("mail_tag", { ids: [m.id], add: ["Important"] });
+  while (!entered) await tick();
+  const second = call("mail_tag", { ids: [m.id], add: ["To Do"] });
+  for (let i = 0; i < 5; i++) await tick();
+  release();
+  const [r1, r2] = await Promise.all([first, second]);
+  assert.deepEqual(r1.content.done, [m.id]);
+  assert.deepEqual(r2.content.done, [m.id]);
+  assert.deepEqual([...mock.store.get(m.num).tags].sort(), ["$label1", "$label4"]);
+});
+
+test("mail_tag works from the tags the message has when it is written", async () => {
+  const m = add("a1", "INBOX", 1);
+  const get = globalThis.messenger.messages.get;
+  // a tag added in Thunderbird after the id was resolved is kept
+  globalThis.messenger.messages.get = async (id) => {
+    mock.store.get(m.num).tags = ["$label4"];
+    return get(id);
+  };
+  await call("mail_tag", { ids: [m.id], add: ["Important"] });
+  assert.deepEqual([...mock.store.get(m.num).tags].sort(), ["$label1", "$label4"]);
+});

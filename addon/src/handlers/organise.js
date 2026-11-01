@@ -103,6 +103,25 @@ function tagNames(args, k) {
   return v;
 }
 
+// Tag changes to one message run one at a time, each computed from the
+// tags the message has when it is written, so two calls changing the same
+// message do not undo each other's change.
+const tagQueues = new Map();
+
+function oneAtATime(key, fn) {
+  const before = tagQueues.get(key) || Promise.resolve();
+  const result = before.then(fn);
+  const settled = result.then(
+    () => {},
+    () => {},
+  );
+  tagQueues.set(key, settled);
+  settled.then(() => {
+    if (tagQueues.get(key) === settled) tagQueues.delete(key);
+  });
+  return result;
+}
+
 async function mailTag(args, ctx) {
   const add = tagNames(args, "add");
   const remove = tagNames(args, "remove");
@@ -112,10 +131,14 @@ async function mailTag(args, ctx) {
   const list = await tagList(run);
   const addKeys = add.map((t) => tagKeyOf(list, t));
   const removeKeys = new Set(remove.map((t) => tagKeyOf(list, t)));
-  return forEachMessage(ids, run, ctx.settings, (h) => {
-    const tags = [...new Set([...(h.tags || []), ...addKeys])].filter((k) => !removeKeys.has(k));
-    return api(run, () => tb().messages.update(h.id, { tags }));
-  });
+  return forEachMessage(ids, run, ctx.settings, (h) =>
+    oneAtATime(h.id, async () => {
+      const now = answered(await call(run, () => tb().messages.get(h.id)));
+      const current = now && Array.isArray(now.tags) ? now.tags : [];
+      const tags = [...new Set([...current, ...addKeys])].filter((k) => !removeKeys.has(k));
+      return api(run, () => tb().messages.update(h.id, { tags }));
+    }),
+  );
 }
 
 // ---- folders ----
