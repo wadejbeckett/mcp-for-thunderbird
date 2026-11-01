@@ -198,8 +198,10 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	}
 	b.OnRotate(func() {
 		if s := current(); s != nil {
+			// Rotate refuses once the host is stopping (Clear has run),
+			// so a late rotation cannot put a token back in the file.
 			if err := s.Rotate(); err != nil {
-				logger.Printf("token rotation failed: %v", err)
+				logger.Printf("token rotation refused: %v", err)
 				return
 			}
 			logger.Printf("token rotated")
@@ -243,9 +245,17 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	// Every start mints a new token (R33). The old file only suggests the
 	// port to try first, after a crash left it set.
 	preferred := 0
-	if old, err := connfile.Load(hello.Instance); err == nil {
+	old, err := waitForOtherHost(ctx, hello.Instance)
+	switch {
+	case errors.Is(err, errOtherHost):
+		_ = b.SendWelcome(0, "MCP for Thunderbird is already running for this profile in another Thunderbird")
+		return err
+	case ctx.Err() != nil:
+		_ = b.SendWelcome(0, "MCP for Thunderbird is stopping")
+		return ctx.Err()
+	case err == nil:
 		preferred = old.Port
-	} else if !errors.Is(err, os.ErrNotExist) {
+	case !errors.Is(err, os.ErrNotExist):
 		logger.Printf("connection file unreadable; creating a new one")
 	}
 	conn := &connfile.Conn{Instance: hello.Instance, Token: connfile.NewToken()}
@@ -280,6 +290,9 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	go func() { serveErr <- hs.Serve(ln) }()
 	logger.Printf("listening on 127.0.0.1:%d", port)
 	if err := b.SendWelcome(port, ""); err != nil {
+		// The file already names this port and token: clear it, or it
+		// looks live for as long as this process's PID does.
+		clearConn(srv)
 		hs.Close()
 		return err
 	}
@@ -293,9 +306,7 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	}
 	// Clear the port and token first, so no proxy sends the token to
 	// whatever binds the port next (R33), even if the stop is cut short.
-	if err := srv.Clear(); err != nil {
-		logger.Printf("could not clear the connection file: %v", err)
-	}
+	clearConn(srv)
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	if err := hs.Shutdown(sctx); err != nil {
@@ -306,6 +317,69 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	}
 	logger.Printf("stopped")
 	return nil
+}
+
+// clearConn clears the connection file through srv, leaving a file another
+// host has since taken over as it is.
+func clearConn(srv *server.Server) {
+	switch err := srv.Clear(); {
+	case errors.Is(err, connfile.ErrNotOwner):
+		logger.Printf("connection file now belongs to another host; left as it is")
+	case err != nil:
+		logger.Printf("could not clear the connection file: %v", err)
+	}
+}
+
+// errOtherHost is returned when another running host serves the instance.
+var errOtherHost = errors.New("another host is running for this instance")
+
+// takeoverWait bounds how long a starting host waits for another host of
+// the same instance to stop; a host stops within 2 s of Thunderbird
+// closing its pipe. takeoverPoll is how often it looks.
+var (
+	takeoverWait = 3 * time.Second
+	takeoverPoll = 100 * time.Millisecond
+)
+
+// waitForOtherHost reads the instance's connection file and decides
+// whether this host may take it over. Decision: a file that names a port
+// and a PID, other than ours, that is a running mcp-for-thunderbird
+// belongs to a host still serving this instance (two Thunderbirds on a
+// copied profile, or an add-on reload whose old host has not exited yet).
+// Overwriting it would let the two hosts wipe each other's port and token,
+// so this host waits up to takeoverWait for the other to stop (it clears
+// its port on exit) and then refuses to start (errOtherHost). A file whose
+// PID has exited, or now belongs to another program after a crash, is
+// stale: it is logged and taken over. The file read last is returned so
+// its port can be tried first.
+func waitForOtherHost(ctx context.Context, instance string) (*connfile.Conn, error) {
+	deadline := time.Now().Add(takeoverWait)
+	logged := false
+	for {
+		old, err := connfile.Load(instance)
+		if err != nil || old.Port == 0 || old.PID == os.Getpid() || old.PID <= 0 {
+			return old, err
+		}
+		if !connfile.HostRunning(old.PID) {
+			if logged {
+				logger.Printf("the other host has stopped; taking over the connection file")
+			}
+			return old, nil
+		}
+		if !logged {
+			logger.Printf("connection file names another running host (PID %d); waiting for it to stop", old.PID)
+			logged = true
+		}
+		if !time.Now().Before(deadline) {
+			logger.Printf("another host (PID %d) still serves this profile; not starting", old.PID)
+			return nil, errOtherHost
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(takeoverPoll):
+		}
+	}
 }
 
 // safe keeps an add-on-supplied version string to a short printable token.

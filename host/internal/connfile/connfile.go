@@ -191,8 +191,31 @@ func NewToken() string {
 	return hex.EncodeToString(b)
 }
 
-// Rotate replaces c.Token with a fresh token and saves the file.
+// ErrNotOwner is returned when the connection file on disk no longer names
+// the caller's PID and port: another host of the same instance (a copied
+// profile, or an add-on reload racing the old host's exit) has written it,
+// and it is left as that host wrote it.
+var ErrNotOwner = errors.New("connfile: the connection file belongs to another host")
+
+// owned reports nil when the instance's file on disk names c's PID and
+// port, ErrNotOwner when it names others, or the error reading it.
+func owned(c *Conn) error {
+	cur, err := Load(c.Instance)
+	if err != nil {
+		return err
+	}
+	if cur.PID != c.PID || cur.Port != c.Port {
+		return ErrNotOwner
+	}
+	return nil
+}
+
+// Rotate replaces c.Token with a fresh token and saves the file, unless the
+// file now belongs to another host (ErrNotOwner).
 func Rotate(c *Conn) error {
+	if err := owned(c); err != nil {
+		return err
+	}
 	old := c.Token
 	c.Token = NewToken()
 	if err := Save(c); err != nil {
@@ -200,6 +223,22 @@ func Rotate(c *Conn) error {
 		return err
 	}
 	return nil
+}
+
+// Clear forgets c's port and token and saves the file, so nothing can use
+// them once the host stops (ruling R33). The file is written only while it
+// still names c's PID and port: a file another host has taken over is
+// left alone (ErrNotOwner), and a missing file stays missing.
+func Clear(c *Conn) error {
+	err := owned(c)
+	c.Port, c.Token = 0, ""
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return Save(c)
 }
 
 // PickPort listens on 127.0.0.1 at the preferred port if it is free, else on

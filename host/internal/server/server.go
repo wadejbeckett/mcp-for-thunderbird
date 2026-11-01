@@ -51,6 +51,8 @@ type Server struct {
 	clients map[string]bool
 	// clientsFull is set once the overflow line has been logged.
 	clientsFull bool
+	// stopped is set by Clear; Rotate then refuses.
+	stopped bool
 }
 
 // New builds a server with no tools; call SetTools with the add-on's list.
@@ -153,21 +155,30 @@ func (s *Server) URL() string {
 	return "http://127.0.0.1:" + strconv.Itoa(s.conn.Port) + "/mcp"
 }
 
-// Rotate replaces the token and saves the connection file.
+// ErrStopped refuses a token rotation after Clear: a fresh token must not
+// reappear in a connection file the stopping host has cleared.
+var ErrStopped = errors.New("server: stopped")
+
+// Rotate replaces the token and saves the connection file. It refuses
+// after Clear (ErrStopped), and when another host has taken the file over
+// (connfile.ErrNotOwner).
 func (s *Server) Rotate() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return ErrStopped
+	}
 	return connfile.Rotate(s.conn)
 }
 
-// Clear forgets the port and token and saves the connection file, so
-// nothing can use them once the host stops (ruling R33). The guard then
-// authorises nothing.
+// Clear forgets the port and token and saves the connection file if it
+// still names this host, so nothing can use them once the host stops
+// (ruling R33). The guard then authorises nothing, and Rotate refuses.
 func (s *Server) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.conn.Port, s.conn.Token = 0, ""
-	return connfile.Save(s.conn)
+	s.stopped = true
+	return connfile.Clear(s.conn)
 }
 
 // maxClientNames bounds the client names logged.

@@ -498,3 +498,138 @@ func TestSetupDetectsAndConfiguresOnlyNamedClients(t *testing.T) {
 		t.Fatalf("conflicting flags exit %d", code)
 	}
 }
+
+// connFile reads the connection file of instance under dir's sandbox.
+func connFile(t *testing.T, dir, instance string) (port int, token string, pid int) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(userConfigDir(filepath.Join(dir, "home"), filepath.Join(dir, "config")),
+		"mcp-for-thunderbird", "connection-"+instance+".json"))
+	if err != nil {
+		t.Fatalf("connection file: %v", err)
+	}
+	var c struct {
+		Port  int    `json:"port"`
+		Token string `json:"token"`
+		PID   int    `json:"pid"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	return c.Port, c.Token, c.PID
+}
+
+// writeConnFile replaces the connection file of instance under dir's
+// sandbox, as another host would.
+func writeConnFile(t *testing.T, dir, instance string, port int, token string, pid int) {
+	t.Helper()
+	p := filepath.Join(userConfigDir(filepath.Join(dir, "home"), filepath.Join(dir, "config")),
+		"mcp-for-thunderbird", "connection-"+instance+".json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"instance": instance, "port": port, "token": token, "pid": pid})
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two hosts for one instance (a copied profile, or an add-on reload racing
+// the old host's exit): the second waits for the first, then refuses to
+// start rather than overwrite a live host's port and token.
+func TestSecondHostForInstanceRefused(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	a := startHost(t, bin, dir)
+	a.send(t, hello("dup", 1))
+	if w := readFrame(t, a.stdout); w["ok"] != true {
+		t.Fatalf("first welcome = %v", w)
+	}
+	port, token, pid := connFile(t, dir, "dup")
+
+	b := startHost(t, bin, dir)
+	b.send(t, hello("dup", 1))
+	if w := readFrame(t, b.stdout); w["ok"] != false || !strings.Contains(w["error"].(string), "already running") {
+		t.Fatalf("second welcome = %v", w)
+	}
+	if p, tok, id := connFile(t, dir, "dup"); p != port || tok != token || id != pid {
+		t.Fatalf("the second host changed the first host's file: port %d pid %d", p, id)
+	}
+	a.stop(t)
+	if p, tok, _ := connFile(t, dir, "dup"); p != 0 || tok != "" {
+		t.Fatal("the first host did not clear its own file")
+	}
+	// Once the first host has gone, a new one starts.
+	c := startHost(t, bin, dir)
+	c.send(t, hello("dup", 1))
+	if w := readFrame(t, c.stdout); w["ok"] != true {
+		t.Fatalf("welcome after the first host stopped = %v", w)
+	}
+	c.stop(t)
+}
+
+// A host stopping must not clear a file another host has since written.
+func TestStopLeavesAnotherHostsFile(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	h := startHost(t, bin, dir)
+	h.send(t, hello("taken", 1))
+	if w := readFrame(t, h.stdout); w["ok"] != true {
+		t.Fatalf("welcome = %v", w)
+	}
+	other := strings.Repeat("ab", 32)
+	writeConnFile(t, dir, "taken", 47119, other, os.Getpid())
+	h.stop(t)
+	if p, tok, pid := connFile(t, dir, "taken"); p != 47119 || tok != other || pid != os.Getpid() {
+		t.Fatalf("the stopping host changed another host's file: port %d pid %d", p, pid)
+	}
+}
+
+// A file left by a crashed host whose PID now belongs to another program
+// (here: this test) is stale and taken over at once.
+func TestStaleFileOfAnotherProgramTakenOver(t *testing.T) {
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	writeConnFile(t, dir, "reused", 47119, strings.Repeat("cd", 32), os.Getpid())
+	h := startHost(t, bin, dir)
+	start := time.Now()
+	h.send(t, hello("reused", 1))
+	if w := readFrame(t, h.stdout); w["ok"] != true {
+		t.Fatalf("welcome = %v", w)
+	}
+	if el := time.Since(start); el > takeoverWait {
+		t.Fatalf("waited %v for a program that is not a host", el)
+	}
+	if _, _, pid := connFile(t, dir, "reused"); pid != h.cmd.Process.Pid {
+		t.Fatalf("file names PID %d, want the new host's %d", pid, h.cmd.Process.Pid)
+	}
+	h.stop(t)
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// If the welcome cannot be sent, the connection file already holds a live
+// port and token: the host clears it before giving up.
+func TestWelcomeFailureClearsConnectionFile(t *testing.T) {
+	dir := t.TempDir()
+	home, cfg := filepath.Join(dir, "home"), filepath.Join(dir, "config")
+	for k, v := range map[string]string{"HOME": home, "USERPROFILE": home, "XDG_CONFIG_HOME": cfg,
+		"APPDATA": cfg, "LOCALAPPDATA": cfg} {
+		t.Setenv(k, v)
+	}
+	inR, inW := io.Pipe()
+	t.Cleanup(func() { inW.Close() })
+	go func() {
+		raw, _ := json.Marshal(hello("nowelcome", 1))
+		_ = nativemsg.Write(inW, raw)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := RunNative(ctx, inR, failWriter{}); err == nil {
+		t.Fatal("RunNative succeeded without a welcome")
+	}
+	if p, tok, _ := connFile(t, dir, "nowelcome"); p != 0 || tok != "" {
+		t.Fatalf("after a failed welcome: port %d, token set %v", p, tok != "")
+	}
+}

@@ -545,3 +545,31 @@ func TestSetToolsRemovesDisabledGroup(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A rotate_token that arrives while the host stops must not put a fresh
+// token back into the connection file Clear has just emptied.
+func TestRotateRefusedAfterClear(t *testing.T) {
+	d := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", d)
+	t.Setenv("HOME", d)
+	t.Setenv("AppData", d)
+	conn := &connfile.Conn{Instance: "stop", Port: 47110, Token: connfile.NewToken(), PID: os.Getpid()}
+	if err := connfile.Save(conn); err != nil {
+		t.Fatal(err)
+	}
+	s := New(nil, conn, func() string { return "" })
+	s.Log = log.New(io.Discard, "", 0)
+	if err := s.Rotate(); err != nil {
+		t.Fatalf("rotate while running: %v", err)
+	}
+	if err := s.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rotate(); !errors.Is(err, ErrStopped) {
+		t.Fatalf("rotate after Clear = %v, want ErrStopped", err)
+	}
+	got, err := connfile.Load("stop")
+	if err != nil || got.Port != 0 || got.Token != "" || s.Token() != "" {
+		t.Fatalf("after a late rotate: file %+v %v, token in memory %q", got, err, s.Token())
+	}
+}
