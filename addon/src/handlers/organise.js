@@ -19,7 +19,7 @@
 
 import { HANDLERS } from "../rpc.js";
 import { decodeId, resolveId } from "../ids.js";
-import { assertFolderAllowed } from "../policy.js";
+import { assertFolderAllowed, isExcluded } from "../policy.js";
 import { fail, isToolError, ToolError } from "../errors.js";
 import { call, newRun, answered, folderByPath, realFolder, tagKeyOf, tagList, TIMEOUT } from "./read.js";
 
@@ -194,16 +194,41 @@ async function mailMove(args, ctx) {
 
 // ---- mail_archive ----
 
-async function mailArchive(args, ctx) {
-  const s = ctx.settings;
-  const ids = idsArg(args);
-  const run = newRun();
-  // Thunderbird picks the archive folder and may file into year or month
-  // subfolders; if any excluded folder of the account is at or under the
-  // archive root, nothing is archived.
-  for (const accountId of accountsOf(ids)) {
-    const f = await specialFolder(run, accountId, "archive");
-    if (!f) continue;
+const NO_ARCHIVE = "Archiving is not available for this account: it has no archive folder of its own that MCP for Thunderbird can check.";
+const NO_IDENTITY = "Archiving is not available for this account: it has no identities, so Thunderbird would use another account's archive folder.";
+const ELSEWHERE = "Thunderbird may archive this account's mail into a folder of another account";
+
+// checkArchive refuses to archive this account's mail unless every folder
+// Thunderbird may archive it into is in the account and allowed.
+// Thunderbird archives into the archive folder set for the identity it picks
+// for the message: one of the account's own identities or, for an account
+// without identities such as Local Folders, any identity. That folder may be
+// in another account. The add-on API does not say which folder an identity
+// archives into, but Thunderbird marks each identity's archive folder with
+// the "archive" special use, so the marked folders stand for the possible
+// targets. A marked folder in another account that has identities of its
+// own is taken to be that account's. One in an account without identities
+// (other than a feed account, whose archive folder holds its own feed items)
+// can belong to any identity, so it blocks archiving from every other
+// account.
+function checkArchive(accountId, accounts, marked, s) {
+  const account = accounts.find((a) => a && a.id === accountId);
+  if (!account || !Array.isArray(account.identities) || account.identities.length === 0) fail("not_enabled", NO_IDENTITY);
+  const own = marked.filter((f) => f.accountId === accountId);
+  if (own.length === 0) fail("not_enabled", NO_ARCHIVE);
+  for (const f of marked) {
+    if (f.accountId === accountId) continue;
+    const other = accounts.find((a) => a && a.id === f.accountId);
+    const shared = !other || ((!Array.isArray(other.identities) || other.identities.length === 0) && other.type !== "rss");
+    if (!shared) continue;
+    if (!s.accounts || s.accounts[f.accountId] !== true) fail("not_enabled", `${ELSEWHERE}, and that account is not enabled.`);
+    if (isExcluded(f.accountId, f.path, s)) fail("excluded", `${ELSEWHERE}, and that folder is excluded.`);
+    fail("refused", `${ELSEWHERE}. ${CROSS_ACCOUNT}`);
+  }
+  // Thunderbird may file into year or month subfolders; if any excluded
+  // folder of the account is at or under an archive folder, nothing is
+  // archived.
+  for (const f of own) {
     assertFolderAllowed(accountId, f.path, s);
     const root = f.path.replace(/\/+$/, "");
     const inside = (s.excludedFolders || []).some((ex) => {
@@ -213,7 +238,24 @@ async function mailArchive(args, ctx) {
     });
     if (inside) fail("excluded", "An excluded folder is inside this account's archive folder.");
   }
-  return forEachMessage(ids, run, s, (h) => api(run, () => tb().messages.archive([h.id])));
+}
+
+async function mailArchive(args, ctx) {
+  const s = ctx.settings;
+  const ids = idsArg(args);
+  const run = newRun();
+  const accounts = answered(await call(run, () => tb().accounts.list(false)));
+  const all = answered(await call(run, () => tb().folders.query({ specialUse: ["archive"] })));
+  const marked = (Array.isArray(all) ? all : []).filter((f) => f && realFolder(f, f.accountId) && hasUse(f, "archive"));
+  const checked = new Set();
+  for (const accountId of accountsOf(ids)) {
+    checkArchive(accountId, Array.isArray(accounts) ? accounts : [], marked, s);
+    checked.add(accountId);
+  }
+  return forEachMessage(ids, run, s, async (h) => {
+    if (!checked.has(h.folder.accountId)) fail("refused", CROSS_ACCOUNT);
+    await api(run, () => tb().messages.archive([h.id]));
+  });
 }
 
 // ---- mail_trash ----
