@@ -633,3 +633,15 @@ func TestWelcomeFailureClearsConnectionFile(t *testing.T) {
 		t.Fatalf("after a failed welcome: port %d, token set %v", p, tok != "")
 	}
 }
+
+// Finished keep-alive connections are closed after a while; there is no
+// whole-request read timeout, which would cut long calls and streams.
+func TestHTTPServerTimeouts(t *testing.T) {
+	hs := newHTTPServer(http.NotFoundHandler())
+	if hs.IdleTimeout <= 0 || hs.ReadHeaderTimeout <= 0 {
+		t.Fatalf("IdleTimeout %v ReadHeaderTimeout %v, want both set", hs.IdleTimeout, hs.ReadHeaderTimeout)
+	}
+	if hs.ReadTimeout != 0 || hs.WriteTimeout != 0 {
+		t.Fatalf("ReadTimeout %v WriteTimeout %v would cut open streams", hs.ReadTimeout, hs.WriteTimeout)
+	}
+}

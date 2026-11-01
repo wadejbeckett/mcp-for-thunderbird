@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -132,7 +133,7 @@ func toMCP(t catalogue.Tool) *mcp.Tool {
 // new requests while streams already open continue.
 func (s *Server) Handler() http.Handler {
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp },
-		&mcp.StreamableHTTPOptions{MaxRequestBodyBytes: MaxBody})
+		&mcp.StreamableHTTPOptions{MaxRequestBodyBytes: MaxBody, SessionTimeout: sessionTimeout})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", h)
 	s.mu.Lock()
@@ -140,6 +141,13 @@ func (s *Server) Handler() http.Handler {
 	s.mu.Unlock()
 	return guard(s.Token, port, mux)
 }
+
+// sessionTimeout closes an MCP session that has sent no request for this
+// long, so sessions abandoned by clients that never said goodbye do not
+// build up for the host's life. connect pings every 5 s, so a running
+// proxy never comes near it; a client whose session was closed gets
+// "session not found" and starts a new one.
+var sessionTimeout = 30 * time.Minute
 
 // Token is the current bearer token.
 func (s *Server) Token() string {

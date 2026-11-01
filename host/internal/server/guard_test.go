@@ -5,11 +5,15 @@
 package server
 
 import (
+	"bufio"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -191,5 +195,42 @@ func TestNoCORSHeaders(t *testing.T) {
 				t.Fatalf("%s %s: response carries %s", r.Method, r.URL, k)
 			}
 		}
+	}
+}
+
+// A client that stalls while sending its body is cut off after
+// bodyReadTimeout instead of holding the connection for ever.
+func TestStalledBodyCutOff(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	var reached bool
+	hs := httptest.NewUnstartedServer(nil)
+	addr := hs.Listener.Addr().String()
+	hs.Config.Handler = guard(func() string { return testToken }, hs.Listener.Addr().(*net.TCPAddr).Port, okHandler(&reached))
+	hs.Start()
+	t.Cleanup(hs.Close)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "POST /mcp HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"half\":", addr, testToken)
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400", resp.StatusCode)
+		}
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("connection still open 3 s into a stalled body")
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("cut off after %v", el)
+	}
+	if reached {
+		t.Fatal("a stalled body reached the handler")
 	}
 }

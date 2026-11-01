@@ -30,6 +30,10 @@ const (
 	limiterIdle = time.Minute
 )
 
+// bodyReadTimeout bounds reading one request body (at most MaxBody bytes
+// over loopback).
+var bodyReadTimeout = 30 * time.Second
+
 // Guard refuses everything that is not an authorised, same-machine,
 // non-browser request of bounded size and rate before it reaches next.
 // It never sets CORS headers.
@@ -68,12 +72,22 @@ func guard(token func() string, port int, next http.Handler) http.Handler {
 			return
 		}
 		if r.Body != nil && r.Body != http.NoBody {
+			// Reading the body has a deadline, so a client that stalls mid
+			// body cannot hold the connection. It is lifted once the body
+			// is in: a whole-request ReadTimeout would also cancel the
+			// long-lived streams and calls that follow. After a failed
+			// read it stays expired, and the connection is closed.
+			rc := http.NewResponseController(w)
+			_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 			body, err := io.ReadAll(io.LimitReader(r.Body, MaxBody+1))
-			r.Body.Close()
 			if err != nil {
+				r.Body.Close()
+				w.Header().Set("Connection", "close")
 				http.Error(w, "Bad Request", http.StatusBadRequest)
 				return
 			}
+			_ = rc.SetReadDeadline(time.Time{})
+			r.Body.Close()
 			if len(body) > MaxBody {
 				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 				return

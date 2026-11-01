@@ -605,3 +605,20 @@ func TestUnansweredWriteSaysItMayHaveHappened(t *testing.T) {
 		t.Fatalf("cancelled send: %q", got)
 	}
 }
+
+// A session that sends nothing for sessionTimeout is closed, so abandoned
+// sessions do not build up for the host's life.
+func TestIdleSessionClosed(t *testing.T) {
+	old := sessionTimeout
+	sessionTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { sessionTimeout = old })
+	h := newHarness(t, []string{"mail_search"})
+	cs := h.connect(t, nil)
+	if _, err := call(t, cs, "mail_search", map[string]any{}); err != nil {
+		t.Fatalf("call while active: %v", err)
+	}
+	time.Sleep(600 * time.Millisecond)
+	if _, err := call(t, cs, "mail_search", map[string]any{}); err == nil {
+		t.Fatal("an idle session was still served")
+	}
+}

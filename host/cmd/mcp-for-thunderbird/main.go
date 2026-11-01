@@ -285,7 +285,7 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	handler := srv.Handler()
 	mu.Unlock()
 
-	hs := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ErrorLog: logger}
+	hs := newHTTPServer(handler)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- hs.Serve(ln) }()
 	logger.Printf("listening on 127.0.0.1:%d", port)
@@ -317,6 +317,19 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	}
 	logger.Printf("stopped")
 	return nil
+}
+
+// newHTTPServer serves handler with bounded headers and idle keep-alive
+// connections. There is no whole-request ReadTimeout: it would also end
+// the long-lived streams and calls that follow the request; the guard
+// bounds reading each request body instead.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          logger,
+	}
 }
 
 // clearConn clears the connection file through srv, leaving a file another
