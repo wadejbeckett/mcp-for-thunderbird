@@ -150,7 +150,7 @@ MCP for Thunderbird can set up these AI apps for you:
 | Codex | adds `[mcp_servers.mcp-for-thunderbird]` to `~/.codex/config.toml` |
 | Cursor | adds `mcp-for-thunderbird` to `~/.cursor/mcp.json` |
 
-Each entry runs the host with the word `connect`, which links the AI app to Thunderbird and reads the access key by itself. No key is written into any AI app's settings. Before changing a file, setup saves a copy next to it named with `.bak-` and the date and time. It leaves every other entry in the file alone.
+Each entry runs the host with the word `connect`, which links the AI app to Thunderbird and reads the access key by itself. No key is written into any AI app's settings. Before changing a file, setup saves a copy next to it named with `.bak-` and the date and time. It leaves every other entry in the file alone. An `mcp-for-thunderbird` entry that runs the host with `connect` from another folder, such as one setup wrote before an upgrade, is replaced. An `mcp-for-thunderbird` entry of any other kind, such as one you wrote by hand with the HTTP address or with `--instance`, is left as it is, and setup reports it.
 
 ### From the command line
 
@@ -192,7 +192,7 @@ Each Thunderbird profile with the add-on runs its own host. `connect` uses the o
 
 ### Upgrading from a versioned folder
 
-Thunderbird finds the host through the full path of the program, recorded when you run `mcp-for-thunderbird setup`. If you install the program through a package manager that keeps each version in its own folder (Homebrew, for example, keeps it under `Cellar/mcp-for-thunderbird/<version>/`), run `mcp-for-thunderbird setup` again after every upgrade, so the recorded path points to the new version. Run `setup --clients=…` again too, for the AI apps you use. The Windows installer, the macOS package and the `.deb` install to a fixed folder and need nothing extra.
+Thunderbird finds the host through the full path of the program, recorded when you run `mcp-for-thunderbird setup`. Some package managers keep each version in its own folder and a link to the current version in their `bin` folder: Homebrew, for example, keeps the program under `Cellar/mcp-for-thunderbird/<version>/` and the link in `$(brew --prefix)/bin`. When setup is started through that link (for example as `mcp-for-thunderbird setup` with that `bin` folder on your command path), it records the link, which keeps working after an upgrade. When setup was started from the versioned folder, or by a version that recorded the versioned folder, run `mcp-for-thunderbird setup` again after the upgrade, and run `setup --clients=…` again for the AI apps you use. Setup replaces the entries it wrote for the old folder. The Windows installer, the macOS package and the `.deb` install to a fixed folder and need nothing extra.
 
 ## Uninstalling
 
@@ -209,7 +209,7 @@ First remove the add-on: in Thunderbird, open **Add-ons and Themes**, find MCP f
 - **Linux (`.deb`):** run `mcp-for-thunderbird setup --uninstall` as each user who ran setup, then `sudo apt remove mcp-for-thunderbird`.
 - **Linux (`.tar.gz`):** run `~/.local/bin/mcp-for-thunderbird setup --uninstall`, then delete the program with `rm ~/.local/bin/mcp-for-thunderbird`.
 
-`setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry from each AI app, keeping a backup of each file it changes. The Claude Code entry is removed through the `claude` command; if that command is not on your command path at the time, remove the entry yourself with `claude mcp remove mcp-for-thunderbird` in a terminal.
+`setup --uninstall` removes the registration with Thunderbird and the `mcp-for-thunderbird` entry that setup wrote in each AI app, keeping a backup of each file it changes. An `mcp-for-thunderbird` entry you wrote by hand is left in place, and setup reports it. The Claude Code entry is removed through the `claude` command; if that command is not on your command path at the time, remove the entry yourself with `claude mcp remove mcp-for-thunderbird` in a terminal.
 
 The host also keeps a small connection file, holding its port and access key while Thunderbird runs, in a folder you can delete afterwards:
 
