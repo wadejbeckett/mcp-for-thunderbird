@@ -193,3 +193,24 @@ test("the log keeps at most 64 characters of the client name", async () => {
   assert.ok(a.client.startsWith("Claude x"));
   assert.equal(b.client, "y".repeat(64));
 });
+
+test("on Thunderbird 140 mail_draft and mail_send are refused with not_supported", async () => {
+  install({ release: 140, accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }] });
+  await save({ accounts: { a1: true }, groups: { compose: true }, send: { enabled: true, allow: ["x@y.test"] } });
+  let ran = false;
+  HANDLERS.mail_draft = HANDLERS.mail_send = async () => {
+    ran = true;
+    return {};
+  };
+  for (const tool of ["mail_draft", "mail_send"]) {
+    const r = await dispatch(call(tool, { kind: "new", to: ["x@y.test"] }));
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, "not_supported");
+    assert.match(r.error.message, /Thunderbird 153 or later/);
+  }
+  assert.equal(ran, false);
+  // The refusal is not hidden behind a policy answer.
+  await save({ groups: { compose: false }, send: { enabled: false } });
+  assert.equal((await dispatch(call("mail_draft", { kind: "new" }))).error.code, "not_supported");
+  assert.deepEqual((await list()).map((e) => e.outcome).slice(-1), ["not_supported"]);
+});

@@ -9,6 +9,7 @@
 
 import { load, save, enabledTools } from "../src/settings.js";
 import { byId, showState, showLog, checkboxRow, messageOf, realDeps, inPage } from "./dom.js";
+import { supported } from "../src/features.js";
 import { parseAllowlist, isAbsolutePath, RESTART_NOTE, allMailAccounts, GMAIL_NOTE } from "./logic.js";
 
 const GROUPS = ["read", "organise", "compose", "contacts"];
@@ -106,6 +107,15 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
   $("attachment-dir").value = settings.attachmentDir;
   $("send-enabled").checked = settings.send.enabled;
   $("send-allow").value = settings.send.allow.join("\n");
+
+  // Thunderbird 140 cannot save drafts or send without a window
+  // (features.js): say so, and keep direct send off and unchangeable.
+  $("draft-unsupported").hidden = supported("mail_draft", m);
+  if (!supported("mail_send", m)) {
+    $("send-unsupported").hidden = false;
+    $("send-enabled").checked = false;
+    $("send-enabled").disabled = true;
+  }
 
   // ---- direct send: the permission is asked for by this click ----
 

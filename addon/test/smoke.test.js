@@ -10,10 +10,10 @@ const manifest = JSON.parse(
   readFileSync(new URL("../manifest.json", import.meta.url), "utf8"),
 );
 
-test("manifest identifies the add-on and requires Thunderbird 153", () => {
+test("manifest identifies the add-on and requires Thunderbird 140", () => {
   const gecko = manifest.browser_specific_settings.gecko;
   assert.equal(gecko.id, "mcp-for-thunderbird@wadejbeckett.github.io");
-  assert.equal(gecko.strict_min_version, "153.0");
+  assert.equal(gecko.strict_min_version, "140.0");
 });
 
 test("manifest declares no Experiment APIs", () => {

@@ -14,6 +14,7 @@
 import { load, save, enabledTools, STORAGE_KEY } from "./settings.js";
 import { list as logList, clear as logClear } from "./log.js";
 import { dispatch } from "./rpc.js";
+import { supportedTools } from "./features.js";
 // Handler modules register themselves in rpc.HANDLERS.
 import "./handlers/read.js";
 import "./handlers/contacts.js";
@@ -118,7 +119,8 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   }
 
   async function currentTools(s) {
-    let tools = enabledTools(s);
+    // Tools this Thunderbird cannot run are never offered (features.js).
+    let tools = supportedTools(enabledTools(s));
     if (tools.includes("mail_send")) {
       let granted = false;
       try {

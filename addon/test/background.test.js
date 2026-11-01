@@ -454,3 +454,15 @@ test("token and app requests are refused while an update is needed", async () =>
   assert.equal(port.sentOfType("token_request").length, 0);
   assert.equal(port.sentOfType("clients_detect").length, 0);
 });
+
+test("on Thunderbird 140 the tool list leaves out mail_draft and mail_send", async () => {
+  bg.stop();
+  mock = install({ release: 140, accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX"] }], manifest: { version: "1.2.3", manifest_version: 3 } });
+  await save({ accounts: { a1: true }, groups: { compose: true }, send: { enabled: true, allow: ["x@y.test"] } });
+  bg = createBackground({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout });
+  await bg.start();
+  const tools = mock.lastPort().sentOfType("hello")[0].tools;
+  assert.equal(tools.includes("mail_compose"), true);
+  assert.equal(tools.includes("mail_draft"), false);
+  assert.equal(tools.includes("mail_send"), false);
+});

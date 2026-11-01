@@ -90,6 +90,7 @@ const OUTCOMES = Object.freeze({
   invalid_argument: "Refused: invalid request",
   refused: "Refused",
   too_large: "Too large",
+  not_supported: "Refused: needs a newer Thunderbird",
   thunderbird_error: "Thunderbird error",
 });
 
