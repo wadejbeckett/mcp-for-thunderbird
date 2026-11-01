@@ -57,9 +57,11 @@ func AllowPortsForTesting(allow func(port int) bool) (restore func()) {
 // Usable reports why c must not be used to reach a host, or nil. A file is
 // usable only while the host that wrote it is alive (it clears its port on
 // a clean exit), its PID is still a running mcp-for-thunderbird (see
-// HostRunning), and it names a port in 47110-47119 and a well-formed token;
-// otherwise the port may now belong to another program, which must never
-// be sent the token (ruling R33).
+// HostRunning) that started when the file records (when it records a
+// start; see StartMark), and it names a port in 47110-47119 and a
+// well-formed token; otherwise the port may now belong to another
+// program, which must never be sent the token (ruling R33). A start that
+// cannot be read counts as a mismatch, so a doubtful file is stale.
 func Usable(c *Conn) error {
 	switch {
 	case c == nil:
@@ -72,16 +74,23 @@ func Usable(c *Conn) error {
 		return errors.New("connfile: no valid token")
 	case !HostRunning(c.PID):
 		return errors.New("connfile: MCP for Thunderbird is not running")
+	case c.Started != "" && !sameStart(c.PID, c.Started):
+		return errors.New("connfile: MCP for Thunderbird is not running")
 	}
 	return nil
 }
 
 // Conn is the content of one connection file.
 type Conn struct {
-	Instance  string    `json:"instance"`
-	Port      int       `json:"port"`
-	Token     string    `json:"token"`
-	PID       int       `json:"pid"`
+	Instance string `json:"instance"`
+	Port     int    `json:"port"`
+	Token    string `json:"token"`
+	PID      int    `json:"pid"`
+	// Started marks when the host process PID started (see StartMark), so
+	// a PID reused by another process is told apart. Files written by
+	// hosts before 0.2.0, or on a platform where the mark cannot be read,
+	// have none.
+	Started   string    `json:"started,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -210,10 +219,16 @@ func owned(c *Conn) error {
 	return nil
 }
 
-// Rotate replaces c.Token with a fresh token and saves the file, unless the
-// file now belongs to another host (ErrNotOwner).
+// Rotate replaces c.Token with a fresh token and saves the file. A missing,
+// unreadable or corrupt file is replaced by a fresh one. When the file now
+// belongs to another host, Rotate leaves it as it is and returns
+// ErrNotOwner, but still forgets c's token, so the old key, which the user
+// asked to replace, is refused from then on; the host then authorises
+// nothing until a later rotation succeeds or it is started again. If
+// saving fails, c keeps its old token, which the file still holds.
 func Rotate(c *Conn) error {
-	if err := owned(c); err != nil {
+	if err := owned(c); errors.Is(err, ErrNotOwner) {
+		c.Token = ""
 		return err
 	}
 	old := c.Token

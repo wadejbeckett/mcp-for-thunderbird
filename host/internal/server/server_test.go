@@ -575,6 +575,45 @@ func TestRotateRefusedAfterClear(t *testing.T) {
 	}
 }
 
+// A rotation refused because another host has taken the connection file
+// over still stops the old token: the guard refuses it from then on.
+func TestRefusedRotateStopsOldToken(t *testing.T) {
+	d := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", d)
+	t.Setenv("HOME", d)
+	t.Setenv("AppData", d)
+	conn := &connfile.Conn{Instance: "dup", Port: 47110, Token: connfile.NewToken(), PID: os.Getpid()}
+	if err := connfile.Save(conn); err != nil {
+		t.Fatal(err)
+	}
+	old := conn.Token
+	if err := connfile.Save(&connfile.Conn{Instance: "dup", Port: 47111, Token: connfile.NewToken(), PID: os.Getpid() + 1}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(nil, conn, func() string { return "" })
+	s.Log = log.New(io.Discard, "", 0)
+	h := s.Handler()
+	status := func() int {
+		r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:47110/mcp", nil)
+		r.Header.Set("Authorization", "Bearer "+old)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := status(); code == http.StatusUnauthorized {
+		t.Fatal("old token refused before the rotation")
+	}
+	if err := s.Rotate(); !errors.Is(err, connfile.ErrNotOwner) {
+		t.Fatalf("Rotate = %v, want ErrNotOwner", err)
+	}
+	if code := status(); code != http.StatusUnauthorized {
+		t.Fatalf("old token after a refused rotation: status %d, want 401", code)
+	}
+	if s.Token() != "" {
+		t.Fatalf("token in memory %q, want none", s.Token())
+	}
+}
+
 // A call that changes mail and reached Thunderbird without an answer says
 // the action may have happened, so it is not simply repeated; a read says
 // only what went wrong.

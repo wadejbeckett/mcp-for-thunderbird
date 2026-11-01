@@ -169,7 +169,8 @@ var ErrStopped = errors.New("server: stopped")
 
 // Rotate replaces the token and saves the connection file. It refuses
 // after Clear (ErrStopped), and when another host has taken the file over
-// (connfile.ErrNotOwner).
+// (connfile.ErrNotOwner); the old token is then forgotten all the same, so
+// the guard refuses every request until a later rotation succeeds.
 func (s *Server) Rotate() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

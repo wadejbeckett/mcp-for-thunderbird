@@ -13,3 +13,7 @@ const nameLimit = 0
 // release builds do not target; a live PID of the current user is then
 // taken as the host's.
 func processName(int) (string, bool) { return HostName, true }
+
+// processStart cannot read a process's start on this platform: files
+// record no start, and PIDs are compared as before 0.2.0.
+func processStart(int) (string, bool) { return "", false }

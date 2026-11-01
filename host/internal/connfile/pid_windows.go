@@ -5,7 +5,11 @@
 
 package connfile
 
-import "golang.org/x/sys/windows"
+import (
+	"strconv"
+
+	"golang.org/x/sys/windows"
+)
 
 // stillActive is the exit code GetExitCodeProcess reports for a running
 // process (STILL_ACTIVE).
@@ -50,4 +54,27 @@ func processName(pid int) (string, bool) {
 		return "", false
 	}
 	return windows.UTF16ToString(buf[:n]), true
+}
+
+// processStart marks pid's start with its creation time (GetProcessTimes),
+// in 100-nanosecond intervals since 1601, which Windows stores once per
+// process.
+func processStart(pid int) (string, bool) {
+	if pid <= 0 || pid > 0xFFFFFFFF {
+		return "", false
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return "", false
+	}
+	defer windows.CloseHandle(h)
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return "", false
+	}
+	t := uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime)
+	if t == 0 {
+		return "", false
+	}
+	return strconv.FormatUint(t, 10), true
 }

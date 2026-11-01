@@ -202,7 +202,11 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 		if s := current(); s != nil {
 			// Rotate refuses once the host is stopping (Clear has run),
 			// so a late rotation cannot put a token back in the file.
-			if err := s.Rotate(); err != nil {
+			switch err := s.Rotate(); {
+			case errors.Is(err, connfile.ErrNotOwner):
+				logger.Printf("token rotation refused: the connection file belongs to another host; the old token no longer works, and requests are refused until a later rotation succeeds or Thunderbird starts the host again")
+				return
+			case err != nil:
 				logger.Printf("token rotation refused: %v", err)
 				return
 			}
@@ -268,6 +272,7 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	}
 	conn.Port = port
 	conn.PID = os.Getpid()
+	conn.Started = connfile.StartMark(conn.PID)
 	if err := connfile.Save(conn); err != nil {
 		ln.Close()
 		_ = b.SendWelcome(0, "Could not write the connection file")
@@ -365,11 +370,15 @@ var (
 // so this host waits up to takeoverWait for the other to stop (it clears
 // its port on exit) and then refuses to start (errOtherHost). A file whose
 // PID has exited, or now belongs to another program after a crash, is
-// stale: it is logged and taken over. So is a file whose port nobody
-// listens on: a host saves the file only once it listens, so the PID
-// is then not serving this instance (for example a reused PID that now
-// runs a connect proxy). The file read last is returned so its port can
-// be tried first.
+// stale: it is logged and taken over. So is a file whose PID is known to
+// have started at another time than the host that wrote it (a PID reused
+// by a connect proxy or another profile's host, whatever listens on the
+// port now), and a file whose port nobody listens on: a host saves the
+// file only once it listens, so the PID is then not serving this
+// instance. A start that cannot be read, or a file without one (written
+// by a host before 0.2.0), proves nothing either way, and only the other
+// checks decide. The file read last is returned so its port can be tried
+// first.
 func waitForOtherHost(ctx context.Context, instance string) (*connfile.Conn, error) {
 	deadline := time.Now().Add(takeoverWait)
 	logged := false
@@ -378,7 +387,7 @@ func waitForOtherHost(ctx context.Context, instance string) (*connfile.Conn, err
 		if err != nil || old.Port == 0 || old.PID == os.Getpid() || old.PID <= 0 {
 			return old, err
 		}
-		if !connfile.HostRunning(old.PID) || portFree(old.Port) {
+		if !connfile.HostRunning(old.PID) || connfile.PIDReused(old) || portFree(old.Port) {
 			if logged {
 				logger.Printf("the other host has stopped; taking over the connection file")
 			}

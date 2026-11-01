@@ -31,6 +31,42 @@ func HostRunning(pid int) bool {
 	return hostName(name)
 }
 
+// StartMark returns a mark of when process pid started, as the platform
+// records it, or "" when it cannot be read. Two marks are only ever
+// compared for equality, on the same computer: a PID that names a
+// process with another mark has been reused since the mark was taken.
+func StartMark(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	m, ok := processStart(pid)
+	if !ok {
+		return ""
+	}
+	return m
+}
+
+// sameStart reports whether pid is known to have started at mark; a
+// start that cannot be read is not the same.
+func sameStart(pid int, mark string) bool {
+	m := StartMark(pid)
+	return m != "" && m == mark
+}
+
+// PIDReused reports whether c's PID is known to belong to a process that
+// started at another time than the host that wrote c: the file records a
+// start, and pid's start can be read and differs. Whenever that is in
+// doubt (no recorded start, as in files of hosts before 0.2.0, or a start
+// that cannot be read) the answer is false, so a takeover decision falls
+// back to its other checks rather than treating a live host as gone.
+func PIDReused(c *Conn) bool {
+	if c == nil || c.Started == "" {
+		return false
+	}
+	m := StartMark(c.PID)
+	return m != "" && m != c.Started
+}
+
 // hostName reports whether name, a process's program name as the platform
 // reports it, is the host's. Both sides are cut to the length the platform
 // keeps, so a full name and a kernel-truncated one compare alike.
