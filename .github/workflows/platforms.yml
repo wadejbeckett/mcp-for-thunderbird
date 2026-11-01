@@ -13,11 +13,15 @@
 # release with the archives, .deb, .xpi, .mcpb, SBOMs and SHA256SUMS, and
 # the sums job adds the Windows installers and the macOS pkg to SHA256SUMS
 # and checks everything again; the publish job then uploads them to that
-# draft. When the release job, an installer job or a check fails, the draft
-# is deleted and the tag is kept. The release stays a draft until the
-# maintainer checks the end-to-end jobs and publishes it (CONTRIBUTING.md,
-# Releasing). Only the release and publish jobs, which run only on a tag
-# push, may write to the repository.
+# draft. The release job refuses a tag that already has a release, draft or
+# published, and records the id of the draft it created; every later upload
+# or deletion acts on that id only, and only while it is still a draft.
+# When the release job or one of its checks fails, its draft is deleted and
+# the tag is kept. When release succeeded and a later job failed, the draft
+# stays, so "Re-run failed jobs" can finish it. The release stays a draft
+# until the maintainer checks the end-to-end jobs and publishes it
+# (CONTRIBUTING.md, Releasing). Only the release and publish jobs, which run
+# only on a tag push, may write to the repository.
 
 name: platforms
 
@@ -95,6 +99,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # GoReleaser creates the draft release
+    outputs:
+      release_id: ${{ steps.draft.outputs.id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -108,23 +114,70 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
+      # GoReleaser (draft: true) adds a second draft when a release with
+      # this tag exists, and the steps below must only ever act on the draft
+      # this run creates, so an existing release of any kind stops the job.
+      - name: Refuse a tag that already has a release
+        id: no-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          found=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name == env.TAG) | "\(.id) draft=\(.draft)"')
+          if [ -n "$found" ]; then
+            echo "::error::$TAG already has a release (delete it by hand, or tag a new version):"
+            echo "$found"
+            exit 1
+          fi
+          echo "no release has the tag $TAG"
       - name: GoReleaser draft release, check.sh and its self-test
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: sh packaging/build.sh --clean
+      # Runs when GoReleaser or a check failed too: the deletion below needs
+      # the id. The tag had no release before GoReleaser ran, so the one
+      # release it has now is this run's draft.
+      - name: Record the id of the draft release this run created
+        id: draft
+        if: ${{ always() && steps.no-release.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          found=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"')
+          count=$(printf '%s' "$found" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::want one release with the tag $TAG, found $count; no id recorded"
+            exit 1
+          fi
+          id=${found%% *}
+          if [ "${found#* }" != true ]; then
+            echo "::error::release $id of $TAG is not a draft; no id recorded"
+            exit 1
+          fi
+          echo "id=$id" >>"$GITHUB_OUTPUT"
+          echo "draft release $id of $TAG"
       # GoReleaser uploads the draft before check.sh runs: a draft holding
       # artefacts that check.sh rejected must not stay. The tag stays.
-      - name: Delete the draft release when the build or a check failed
+      - name: Delete this run's draft release when the build or a check failed
         if: ${{ failure() || cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx true; then
-            gh release delete "$GITHUB_REF_NAME" --yes
-            echo "deleted the draft release $GITHUB_REF_NAME; the tag is kept"
+          set -eu
+          if [ -z "$RELEASE_ID" ]; then
+            echo "no draft release recorded by this run; nothing deleted"
+            exit 0
+          fi
+          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft || echo missing)
+          if [ "$draft" = true ]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
+            echo "deleted the draft release $RELEASE_ID; the tag is kept"
           else
-            echo "no draft release $GITHUB_REF_NAME to delete"
+            echo "release $RELEASE_ID is not a draft ($draft); nothing deleted"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -309,10 +362,13 @@ jobs:
             dist/*.spdx.json
           retention-days: 7
 
-  # A release tag: completes the draft release with the installers, the
-  # pkg and the completed SHA256SUMS once sums has checked them, or deletes
-  # the draft (keeping the tag) when the release, the installers or a check
-  # failed. Besides release, the only job that may write.
+  # A release tag: completes the draft release that the release job
+  # recorded with the installers, the pkg and the completed SHA256SUMS once
+  # sums has checked them. When an installer job, sums or this job fails,
+  # the draft stays and "Re-run failed jobs" runs them and this job again;
+  # the upload replaces what an earlier attempt left. Only a failed release
+  # job loses its draft (normally to its own cleanup step; the last step
+  # here is a fallback). Besides release, the only job that may write.
   publish:
     needs: [release, windows-installer, macos-pkg, sums]
     if: ${{ always() && !inputs.reuse_run && startsWith(github.ref, 'refs/tags/v') }}
@@ -320,30 +376,56 @@ jobs:
     permissions:
       contents: write # upload to, or delete, the draft release
     steps:
-      - if: ${{ needs.sums.result == 'success' }}
+      - if: ${{ needs.release.result == 'success' && needs.sums.result == 'success' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-candidate
           path: release-candidate
+      # gh release upload finds the release by tag, so first check that the
+      # tag's one release is still the draft the release job recorded.
       - name: Add the installers, the pkg and the completed SHA256SUMS to the draft release
-        if: ${{ needs.sums.result == 'success' }}
+        if: ${{ needs.release.result == 'success' && needs.sums.result == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
         run: |
+          set -eu
+          [ -n "$RELEASE_ID" ] || { echo "::error::the release job recorded no draft release id"; exit 1; }
+          found=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"')
+          if [ "$found" != "$RELEASE_ID true" ]; then
+            echo "::error::the releases with the tag $TAG are not just the draft $RELEASE_ID:"
+            echo "$found"
+            exit 1
+          fi
           cd release-candidate
-          gh release upload "$GITHUB_REF_NAME" ./*-setup.exe ./*-macos.pkg SHA256SUMS --clobber
-      - name: Delete the draft release when a build or a check failed
-        if: ${{ needs.sums.result != 'success' || failure() || cancelled() }}
+          gh release upload "$TAG" ./*-setup.exe ./*-macos.pkg SHA256SUMS --clobber
+          echo "draft release $RELEASE_ID of $TAG is complete"
+      - name: Keep the draft release for a re-run when a later job failed
+        if: ${{ needs.release.result == 'success' && needs.sums.result != 'success' }}
+        env:
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+        run: |
+          echo "::error::an installer job or sums did not succeed; draft release $RELEASE_ID is kept. Use \"Re-run failed jobs\" to finish it."
+          exit 1 # the release is not complete
+      - name: Delete the release job's draft release when that job failed
+        if: ${{ needs.release.result != 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx true; then
-            gh release delete "$GITHUB_REF_NAME" --yes
-            echo "deleted the draft release $GITHUB_REF_NAME; the tag is kept"
+          set -eu
+          if [ -n "$RELEASE_ID" ]; then
+            draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft || echo missing)
+            if [ "$draft" = true ]; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
+              echo "deleted the draft release $RELEASE_ID; the tag is kept"
+            else
+              echo "release $RELEASE_ID is not a draft ($draft); nothing deleted"
+            fi
           else
-            echo "no draft release $GITHUB_REF_NAME to delete"
+            echo "no draft release recorded by the release job; nothing deleted"
           fi
           exit 1 # the release is not complete
 
