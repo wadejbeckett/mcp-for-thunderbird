@@ -549,7 +549,7 @@ test("mail_read returns headers, auth, wrapped plain text and attachment names",
   assert.deepEqual(out.auth, { spf: "pass", dkim: "pass", dmarc: "fail" });
   assert.equal(inner(out.text), "HTML-VERSION", "the HTML part, what the reader sees, is preferred over plain text");
   assert.equal(out.truncated, false);
-  assert.deepEqual(out.attachments, [{ name: "a.pdf", size: 1234, contentType: "application/pdf" }]);
+  assert.deepEqual(out.attachments, [{ name: "a.pdf", size: 1234, contentType: "application/pdf", part: "1.2" }]);
   assert.doesNotMatch(JSON.stringify(out), /hidden@example\.org/, "bcc is not returned");
 });
 
@@ -873,9 +873,37 @@ test("an exact attachment name wins over one that differs only by invisible char
     const r = await call("mail_attachment", { id: idOf(m), name });
     assert.deepEqual(r.error, {
       code: "invalid_argument",
-      message: "Several attachments in this message have that name, so the attachment meant cannot be told apart.",
+      message: 'Several attachments in this message have that name; give the attachment\'s "part" from mail_read to pick one.',
     }, name);
   }
+});
+
+test("mail_read lists each attachment's part, and mail_attachment's part picks one of several with a name", async () => {
+  const m = mock.addMessage("a1", "INBOX", {
+    date: ago(1),
+    body: "hi",
+    attachments: [
+      { name: "same.txt", size: 1, contentType: "text/plain", partName: "1.2", content: "first" },
+      { name: "same.txt", size: 1, contentType: "text/plain", partName: "1.3", content: "second" },
+      { name: "a\u200B.txt", size: 1, contentType: "text/plain", partName: "1.4", content: "zw" },
+      { name: "a\u200C.txt", size: 1, contentType: "text/plain", partName: "1.5", content: "zwnj" },
+    ],
+  });
+  const other = mock.addMessage("a1", "INBOX", { date: ago(1), attachments: [{ name: "same.txt", size: 1, contentType: "text/plain", partName: "1.6", content: "other" }] });
+  const listed = (await ok("mail_read", { id: idOf(m) })).attachments;
+  assert.deepEqual(listed.map((a) => [a.name, a.part]), [["same.txt", "1.2"], ["same.txt", "1.3"], ["a.txt", "1.4"], ["a.txt", "1.5"]]);
+  for (const a of listed) {
+    const r = await ok("mail_attachment", { id: idOf(m), name: a.name, part: a.part });
+    assert.equal(inner(r.text), { "1.2": "first", "1.3": "second", "1.4": "zw", "1.5": "zwnj" }[a.part]);
+  }
+  // a part of another message, a part that is not an attachment, a name that does not fit the part
+  for (const args of [{ name: "same.txt", part: "1.6" }, { name: "same.txt", part: "1.1" }, { name: "same.txt", part: "1" }, { name: "a.txt", part: "1.2" }]) {
+    const r = await call("mail_attachment", { id: idOf(m), ...args });
+    assert.equal(r.error.code, "not_found", JSON.stringify(args));
+  }
+  assert.equal(inner((await ok("mail_attachment", { id: idOf(other), name: "same.txt", part: "1.6" })).text), "other");
+  const bad = await call("mail_attachment", { id: idOf(m), name: "same.txt", part: 2 });
+  assert.equal(bad.error.code, "invalid_argument");
 });
 
 test("R23: a text/html attachment is cleaned like a body", async () => {

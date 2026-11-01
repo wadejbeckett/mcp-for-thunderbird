@@ -764,6 +764,9 @@ async function mailRead(args, ctx) {
       name: clip(a && a.name),
       size: a && Number.isFinite(a.size) ? a.size : null,
       contentType: clip(a && a.contentType),
+      // Thunderbird's part name: mail_attachment's part picks this one
+      // among attachments that share a name
+      part: a && typeof a.partName === "string" ? clip(a.partName) : null,
     })),
   };
   if (body.differs) out.plainTextDiffers = true;
@@ -777,7 +780,7 @@ export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024 };
 const ATTACHMENT_TEXT = 20_000;
 const NO_DIR = "Choose an attachment folder in MCP for Thunderbird's options first.";
 const TOO_LARGE = "The attachment is larger than 50 MiB.";
-const AMBIGUOUS = "Several attachments in this message have that name, so the attachment meant cannot be told apart.";
+const AMBIGUOUS = 'Several attachments in this message have that name; give the attachment\'s "part" from mail_read to pick one.';
 // base64 is built in pieces of whole 3-byte groups.
 const B64_PIECE = 3 * 16_384;
 
@@ -807,6 +810,7 @@ async function mailAttachment(args, ctx) {
   const s = ctx.settings;
   const name = optString(args, "name");
   if (name === undefined) fail("invalid_argument", "name is required.");
+  const part = optString(args, "part");
   const run = newRun();
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
@@ -814,8 +818,14 @@ async function mailAttachment(args, ctx) {
   // lists it (cleaned by clip: invisible characters stripped, markers
   // defused, at most 2000 characters). An exact name always wins, so an
   // attachment whose name differs only by invisible characters cannot
-  // stand in for it; a name that fits several attachments is refused.
-  const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
+  // stand in for it. A part (from mail_read) picks one attachment of
+  // the message, which must also have that name; without a part, a name
+  // that fits several attachments is refused.
+  let atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
+  if (part !== undefined) {
+    atts = atts.filter((a) => a.partName === part);
+    if (atts.length === 0) fail("not_found", "No attachment with that part in this message.");
+  }
   let found = atts.filter((a) => a.name === name);
   if (found.length === 0) found = atts.filter((a) => clip(a.name) === name);
   if (found.length === 0) fail("not_found", "No attachment of that name in this message.");
