@@ -19,7 +19,11 @@ Environment:
   MFT_E2E_GREENMAIL    the GreenMail standalone jar (required for run)
   MFT_E2E_DIR          work dir, MFT_E2E_PROFILE profile dir; both names
                        must start mft-e2e (default under the temp dir)
-  MFT_E2E_RUN          go test -run pattern (default TestE2ERead$|TestE2EOrganise$)
+  MFT_E2E_RUN          go test -run pattern (default TestE2ERead$|TestE2EOrganise$,
+                       the tests the platforms workflow runs)
+  GITHUB_STEP_SUMMARY  when set (GitHub Actions), the Thunderbird version the
+                       tests ran against, the pattern and the result are
+                       added to the job summary
   MFT_E2E_KEEP=1       keep the work dir and profile
   MFT_E2E_HEADLESS=0   show Thunderbird's window instead of running headless
 
@@ -578,6 +582,23 @@ def seed():
 
 # --- run -------------------------------------------------------------------
 
+DEFAULT_RUN = "TestE2ERead$|TestE2EOrganise$"
+VERSION_JS = 'return Services.appinfo.name + " " + Services.appinfo.version + " (build " + Services.appinfo.appBuildID + ")";'
+
+
+def summary(thunderbird, pattern, rc):
+    """Adds what ran, and against which Thunderbird, to the job summary."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    system = "Windows" if WIN else "macOS" if MAC else sys.platform
+    result = "passed" if rc == 0 else f"failed (exit {rc})"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"### End-to-end tests on {system}\n\n"
+                f"- Thunderbird: {thunderbird or 'not started'}\n"
+                f"- Tests (go test -run): `{pattern}`\n"
+                f"- Result: {result}\n\n")
+
 
 def run(goargs):
     check_dirs()
@@ -591,6 +612,8 @@ def run(goargs):
     HOME.mkdir(parents=True)
     gm = None
     rc = 1
+    thunderbird = None
+    pattern = os.environ.get("MFT_E2E_RUN") or DEFAULT_RUN
     try:
         log("starting GreenMail")
         gm = greenmail_start(jar)
@@ -628,6 +651,8 @@ def run(goargs):
         if not synced.isdigit():
             die(f"inbox sync failed: {synced}")
         log(f"inbox synchronised: {synced} messages")
+        thunderbird = json.loads(marionette(["-"], VERSION_JS))
+        log(f"running against {thunderbird}")
 
         log("running the tests")
         wrapper = HERE / ("tbctl.cmd" if WIN else "tbctl")
@@ -636,11 +661,11 @@ def run(goargs):
                    MFT_E2E_CONFIG=str(config_dir()), MFT_E2E_HOME=str(HOME),
                    MFT_E2E_DIR=str(WORK), MFT_E2E_PROFILE=str(PROFILE))
         env.setdefault("GOTOOLCHAIN", "auto")
-        pattern = os.environ.get("MFT_E2E_RUN", "TestE2ERead$|TestE2EOrganise$")
         rc = subprocess.run(["go", "test", "-count=1", "-run", pattern, *goargs, "./..."],
                             cwd=E2E, env=env).returncode
     finally:
         log("teardown")
+        summary(thunderbird, pattern, rc)
         tb_stop()
         stop_process(gm)
         if rc != 0:
