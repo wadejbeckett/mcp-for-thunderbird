@@ -602,8 +602,8 @@ function truncate(s, n) {
 // value is cut before it is cleaned (with headroom for what cleaning
 // removes), so a huge header costs no more than a short one.
 const HEADROOM = 512;
-const clip = (v) => truncate(cleanLine(truncate(String(v ?? ""), HEADER_CHARS + HEADROOM).text), HEADER_CHARS).text;
-const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
+export const clip = (v) => truncate(cleanLine(truncate(String(v ?? ""), HEADER_CHARS + HEADROOM).text), HEADER_CHARS).text;
+export const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
 
 function firstHeader(full, name) {
   const v = full && full.headers ? full.headers[name] : undefined;
