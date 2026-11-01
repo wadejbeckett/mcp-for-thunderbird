@@ -8,6 +8,9 @@
 # 127.0.0.1; Thunderbird runs with a throwaway profile and home on the
 # throwaway runner. Nothing is installed but the libraries Thunderbird needs.
 #
+# It runs on every release tag (vX.Y.Z) too, so each release has a Linux
+# end-to-end run for the tagged commit (CONTRIBUTING.md, Releasing).
+#
 # To move to newer Thunderbird versions, change `version` and `sha256` in
 # the matrix below. The version is the release folder name on
 # https://archive.mozilla.org/pub/thunderbird/releases/ (140.x.yesr for
@@ -28,6 +31,7 @@ on:
       - .github/workflows/e2e-linux.yml
   push:
     branches: [v1]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"] # path filters do not apply to tag pushes
     paths:
       - host/**
       - addon/**
@@ -64,9 +68,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: test/e2e/go.mod
-          cache-dependency-path: |
-            host/go.sum
-            test/e2e/go.sum
+          cache: false # it runs on release tags too; no shared cache
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
