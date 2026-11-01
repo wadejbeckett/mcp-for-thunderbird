@@ -9,7 +9,7 @@ import { install, fetchFrom, COMPOSE_SIGNATURE } from "./mocks/messenger.js";
 import { dispatch, HANDLERS } from "../src/rpc.js";
 import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
+import { isAllowed, baseName, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -574,4 +574,33 @@ test("mail_compose: a timeout of the call that opens the window may have complet
   } finally {
     COMPOSE.budgetMs = budget;
   }
+});
+
+// ---- attachment names ----
+
+test("baseName cuts long names on code points and keeps the extension", () => {
+  const emoji = "\u{1F600}"; // two UTF-16 units
+  const long = "ab" + emoji.repeat(300) + ".pdf";
+  const n = baseName(long);
+  assert.equal([...n].length, 255);
+  assert.ok(n.endsWith(emoji + ".pdf"), n.slice(-10));
+  assert.doesNotThrow(() => encodeURIComponent(n));
+  // a cut at 255 UTF-16 units would have split a pair
+  assert.throws(() => encodeURIComponent(long.slice(0, 255)));
+  // no extension, or one too long to be one: a plain cut
+  assert.equal(baseName("x".repeat(300)), "x".repeat(255));
+  assert.equal(baseName("x".repeat(280) + "." + "y".repeat(40)), "x".repeat(255));
+  // path segments go and short names stay; a lone surrogate becomes U+FFFD
+  assert.equal(baseName("C:\\dir/sub\\report.pdf"), "report.pdf");
+  assert.equal(baseName("a\ud800b.txt"), "a\ufffdb.txt");
+  assert.equal(baseName("dir/"), "attachment");
+});
+
+test("mail_draft forward with a long non-ASCII attachment name saves", async () => {
+  const o = original();
+  const name = "\u{1F600}".repeat(200) + ".txt";
+  const r = await call("mail_draft", { kind: "forward", id: o.id, to: ["c@example.test"], body: "FYI", attachments: [{ name, data: new Uint8Array([1]) }] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const raw = mock.calls.import[0].raw;
+  assert.match(raw, /filename\*=UTF-8''(%F0%9F%98%80)+\.txt/);
 });

@@ -116,7 +116,21 @@ function kindArg(args) {
   return kind;
 }
 
-const baseName = (n) => oneLine(n).split(/[/\\]/).pop().slice(0, MAX_NAME) || "attachment";
+// baseName keeps the last path segment of an attachment name, at most
+// MAX_NAME characters counted in code points, so a cut never splits a
+// surrogate pair (encodeURIComponent throws on half of one). A long name
+// loses the end of its stem and keeps its extension. A lone surrogate in
+// the name becomes U+FFFD.
+const MAX_EXT = 16;
+export function baseName(n) {
+  let name = [...oneLine(n).split(/[/\\]/).pop().toWellFormed()];
+  if (name.length > MAX_NAME) {
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 && name.length - dot <= MAX_EXT ? name.slice(dot) : [];
+    name = [...name.slice(0, MAX_NAME - ext.length), ...ext];
+  }
+  return name.join("") || "attachment";
+}
 
 // attachmentsArg checks attachments resolved by the background page from
 // the host's blobs ({name, data: Uint8Array}).
