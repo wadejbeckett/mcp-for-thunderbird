@@ -619,6 +619,23 @@ export async function message(run, id, s) {
   return msg;
 }
 
+// plainDiffers says a plain-text alternative holds at least PLAIN_EXTRA
+// words (runs of letters and digits, in any case) that the text shown
+// from the HTML part does not: text in the message the reader never sees.
+const PLAIN_EXTRA = 5;
+const WORD = /[\p{L}\p{N}]+/gu;
+
+export function plainDiffers(plain, shown) {
+  if (plain.trim() === "") return false;
+  const seen = new Set(shown.toLowerCase().match(WORD) || []);
+  const extra = new Set();
+  for (const w of plain.toLowerCase().matchAll(WORD)) {
+    if (!seen.has(w[0])) extra.add(w[0]);
+    if (extra.size >= PLAIN_EXTRA) return true;
+  }
+  return false;
+}
+
 async function mailRead(args, ctx) {
   const s = ctx.settings;
   const maxChars = limitArg(args.max_chars, DEFAULT_MAX_CHARS, MAX_CHARS, "max_chars");
@@ -631,12 +648,15 @@ async function mailRead(args, ctx) {
   answered(full);
   answered(atts);
 
+  // The text is what a reader sees: the HTML part through htmlToText
+  // when there is one (a plain alternative can hold text the reader is
+  // never shown), else the plain part.
   const parts = bodyParts(full);
-  const plainFirst = parts.plain.trim() !== "";
-  const source = plainFirst ? parts.plain : htmlToText(parts.html);
-  const { text, cut } = truncate(stripInvisible(source), maxChars);
-  const over = plainFirst ? parts.plainOver : parts.htmlOver;
-  return {
+  const useHtml = parts.html.trim() !== "";
+  const source = stripInvisible(useHtml ? htmlToText(parts.html) : parts.plain);
+  const { text, cut } = truncate(source, maxChars);
+  const over = useHtml ? parts.htmlOver : parts.plainOver;
+  const out = {
     id: args.id,
     headers: {
       date: iso(msg.date),
@@ -655,6 +675,8 @@ async function mailRead(args, ctx) {
       contentType: clip(a && a.contentType),
     })),
   };
+  if (useHtml && plainDiffers(stripInvisible(parts.plain), source)) out.plainTextDiffers = true;
+  return out;
 }
 
 // ---- mail_attachment ----
