@@ -314,11 +314,77 @@ function fontPx(v, parent) {
   }
 }
 
-const FAR = 1000; // px: positioned this far off, a box is off-screen
+const FAR = 1000; // px: moved this far off (left or up), a box is off-screen
+const FAR_AHEAD = 10 * FAR; // px: moved this far right or down
+// vw and vh are worked out on a reading pane this many px wide and high.
+const VIEWPORT = 1000;
+const UNIT_PX = {
+  px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, rem: DEFAULT_PX,
+  vw: VIEWPORT / 100, vh: VIEWPORT / 100, vmin: VIEWPORT / 100, vmax: VIEWPORT / 100,
+};
 
-function farOff(v) {
+// toPx gives a length in px (em against the element's font size), or NaN
+// for a percentage, a keyword or anything else this cannot work out.
+function toPx(v, em) {
   const l = length(v);
-  return Boolean(l && l.unit === "px" && l.n <= -FAR);
+  if (!l || Number.isNaN(l.n)) return NaN;
+  if (l.unit === "") return l.n === 0 ? 0 : NaN;
+  if (l.unit === "em") return l.n * em;
+  const k = UNIT_PX[l.unit];
+  return k === undefined ? NaN : l.n * k;
+}
+
+const farOff = (v, em) => toPx(v, em) <= -FAR;
+const farAway = (v, em) => {
+  const n = toPx(v, em);
+  return n <= -FAR || n >= FAR_AHEAD;
+};
+
+// args splits a CSS function's arguments (commas or spaces).
+const args = (s) => s.split(/[\s,]+/).filter(Boolean);
+// tiny says a scale factor (a number or a percentage) is under 1/8.
+const tiny = (x) => /^-?[\d.]+%?$/.test(x) && Math.abs(parseFloat(x) / (x.endsWith("%") ? 100 : 1)) < 1 / 8;
+
+// transformHides says a transform scales the box below readable size
+// (a factor under 1/8 turns 16px text into less than 2px, MIN_PX), makes
+// it flat (a matrix with no area) or moves it far off.
+function transformHides(v, em) {
+  if (typeof v !== "string") return false;
+  for (const m of v.matchAll(/([a-z0-9]+)\(([^()]*)\)/g)) {
+    const [fn, a] = [m[1], args(m[2])];
+    if (/^scale(?:x|y|3d)?$/.test(fn) && a.slice(0, 2).some(tiny)) return true;
+    if (/^translate(?:x|y|3d)?$/.test(fn) && a.slice(0, 2).some((x) => farAway(x, em))) return true;
+    if (fn === "matrix" && a.length === 6) {
+      const [p, q, r, s, e, f] = a.map(Number);
+      if (Math.abs(p * s - q * r) < 1 / 64 || e <= -FAR || f <= -FAR || e >= FAR_AHEAD || f >= FAR_AHEAD) return true;
+    }
+  }
+  return false;
+}
+
+// clipHides says clip: rect() leaves a box of at most 1px (it applies to
+// absolutely positioned boxes only); auto sides are unknown.
+function clipHides(v, em) {
+  const m = typeof v === "string" && /^rect\(([^()]*)\)$/.exec(v);
+  if (!m) return false;
+  const [top, right, bottom, left] = args(m[1]).map((x) => toPx(x, em));
+  return right - left <= 1 || bottom - top <= 1;
+}
+
+// clipPathHides says clip-path leaves nothing: inset() whose percentages
+// take 99% or more of the width or height, or a circle or ellipse of
+// radius 0.
+function clipPathHides(v) {
+  if (typeof v !== "string") return false;
+  const inset = /\binset\(([^()]*)\)/.exec(v);
+  if (inset) {
+    const a = args(inset[1].split(/\bround\b/)[0]);
+    const pc = (x) => (x !== undefined && /^[\d.]+%$/.test(x) ? parseFloat(x) : x === "0" ? 0 : NaN);
+    const [t, r = t, b = t, l = r] = a.map(pc);
+    if (t + b >= 99 || l + r >= 99) return true;
+  }
+  const round = /\b(?:circle|ellipse)\(\s*0(?:px|%)?(?:\s|\)|,)/.exec(v);
+  return Boolean(round);
 }
 
 // prunes says an element hides its whole subtree whatever its children
@@ -326,10 +392,14 @@ function farOff(v) {
 // visibility:visible again; that is not followed, best effort), opacity 0
 // (children cannot undo it), a box collapsed to no height or width that
 // clips its overflow (a zero box that does not clip shows its content),
-// and a box positioned off-screen. Font size and colours are inherited and
-// decided per text node instead. aria-hidden hides only from screen
-// readers, so it hides nothing here (ruling R30).
-function prunes(st) {
+// a box positioned off-screen (absolute, fixed or relative, by any of its
+// four offsets, or a margin far to the left or above), clipped to at most
+// 1px (clip, clip-path), or transformed below readable size or far off.
+// Font size and colours are inherited and decided per text node instead,
+// and so is text-indent (see htmlToText). em is the element's own font
+// size in px. aria-hidden hides only from screen readers, so it hides
+// nothing here (ruling R30).
+function prunes(st, em) {
   if (val(st, "display") === "none") return true;
   const vis = val(st, "visibility");
   if (vis === "hidden" || vis === "collapse") return true;
@@ -337,7 +407,17 @@ function prunes(st) {
   const clips = ["overflow", "overflow-y", "overflow-x"].some((k) => /^(?:hidden|clip)\b/.test(val(st, k) || ""));
   if (clips && ["max-height", "height", "max-width", "width"].some((k) => num(st.get(k)) === 0)) return true;
   const pos = val(st, "position");
-  if ((pos === "absolute" || pos === "fixed") && (farOff(val(st, "left")) || farOff(val(st, "top")))) return true;
+  const placed = pos === "absolute" || pos === "fixed";
+  if ((placed || pos === "relative") && ["left", "top", "right", "bottom"].some((k) => farAway(val(st, k), em))) return true;
+  if (farOff(val(st, "margin-left"), em) || farOff(val(st, "margin-top"), em)) return true;
+  if (placed && clipHides(val(st, "clip"), em)) return true;
+  if (clipPathHides(val(st, "clip-path"))) return true;
+  if (transformHides(val(st, "transform"), em)) return true;
+  // the scale and translate properties work like the functions
+  const scale = val(st, "scale");
+  if (typeof scale === "string" && args(scale).slice(0, 2).some(tiny)) return true;
+  const shift = val(st, "translate");
+  if (typeof shift === "string" && args(shift).slice(0, 2).some((x) => farAway(x, em))) return true;
   return false;
 }
 
@@ -359,7 +439,8 @@ const MAX_SELECTOR = 200;
 export const STYLE_BUDGET = { query: 1_000_000, apply: 200_000 };
 const SHEET_PROPS = new Set([
   "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "background-clip", "-webkit-background-clip", "width", "height",
-  "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top",
+  "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top", "right", "bottom",
+  "margin-left", "margin-top", "text-indent", "clip", "clip-path", "transform", "scale", "translate",
 ]);
 
 // rules splits style sheet text into [selector, declarations] pairs,
@@ -508,8 +589,11 @@ export function htmlToText(html) {
   const doc = new globalThis.DOMParser().parseFromString(src, "text/html");
   const sheet = sheetStyles(doc);
   const out = new Lines();
+  // offLine says text here is on a line a far negative text-indent moved
+  // off-screen: the first line of the block that set it.
+  const offLine = (c) => c.hideLine >= 0 && out.done.length === c.hideLine;
   // Mail is read on a white pane unless it sets its own background.
-  const stack = [{ node: doc, ctx: { color: null, bg: PANE, px: DEFAULT_PX, pre: false, clipText: false } }];
+  const stack = [{ node: doc, ctx: { color: null, bg: PANE, px: DEFAULT_PX, pre: false, clipText: false, indent: false, hideLine: -1 } }];
   while (stack.length > 0) {
     const item = stack.pop();
     if (item.exit) {
@@ -518,7 +602,7 @@ export function htmlToText(html) {
     }
     const { node, ctx } = item;
     if (node.nodeType === 3) {
-      if (!unreadable(ctx)) out.text(String(node.data ?? node.nodeValue ?? ""), ctx.pre);
+      if (!unreadable(ctx) && !offLine(ctx)) out.text(String(node.data ?? node.nodeValue ?? ""), ctx.pre);
       continue;
     }
     let next = ctx;
@@ -527,7 +611,8 @@ export function htmlToText(html) {
       if (REMOVE.has(tag)) continue;
       if (node.hasAttribute("hidden")) continue;
       const st = styleOf(node, sheet);
-      if (prunes(st)) continue;
+      const px = fontPx(st.get("font-size"), ctx.px);
+      if (prunes(st, px)) continue;
 
       // Colours: CONFLICT or an unreadable value make the colour unknown.
       const colorDecl = st.has("color") ? st.get("color") : tag === "font" ? node.getAttribute("color") : null;
@@ -557,22 +642,28 @@ export function htmlToText(html) {
       if (image === CONFLICT || (image && image !== "none") || (typeof short === "string" && /url\s*\(/.test(short)) || node.getAttribute("background")) {
         bg = null;
       }
-      next = { color, bg, px: fontPx(st.get("font-size"), ctx.px), pre: ctx.pre || tag === "pre", clipText };
+      // text-indent is inherited and moves the first line of each block
+      // it applies to: far to the left, that line is off-screen.
+      const ti = st.get("text-indent");
+      const indent = ti === CONFLICT ? false : ti != null ? farOff(ti, px) : ctx.indent;
+      next = { color, bg, px, pre: ctx.pre || tag === "pre", clipText, indent, hideLine: ctx.hideLine };
 
       if (tag === "br") {
         out.newline();
         continue;
       }
       if (tag === "img") {
-        if (unreadable(next)) continue;
+        if (unreadable(next) || offLine(next)) continue;
         const alt = String(node.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
         if (alt) out.text(`[image: ${alt}]`, false);
         continue;
       }
       if (BLOCK.has(tag)) {
         out.block();
+        next.hideLine = indent ? out.done.length : -1;
         stack.push({ exit: () => out.block() });
       } else if (CELL.has(tag)) {
+        next.hideLine = indent ? out.done.length : -1;
         stack.push({ exit: () => out.text(" ", false) });
       } else if (tag === "a") {
         const href = String(node.getAttribute("href") || "").replace(/\s+/g, "").slice(0, MAX_URL);

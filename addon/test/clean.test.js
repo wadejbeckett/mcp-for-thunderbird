@@ -237,6 +237,52 @@ test("tiny text, collapsed boxes and off-screen text are hidden", () => {
   assert.match(text, /Shown nudged\./);
 });
 
+test("off-screen and clipped text is hidden: indents, far offsets on any side, clip, clip-path, scale, relative units", () => {
+  const html = `<p style="text-indent:-9999px">HIDDEN-INDENT</p>
+    <h1 style="text-indent:-100em;overflow:hidden">HIDDEN-INDENT-EM <b>HIDDEN-INDENT-BOLD</b></h1>
+    <div style="text-indent:-200vw"><p>HIDDEN-INDENT-INHERITED</p></div>
+    <div style="position:absolute;right:-9999px">HIDDEN-RIGHT</div>
+    <div style="position:absolute;bottom:-5000px">HIDDEN-BOTTOM</div>
+    <div style="position:absolute;left:99999px">HIDDEN-FAR-RIGHT</div>
+    <div style="position:relative;left:-9999px">HIDDEN-RELATIVE</div>
+    <div style="position:fixed;top:-100rem">HIDDEN-REM</div>
+    <div style="position:absolute;left:-200vw">HIDDEN-VW</div>
+    <div style="position:absolute;top:-80em">HIDDEN-EM</div>
+    <div style="position:absolute;left:-30in">HIDDEN-IN</div>
+    <div style="margin-left:-9999px">HIDDEN-MARGIN</div>
+    <div style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0)">HIDDEN-CLIP</div>
+    <div style="position:absolute;clip:rect(1px, 1px, 1px, 1px)">HIDDEN-CLIP-COMMAS</div>
+    <div style="clip-path:inset(50%)">HIDDEN-INSET</div>
+    <div style="clip-path:inset(0 50% 0 50%)">HIDDEN-INSET-SIDES</div>
+    <div style="clip-path:circle(0)">HIDDEN-CIRCLE</div>
+    <div style="transform:scale(0)">HIDDEN-SCALE</div>
+    <div style="transform:translateY(-50%) scaleX(0.01)">HIDDEN-SCALEX</div>
+    <div style="transform:scale(1, 0)">HIDDEN-FLAT</div>
+    <div style="transform:matrix(0, 0, 0, 0, 0, 0)">HIDDEN-MATRIX</div>
+    <div style="transform:translateX(-9999px)">HIDDEN-TRANSLATE</div>
+    <div style="scale:0">HIDDEN-SCALE-PROPERTY</div>
+    <style>.sr { position:absolute; clip:rect(0,0,0,0) } .ti { text-indent:-9999px } .sc { transform:scale(0) }
+      .off { position:absolute; right:-9999px } .cp { clip-path:inset(50%) }</style>
+    <span class="sr">HIDDEN-SHEET-CLIP</span><p class="ti">HIDDEN-SHEET-INDENT</p><div class="sc">HIDDEN-SHEET-SCALE</div>
+    <div class="off">HIDDEN-SHEET-RIGHT</div><div class="cp">HIDDEN-SHEET-INSET</div>
+    <p style="text-indent:-9999px">HIDDEN-FIRST-LINE<br>Shown second line.</p>
+    <div style="text-indent:-9999px"><p style="text-indent:0">Shown indent reset.</p></div>
+    <p style="text-indent:2em">Shown indented.</p>
+    <p style="text-indent:-1em;padding-left:1em">Shown hanging indent.</p>
+    <div style="clip:rect(0 0 0 0)">Shown clip without position.</div>
+    <div style="position:absolute;clip:rect(0px, 600px, 300px, 0px)">Shown wide clip.</div>
+    <div style="clip-path:inset(10%)">Shown inset.</div>
+    <div style="transform:scale(0.9) translateX(-20px)">Shown scaled.</div>
+    <div style="position:relative;top:-10px;right:-20px">Shown nudged.</div>
+    <div style="position:absolute;left:-50%">Shown percent.</div>
+    <div style="margin-left:-20px">Shown margin.</div>`;
+  const text = htmlToText(html);
+  assert.doesNotMatch(text, /HIDDEN/);
+  for (const s of ["second line", "indent reset", "indented", "hanging indent", "clip without position", "wide clip", "inset", "scaled", "nudged", "percent", "margin"]) {
+    assert.match(text, new RegExp(`Shown ${s}\\.`), s);
+  }
+});
+
 test("white text on the default white reading pane, and near-white on white, are hidden", () => {
   const html = `<p><font color="#FFFFFF">HIDDEN-DEFAULT-BG</font></p>
     <p style="color:white">HIDDEN-NAMED-DEFAULT-BG</p>
