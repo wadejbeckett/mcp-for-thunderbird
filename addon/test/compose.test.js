@@ -604,3 +604,18 @@ test("mail_draft forward with a long non-ASCII attachment name saves", async () 
   const raw = mock.calls.import[0].raw;
   assert.match(raw, /filename\*=UTF-8''(%F0%9F%98%80)+\.txt/);
 });
+
+// ---- recipients of replies and forwards ----
+
+test("mail_draft reply, reply_all and forward refuse a recipient that is not an address", async () => {
+  const o = original();
+  for (const kind of ["reply", "reply_all", "forward"]) {
+    for (const k of ["to", "cc", "bcc"]) {
+      const r = await call("mail_draft", { kind, id: o.id, [k]: ["good@example.test", "Nobody <>"], body: "x" });
+      assert.equal(r.ok, false, `${kind} ${k}`);
+      assert.equal(r.error.code, "invalid_argument", `${kind} ${k}`);
+      assert.equal(r.error.message, `Not an address in ${k}: Nobody <>`, `${kind} ${k}`);
+    }
+  }
+  assert.equal(mock.calls.import.length, 0);
+});

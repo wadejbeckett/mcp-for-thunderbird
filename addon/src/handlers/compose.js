@@ -375,11 +375,17 @@ async function replyDraft(run, kind, h, a, who, drafts) {
         .map(formatMailbox);
     }
   }
-  // Recipients the client gave are parsed and written back in one form.
-  const norm = async (list) => (list && list.length ? (await mailboxes(run, list)).filter((m) => m.email).map(formatMailbox) : []);
-  to = a.to !== undefined ? await norm(a.to) : to || [];
-  cc = a.cc !== undefined ? await norm(a.cc) : cc || [];
-  const bcc = await norm(a.bcc);
+  // Recipients the client gave are parsed and written back in one form;
+  // an entry that yields no address is refused rather than dropped.
+  const norm = async (list, k) => {
+    const boxes = await mailboxes(run, list || []);
+    const bad = boxes.find((m) => !m.email);
+    if (bad) fail("invalid_argument", `Not an address in ${k}: ${bad.raw}`);
+    return boxes.map(formatMailbox);
+  };
+  to = a.to !== undefined ? await norm(a.to, "to") : to || [];
+  cc = a.cc !== undefined ? await norm(a.cc, "cc") : cc || [];
+  const bcc = await norm(a.bcc, "bcc");
 
   const subject = a.subject !== undefined ? oneLine(a.subject) : kind === "forward" ? `Fwd: ${oneLine(h.subject)}` : `Re: ${stripRe(oneLine(h.subject))}`;
   const author = oneLine(h.author);
