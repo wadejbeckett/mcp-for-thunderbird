@@ -497,7 +497,7 @@ const MAX_RULES = 500;
 const MAX_SELECTOR = 200;
 export const STYLE_BUDGET = { query: 1_000_000, apply: 200_000 };
 const SHEET_PROPS = new Set([
-  "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "background-clip", "-webkit-background-clip", "width", "height",
+  "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "background-clip", "-webkit-background-clip", "-webkit-text-fill-color", "width", "height",
   "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top", "right", "bottom",
   "margin-left", "margin-top", "text-indent", "clip", "clip-path", "transform", "scale", "translate",
 ]);
@@ -668,14 +668,21 @@ function dot(node, st, em) {
 }
 
 // unreadable says text in this context cannot be read: under MIN_PX, in
-// a transparent colour (transparent, alpha 0) unless the element paints
+// a transparent colour (transparent, alpha 0) unless an element paints
 // its background through the text (background-clip: text, gradient
-// headings), or in a colour too close to its background.
+// headings), or in a colour too close to its background. The colour is
+// -webkit-text-fill-color where one is set (Gecko draws text in it, over
+// color), else color.
 function unreadable(ctx) {
   if (ctx.px < MIN_PX) return true;
-  if (ctx.color === TRANSPARENT) return !ctx.clipText;
-  return Boolean(ctx.color && ctx.bg && alike(ctx.color, ctx.bg));
+  const color = ctx.fill !== undefined ? ctx.fill : ctx.color;
+  if (color === TRANSPARENT) return !ctx.clipText;
+  return Boolean(color && ctx.bg && alike(color, ctx.bg));
 }
+
+// IMAGE says a background value draws an image or a gradient (or may:
+// a custom property can hold either).
+const IMAGE = /(?:url|gradient|var)\s*\(/;
 
 // htmlToText turns HTML into readable plain text (see the file comment).
 // The walk is iterative, so deep nesting cannot overflow the stack.
@@ -689,7 +696,8 @@ export function htmlToText(html) {
   // off-screen: the first line of the block that set it.
   const offLine = (c) => c.hideLine >= 0 && out.done.length === c.hideLine;
   // Mail is read on a white pane unless it sets its own background.
-  const stack = [{ node: doc, ctx: { color: null, bg: PANE, px: DEFAULT_PX, pre: false, clipText: false, indent: false, hideLine: -1 } }];
+  // fill is undefined until -webkit-text-fill-color is set (null: unknown).
+  const stack = [{ node: doc, ctx: { color: null, fill: undefined, bg: PANE, px: DEFAULT_PX, pre: false, clipText: false, indent: false, hideLine: -1 } }];
   while (stack.length > 0) {
     const item = stack.pop();
     if (item.exit) {
@@ -715,34 +723,56 @@ export function htmlToText(html) {
       let color = ctx.color;
       if (colorDecl === CONFLICT) color = null;
       else if (colorDecl != null) color = normColor(colorDecl);
-      // background-clip is not inherited, but a background clipped to
-      // the text shows through the descendants' text as well.
-      const clipDecl = [st.get("background-clip"), st.get("-webkit-background-clip")];
-      const clipText = ctx.clipText || clipDecl.some((v) => v === CONFLICT || (typeof v === "string" && /\btext\b/.test(v)));
+      // -webkit-text-fill-color is inherited; currentcolor (its initial
+      // value) defers to color again.
+      const fillDecl = st.get("-webkit-text-fill-color");
+      let fill = ctx.fill;
+      if (fillDecl === CONFLICT) fill = null;
+      else if (typeof fillDecl === "string") {
+        if (/^(?:currentcolor|initial|revert(?:-layer)?)$/.test(fillDecl)) fill = undefined;
+        else if (!/^(?:inherit|unset)$/.test(fillDecl)) fill = normColor(fillDecl);
+      }
       let bg = ctx.bg;
       const bgc = st.get("background-color");
       const short = st.get("background");
-      if (bgc === CONFLICT || short === CONFLICT) bg = null;
-      else if (bgc != null) {
-        const c = normColor(bgc);
-        bg = c === TRANSPARENT ? ctx.bg : c;
-      } else if (short != null) {
-        const c = colorIn(short);
-        bg = c === TRANSPARENT ? ctx.bg : c;
-      } else if (node.getAttribute("bgcolor") != null) {
-        const c = normColor(node.getAttribute("bgcolor"));
-        bg = c === TRANSPARENT ? ctx.bg : c;
+      // own is the background colour this element declares: undefined
+      // when it declares none, null when the colour is unknown (a value
+      // this cannot read, or a shorthand with no colour in it).
+      let own;
+      // unread: a colour is declared but this cannot read it
+      let unread = false;
+      if (bgc === CONFLICT || short === CONFLICT) {
+        own = null;
+        unread = true;
+      } else if (bgc != null) {
+        own = normColor(bgc);
+        unread = own === null;
+      } else if (short != null) own = colorIn(short);
+      else if (node.getAttribute("bgcolor") != null) {
+        own = normColor(node.getAttribute("bgcolor"));
+        unread = own === null;
       }
-      // Over a background image the colour behind the text is unknown.
+      if (own !== undefined) bg = own === TRANSPARENT ? ctx.bg : own;
+      // Over a background image or gradient the colour behind the text is
+      // unknown.
       const image = st.get("background-image");
-      if (image === CONFLICT || (image && image !== "none") || (typeof short === "string" && /url\s*\(/.test(short)) || node.getAttribute("background")) {
-        bg = null;
-      }
+      const drawn =
+        image === CONFLICT || (typeof image === "string" && image !== "none") || (typeof short === "string" && IMAGE.test(short)) || Boolean(node.getAttribute("background"));
+      if (drawn) bg = null;
+      // background-clip: text paints this element's background through
+      // its text and its descendants' text. Transparent text shows only
+      // when there is something to paint: an image or gradient, or a
+      // colour that differs from the background behind it (or one this
+      // cannot read, which counts as shown).
+      const clipDecl = [st.get("background-clip"), st.get("-webkit-background-clip")];
+      const clips = clipDecl.some((v) => v === CONFLICT || (typeof v === "string" && /\btext\b/.test(v)));
+      const paints = drawn || unread || (typeof own === "string" && own !== TRANSPARENT && !(ctx.bg && alike(own, ctx.bg)));
+      const clipText = ctx.clipText || (clips && paints);
       // text-indent is inherited and moves the first line of each block
       // it applies to: far to the left, that line is off-screen.
       const ti = st.get("text-indent");
       const indent = ti === CONFLICT ? false : ti != null ? farOff(ti, px) : ctx.indent;
-      next = { color, bg, px, pre: ctx.pre || tag === "pre", clipText, indent, hideLine: ctx.hideLine };
+      next = { color, fill, bg, px, pre: ctx.pre || tag === "pre", clipText, indent, hideLine: ctx.hideLine };
 
       if (tag === "br") {
         out.newline();
