@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -306,7 +307,9 @@ func parseObject(b json.RawMessage) (*object, error) {
 	if _, err := dec.Token(); err != nil {
 		return nil, err
 	}
-	if _, err := dec.Token(); err == nil {
+	// Only white space may follow the object: anything else would be
+	// dropped when the file is written back.
+	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("trailing data after the JSON object")
 	}
 	return o, nil

@@ -722,3 +722,29 @@ func TestWindowsShimMetacharactersRefused(t *testing.T) {
 		t.Fatalf("non-Windows refused: %v", err)
 	}
 }
+
+// Text after the closing brace would be dropped when the file is written
+// back, so such a file is refused and left as it is.
+func TestTrailingDataRefused(t *testing.T) {
+	for _, in := range []string{`{} x`, `{"a":1}}`, `{"a":1} {"b":2}`, `{"a":1}]`} {
+		if _, err := parseObject(json.RawMessage(in)); err == nil {
+			t.Errorf("%q accepted", in)
+		}
+	}
+	for _, in := range []string{`{}`, "{\"a\":1}\n\n", " \t{ }\r\n"} {
+		if _, err := parseObject(json.RawMessage(in)); err != nil {
+			t.Errorf("%q refused: %v", in, err)
+		}
+	}
+	home, _ := sandbox(t)
+	os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
+	p := filepath.Join(home, ".cursor", "mcp.json")
+	orig := `{"mcpServers":{}} {"keep":"me"}`
+	os.WriteFile(p, []byte(orig), 0o600)
+	if s := status(t, Configure([]string{"cursor"}, binPath), "cursor"); s.Error == "" || s.Configured {
+		t.Fatalf("trailing data accepted: %+v", s)
+	}
+	if b, _ := os.ReadFile(p); string(b) != orig {
+		t.Fatalf("file changed:\n%s", b)
+	}
+}
