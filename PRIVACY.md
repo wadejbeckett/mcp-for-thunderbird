@@ -33,7 +33,7 @@ Some more detail on each point:
 ## What is stored on your computer
 
 - **In Thunderbird (the add-on's own storage in your profile):** your settings (the accounts you ticked, the tool groups, the direct-sending list of addresses and domains you wrote, the attachment folder and the excluded folders) and the activity log. The activity log keeps the last 500 requests: time, AI app name, tool, the ids of the messages or the folder involved, and the outcome. It never records message text, and records no addresses as such; but a message id is an encoded form of the message's Message-ID header, which often contains a domain name, and a folder path can contain a name. You can clear it from the options.
-- **In your user's configuration folder:** the native program's connection file, with its port, access key and process number. Once Thunderbird has closed, the port and key are removed where the native program had the chance, and are never used again either way.
+- **In your user's configuration folder:** the native program's connection file, with its port, access key, process number and the time that process started. Once Thunderbird has closed, the port and key are removed where the native program had the chance, and are never used again either way.
 - **In your attachment folder:** attachments that AI apps saved. They stay until you delete them.
 - **In your AI apps' settings:** if you asked MCP for Thunderbird to set up an AI app, an entry named `mcp-for-thunderbird` that starts the native program. A backup of each settings file is kept next to it before it is changed.
 - **Logs:** the native program logs only when it starts and stops, when AI apps connect, and errors. It logs no message text, subjects or addresses.

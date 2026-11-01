@@ -383,3 +383,87 @@ func TestRotateRefusedForgetsOldToken(t *testing.T) {
 		t.Fatalf("the other host's file was changed: %+v", got)
 	}
 }
+
+// The start mark tells a process from a later one given the same PID; on
+// the release platforms it can be read for any process of the user.
+func TestStartMark(t *testing.T) {
+	switch runtime.GOOS {
+	case "linux", "darwin", "windows":
+	default:
+		t.Skip("no start mark on " + runtime.GOOS)
+	}
+	self := connfile.StartMark(os.Getpid())
+	if self == "" || connfile.StartMark(os.Getpid()) != self {
+		t.Fatalf("own start mark %q is empty or changes", self)
+	}
+	child := runAs(t, "other-program")
+	if m := connfile.StartMark(child); m == "" || m == self {
+		t.Fatalf("child's start mark %q, own %q", m, self)
+	}
+	if m := connfile.StartMark(deadPID(t)); m != "" {
+		t.Fatalf("exited process has start mark %q", m)
+	}
+	if m := connfile.StartMark(0); m != "" {
+		t.Fatalf("PID 0 has start mark %q", m)
+	}
+}
+
+// A file whose PID now names a host program that started later (a PID
+// reused after a crash, for example by a connect proxy) is stale for
+// connect; a file without a start, as hosts before 0.2.0 wrote, is judged
+// as before.
+func TestUsableChecksStart(t *testing.T) {
+	if connfile.StartMark(os.Getpid()) == "" {
+		t.Skip("no start mark on " + runtime.GOOS)
+	}
+	tok := connfile.NewToken()
+	for _, c := range []struct {
+		name    string
+		started string
+		ok      bool
+	}{
+		{"same start", connfile.StartMark(os.Getpid()), true},
+		{"no start recorded", "", true},
+		{"other start", "not-this-start", false},
+	} {
+		conn := &connfile.Conn{Instance: "x", Port: 47110, Token: tok, PID: os.Getpid(), Started: c.started}
+		if err := connfile.Usable(conn); (err == nil) != c.ok {
+			t.Errorf("%s: Usable = %v, want ok %v", c.name, err, c.ok)
+		}
+	}
+}
+
+// PIDReused is true only when the PID is known to have started at another
+// time; doubt (no recorded start, or none to read) is not proof.
+func TestPIDReused(t *testing.T) {
+	if connfile.StartMark(os.Getpid()) == "" {
+		t.Skip("no start mark on " + runtime.GOOS)
+	}
+	self := os.Getpid()
+	for _, c := range []struct {
+		name string
+		conn *connfile.Conn
+		want bool
+	}{
+		{"same start", &connfile.Conn{PID: self, Started: connfile.StartMark(self)}, false},
+		{"other start", &connfile.Conn{PID: self, Started: "not-this-start"}, true},
+		{"no start recorded", &connfile.Conn{PID: self}, false},
+		{"exited", &connfile.Conn{PID: deadPID(t), Started: "not-this-start"}, false},
+		{"nil", nil, false},
+	} {
+		if got := connfile.PIDReused(c.conn); got != c.want {
+			t.Errorf("%s: PIDReused = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSaveLoadKeepsStart(t *testing.T) {
+	isolate(t)
+	c := &connfile.Conn{Instance: "st", Port: 47110, Token: connfile.NewToken(), PID: 42, Started: "abc:123"}
+	if err := connfile.Save(c); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := connfile.Load("st"); err != nil || got.Started != "abc:123" {
+		t.Fatalf("got %+v %v", got, err)
+	}
+}

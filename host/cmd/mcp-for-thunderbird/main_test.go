@@ -22,6 +22,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connfile"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/nativemsg"
 )
 
@@ -519,15 +520,20 @@ func connFile(t *testing.T, dir, instance string) (port int, token string, pid i
 }
 
 // writeConnFile replaces the connection file of instance under dir's
-// sandbox, as another host would.
-func writeConnFile(t *testing.T, dir, instance string, port int, token string, pid int) {
+// sandbox, as another host would; started, if given, is the start mark it
+// records.
+func writeConnFile(t *testing.T, dir, instance string, port int, token string, pid int, started ...string) {
 	t.Helper()
 	p := filepath.Join(userConfigDir(filepath.Join(dir, "home"), filepath.Join(dir, "config")),
 		"mcp-for-thunderbird", "connection-"+instance+".json")
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(map[string]any{"instance": instance, "port": port, "token": token, "pid": pid})
+	f := map[string]any{"instance": instance, "port": port, "token": token, "pid": pid}
+	if len(started) > 0 {
+		f["started"] = started[0]
+	}
+	raw, _ := json.Marshal(f)
 	if err := os.WriteFile(p, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -677,4 +683,71 @@ func TestFileOfHostNotListeningTakenOver(t *testing.T) {
 	}
 	b.stop(t)
 	a.stop(t)
+}
+
+// A stale file whose PID now runs a host program that started later (a
+// connect proxy, or another profile's host) and whose port another
+// listener now holds is taken over at once: the recorded start does not
+// match. A file of a host before 0.2.0, with no start, is still judged by
+// the PID and port alone.
+func TestFileOfReusedPIDTakenOver(t *testing.T) {
+	if connfile.StartMark(os.Getpid()) == "" {
+		t.Skip("no start mark on " + runtime.GOOS)
+	}
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	a := startHost(t, bin, dir)
+	a.send(t, hello("other-profile", 1))
+	if w := readFrame(t, a.stdout); w["ok"] != true {
+		t.Fatalf("first welcome = %v", w)
+	}
+	aport, _, apid := connFile(t, dir, "other-profile")
+	// The crashed host of "stale" had PID apid and port aport; both are
+	// now the other profile's host's, which started later.
+	writeConnFile(t, dir, "stale", aport, strings.Repeat("ef", 32), apid, "an-earlier-start")
+	b := startHost(t, bin, dir)
+	start := time.Now()
+	b.send(t, hello("stale", 1))
+	if w := readFrame(t, b.stdout); w["ok"] != true {
+		t.Fatalf("welcome = %v\nstderr:\n%s", w, b.stderr.String())
+	}
+	if el := time.Since(start); el > takeoverWait {
+		t.Fatalf("waited %v for a PID that a later process reused", el)
+	}
+	if _, _, pid := connFile(t, dir, "stale"); pid != b.cmd.Process.Pid {
+		t.Fatalf("file names PID %d, want the new host's %d", pid, b.cmd.Process.Pid)
+	}
+	b.stop(t)
+	a.stop(t)
+}
+
+// The host records its own start in the connection file, so connect and
+// later hosts can tell its PID from a reused one.
+func TestHostRecordsItsStart(t *testing.T) {
+	if connfile.StartMark(os.Getpid()) == "" {
+		t.Skip("no start mark on " + runtime.GOOS)
+	}
+	dir := t.TempDir()
+	bin := buildHost(t, dir)
+	h := startHost(t, bin, dir)
+	h.send(t, hello("marked", 1))
+	if w := readFrame(t, h.stdout); w["ok"] != true {
+		t.Fatalf("welcome = %v", w)
+	}
+	raw, err := os.ReadFile(filepath.Join(userConfigDir(filepath.Join(dir, "home"), filepath.Join(dir, "config")),
+		"mcp-for-thunderbird", "connection-marked.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c connfile.Conn
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Started == "" || c.Started != connfile.StartMark(h.cmd.Process.Pid) {
+		t.Fatalf("file records start %q, host's is %q", c.Started, connfile.StartMark(h.cmd.Process.Pid))
+	}
+	if err := connfile.Usable(&c); err != nil {
+		t.Fatalf("own file not usable: %v", err)
+	}
+	h.stop(t)
 }

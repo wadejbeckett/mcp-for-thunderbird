@@ -7,6 +7,7 @@ package connfile
 
 import (
 	"bytes"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
@@ -29,4 +30,19 @@ func processName(pid int) (string, bool) {
 		return "", false
 	}
 	return string(comm), true
+}
+
+// processStart marks pid's start with the time the kernel recorded when
+// it forked the process (p_starttime), in seconds and microseconds. The
+// value is stored once per process, so it never changes while it runs.
+func processStart(pid int) (string, bool) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || kp == nil || int(kp.Proc.P_pid) != pid {
+		return "", false
+	}
+	st := kp.Proc.P_starttime
+	if st.Sec == 0 && st.Usec == 0 {
+		return "", false
+	}
+	return strconv.FormatInt(int64(st.Sec), 10) + "." + strconv.FormatInt(int64(st.Usec), 10), true
 }
