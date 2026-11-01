@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"net/textproto"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -778,22 +779,93 @@ func marionette(t *testing.T, script string, out any) {
 	}
 }
 
-// grantSendScript grants the optional messages.send permission as the
-// options-page click does (permissions.request needs a real user click):
-// through ExtensionPermissions with the running extension as the emitter,
-// so permissions.onAdded fires in the background page.
-const grantSendScript = `
+// sendPermissionScript grants ("add") or withdraws ("remove") the optional
+// messages.send permission as the options-page click does
+// (permissions.request needs a real user click): through
+// ExtensionPermissions with the running extension as the emitter, so
+// permissions.onAdded and onRemoved fire in the background page. With
+// "get" it changes nothing. It returns the add-on's optional permissions.
+const sendPermissionScript = `
 const resolve = arguments[arguments.length - 1];
 (async () => {
   const { ExtensionPermissions } = ChromeUtils.importESModule("resource://gre/modules/ExtensionPermissions.sys.mjs");
   const id = "mcp-for-thunderbird@wadejbeckett.github.io";
   const ext = WebExtensionPolicy.getByID(id).extension;
-  await ExtensionPermissions.add(id, { permissions: ["messages.send"], origins: [] }, ext);
+  const perm = { permissions: ["messages.send"], origins: [] };
+  const action = %q;
+  if (action === "add") await ExtensionPermissions.add(id, perm, ext);
+  if (action === "remove") await ExtensionPermissions.remove(id, perm, ext);
   return (await ExtensionPermissions.get(id)).permissions;
 })().then(resolve, (e) => resolve(["error: " + e]));
 `
 
+// sendPermission runs sendPermissionScript with action and reports whether
+// messages.send is granted afterwards.
+func sendPermission(t *testing.T, action string) bool {
+	t.Helper()
+	var perms []string
+	marionette(t, fmt.Sprintf(sendPermissionScript, action), &perms)
+	for _, p := range perms {
+		if strings.HasPrefix(p, "error: ") {
+			t.Fatalf("messages.send %s: %s", action, p)
+		}
+	}
+	return contains(perms, "messages.send")
+}
+
 const composeWindowsScript = `return [...Services.wm.getEnumerator("msgcompose")].length;`
+
+// e2eSignature is the signature TestE2EDraftAndSend gives identity id1
+// while it checks the mail_compose window.
+const e2eSignature = "E2E signature of Test User"
+
+// identitySignatureScript sets identity id1's HTML signature to the given
+// text and returns the one it had.
+const identitySignatureScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const id = MailServices.accounts.getIdentity("id1");
+const before = id.htmlSigText;
+id.attachSignature = false;
+id.htmlSigText = %q;
+return before;
+`
+
+// composeWindowScript reads every open compose window once its editor
+// holds text: the To recipients, the subject, the body text, and the
+// signature block Thunderbird lays out (div.moz-signature).
+const composeWindowScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const read = () => [...Services.wm.getEnumerator("msgcompose")].map((w) => {
+    const fields = w.GetComposeDetails();
+    const doc = w.GetCurrentEditor().document;
+    const sig = doc.querySelector(".moz-signature");
+    return {
+      to: fields.to,
+      subject: w.document.getElementById("msgSubject").value,
+      body: doc.body ? doc.body.textContent : "",
+      signature: sig ? sig.textContent : null,
+    };
+  });
+  let got = [];
+  for (let i = 0; i < 40; i++) {
+    got = read();
+    if (got.some((g) => g.subject === WANT && g.body.trim() !== "")) break;
+    await sleep(250);
+  }
+  return got;
+})().then(resolve, (e) => resolve([{ error: String(e) }]));
+`
+
+// composeWindow is one open compose window as composeWindowScript reads it.
+type composeWindow struct {
+	To        string  `json:"to"`
+	Subject   string  `json:"subject"`
+	Body      string  `json:"body"`
+	Signature *string `json:"signature"`
+	Error     string  `json:"error"`
+}
 
 // TestE2EDraftAndSend saves a new draft, a threaded reply and a forward
 // with the original's attachment to Drafts, opens a compose window, then
@@ -860,21 +932,60 @@ func TestE2EDraftAndSend(t *testing.T) {
 		t.Fatalf("forward draft attachments = %+v", fwd.Attachments)
 	}
 
-	// mail_compose opens a window and sends nothing.
+	// mail_compose opens a window holding the recipient, the subject, the
+	// text above the identity's signature, and sends nothing.
+	const composeSubj = "E2E compose window"
+	var sigBefore string
+	marionette(t, fmt.Sprintf(identitySignatureScript, e2eSignature), &sigBefore)
+	t.Cleanup(func() {
+		var ignored string
+		marionette(t, fmt.Sprintf(identitySignatureScript, sigBefore), &ignored)
+	})
+	usersBeforeCompose := greenmailUsers(t)
 	var before, after int
 	marionette(t, composeWindowsScript, &before)
 	var opened struct{ Opened bool }
-	callOK(t, cs, "mail_compose", map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": "E2E compose window", "body": "Not sent."}, &opened)
+	callOK(t, cs, "mail_compose", map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": composeSubj, "body": "Not sent."}, &opened)
 	marionette(t, composeWindowsScript, &after)
 	if !opened.Opened || after != before+1 {
 		t.Fatalf("mail_compose: opened %v, compose windows %d -> %d", opened.Opened, before, after)
 	}
+	var windows []composeWindow
+	marionette(t, strings.Replace(composeWindowScript, "WANT", fmt.Sprintf("%q", composeSubj), 1), &windows)
+	var win *composeWindow
+	for i := range windows {
+		if windows[i].Error != "" {
+			t.Fatalf("reading the compose window: %s", windows[i].Error)
+		}
+		if windows[i].Subject == composeSubj {
+			win = &windows[i]
+		}
+	}
+	if win == nil {
+		t.Fatalf("no compose window with the subject %q: %+v", composeSubj, windows)
+	}
+	if !strings.Contains(win.To, "test@localhost") {
+		t.Fatalf("compose window To = %q, want test@localhost", win.To)
+	}
+	if win.Signature == nil || !strings.Contains(*win.Signature, e2eSignature) {
+		t.Fatalf("compose window has no signature %q: %+v", e2eSignature, *win)
+	}
+	textAt, sigAt := strings.Index(win.Body, "Not sent."), strings.Index(win.Body, e2eSignature)
+	if textAt < 0 || sigAt < 0 || textAt > sigAt {
+		t.Fatalf("compose window body %q: want the text above the signature", win.Body)
+	}
+	t.Logf("compose window: To %q, subject %q, text above the signature", win.To, win.Subject)
+	time.Sleep(3 * time.Second)
+	if where := greenmailFind(t, composeSubj); len(where) != 0 {
+		t.Fatalf("mail_compose sent or saved a message: %v", where)
+	}
+	if users := greenmailUsers(t); strings.Join(users, ",") != strings.Join(usersBeforeCompose, ",") {
+		t.Fatalf("GreenMail users %v before mail_compose, %v after", usersBeforeCompose, users)
+	}
 
 	// Grant messages.send; mail_send appears.
-	var perms []string
-	marionette(t, grantSendScript, &perms)
-	if !contains(perms, "messages.send") {
-		t.Fatalf("granting messages.send: %v", perms)
+	if !sendPermission(t, "add") {
+		t.Fatal("granting messages.send: not granted")
 	}
 	deadline := time.Now().Add(30 * time.Second)
 	for !contains(toolNames(t, cs), "mail_send") {
@@ -911,6 +1022,7 @@ func TestE2EDraftAndSend(t *testing.T) {
 
 	// A recipient outside the allowlist refuses the whole message.
 	refusedSubj := "E2E refused " + stamp
+	usersBefore := greenmailUsers(t)
 	text, isErr := call(t, cs, "mail_send", map[string]any{"account": "account1", "to": []string{"test@localhost"}, "bcc": []string{"x@example.org"}, "subject": refusedSubj, "body": "Must not be sent."})
 	if !isErr || text != "refused: Recipient not in the allowed list: x@example.org" {
 		t.Fatalf("send to x@example.org: %v %q", isErr, text)
@@ -932,6 +1044,23 @@ func TestE2EDraftAndSend(t *testing.T) {
 	if n := len(imapUIDs(t, "INBOX", refused)) + len(imapUIDs(t, "Sent", refused)); n != 0 {
 		t.Fatalf("a refused message was sent (%d copies)", n)
 	}
+	// GreenMail makes a user for every address it accepts mail for, so a
+	// refused message that leaked to x@example.org, or to the addresses a
+	// split of "x@example.org,b"@localhost gives, adds a user; and every
+	// user's mailboxes are searched for it.
+	usersAfter := greenmailUsers(t)
+	if strings.Join(usersAfter, ",") != strings.Join(usersBefore, ",") {
+		t.Fatalf("GreenMail users %v before the refused sends, %v after", usersBefore, usersAfter)
+	}
+	for _, leak := range []string{"x@example.org", `"x@example.org`, `b"@localhost`, "b@localhost"} {
+		if contains(usersAfter, leak) {
+			t.Fatalf("GreenMail has a mailbox for %s", leak)
+		}
+	}
+	if where := greenmailFind(t, refusedSubj); len(where) != 0 {
+		t.Fatalf("a refused message reached GreenMail: %v", where)
+	}
+	t.Logf("refused sends: no new GreenMail user, no copy in any mailbox of %v", usersAfter)
 	if n := len(imapUIDs(t, "INBOX", inbox)); n != 1 {
 		t.Fatalf("GreenMail received %d copies of the sent message, want 1", n)
 	}
@@ -1010,6 +1139,51 @@ func greenmailGet(t *testing.T, path string, out any) {
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		t.Fatalf("GreenMail API %s: %v", path, err)
 	}
+}
+
+// greenmailUsers lists GreenMail's users, sorted: the seeded ones and one
+// for every address GreenMail has accepted mail for.
+func greenmailUsers(t *testing.T) []string {
+	t.Helper()
+	var users []struct {
+		Email string `json:"email"`
+	}
+	greenmailGet(t, "/user", &users)
+	var emails []string
+	for _, u := range users {
+		emails = append(emails, u.Email)
+	}
+	sort.Strings(emails)
+	return emails
+}
+
+// greenmailFolders are the mailboxes greenmailFind searches besides every
+// user's INBOX: the folders run.sh and e2e.py create.
+var greenmailFolders = map[string][]string{
+	"test@localhost":  {"Drafts", "Sent"},
+	"other@localhost": {"Elsewhere"},
+}
+
+// greenmailFind returns "user/folder" for every message whose Subject is
+// subject, in every GreenMail user's INBOX and in the seeded folders.
+func greenmailFind(t *testing.T, subject string) []string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^Subject: ` + regexp.QuoteMeta(subject) + `\r?$`)
+	var where []string
+	for _, u := range greenmailUsers(t) {
+		for _, folder := range append([]string{"INBOX"}, greenmailFolders[u]...) {
+			var msgs []struct {
+				MimeMessage string `json:"mimeMessage"`
+			}
+			greenmailGet(t, "/user/"+url.PathEscape(u)+"/messages/"+url.PathEscape(folder), &msgs)
+			for _, m := range msgs {
+				if re.MatchString(m.MimeMessage) {
+					where = append(where, u+"/"+folder)
+				}
+			}
+		}
+	}
+	return where
 }
 
 // smtpReceived counts the messages GreenMail's SMTP server has delivered:
@@ -1220,8 +1394,9 @@ var hostileFixtures = []hostile{
 // seeded accounts enabled: no sending tool is listed or callable, every
 // read keeps hidden text out and the rest inside the untrusted wrapper,
 // a move into the other account is refused, and GreenMail receives
-// nothing over SMTP. It sets the settings through storage.local and puts
-// the e2e settings back afterwards.
+// nothing over SMTP. It sets the settings through storage.local and grants
+// messages.send itself, and puts both back afterwards, so it does not
+// depend on TestE2EDraftAndSend having run first.
 func TestE2EInjectionDefaults(t *testing.T) {
 	cs := httpSession(t)
 	smtpBefore, usersBefore := smtpOracleCheck(t)
@@ -1232,6 +1407,20 @@ func TestE2EInjectionDefaults(t *testing.T) {
 		addonSettings(t, orig)
 		waitTools(t, cs, origTools)
 	})
+	// Sending tools must stay unknown even with messages.send granted, so
+	// the test grants it itself (TestE2EDraftAndSend may not have run) and
+	// withdraws it afterwards if it was not granted before. That cleanup
+	// runs before the settings one above.
+	if !sendPermission(t, "get") {
+		if !sendPermission(t, "add") {
+			t.Fatal("granting messages.send: not granted")
+		}
+		t.Cleanup(func() {
+			if sendPermission(t, "remove") {
+				t.Error("withdrawing messages.send: still granted")
+			}
+		})
+	}
 	// The add-on's own defaults (settings.js DEFAULTS, written by run.sh).
 	b, err := os.ReadFile(os.Getenv("MFT_E2E_DEFAULTS"))
 	if err != nil {
@@ -1254,8 +1443,7 @@ func TestE2EInjectionDefaults(t *testing.T) {
 	addonSettings(t, defaults)
 
 	// The default groups' tools (read and organise); sending tools are
-	// unknown even when called by name (messages.send is still granted
-	// from TestE2EDraftAndSend).
+	// unknown even when called by name, with messages.send granted.
 	var want []string
 	for _, g := range []struct {
 		name  string
