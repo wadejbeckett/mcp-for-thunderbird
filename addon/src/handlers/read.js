@@ -569,8 +569,9 @@ function isAttachmentPart(p) {
 }
 
 // bodyParts collects the plain and HTML text of a message's parts (not
-// its attachments), each capped at BODY_CAP; plainOver/htmlOver say a cap
-// was hit. Iterative, so a deeply nested message cannot overflow the stack.
+// its attachments, and nothing inside an attachment such as an attached
+// message), each capped at BODY_CAP; plainOver/htmlOver say a cap was
+// hit. Iterative, so a deeply nested message cannot overflow the stack.
 // After vitalio-sh extractParts (MIT, see NOTICE).
 export function bodyParts(root) {
   const out = { plain: "", html: "", plainOver: false, htmlOver: false };
@@ -587,14 +588,95 @@ export function bodyParts(root) {
   while (stack.length > 0) {
     const p = stack.pop();
     if (!p || typeof p !== "object") continue;
+    if (p !== root && isAttachmentPart(p)) continue;
     const ct = String(p.contentType || "").toLowerCase();
-    if (typeof p.body === "string" && !isAttachmentPart(p)) {
+    if (typeof p.body === "string") {
       if (ct === "text/plain") add("plain", p.body);
       else if (ct === "text/html") add("html", p.body);
     }
     if (Array.isArray(p.parts)) for (let i = p.parts.length - 1; i >= 0; i--) stack.push(p.parts[i]);
   }
   return out;
+}
+
+// shownBody works out the text a reader sees in a message, part by part:
+// within a multipart/alternative the HTML alternative (through
+// htmlToText) replaces its plain sibling, unless the HTML is blank; every
+// text part of a multipart/mixed (or any other multipart) is kept, in
+// order; attachments, and what is inside them (an attached message), are
+// left out. It gives {text, over, differs}: over says a part was cut at
+// BODY_CAP (plain and HTML each have that much in all), differs that in
+// some alternative group the plain part holds words the HTML does not
+// show (plainDiffers). Iterative, so a deeply nested message cannot
+// overflow the stack.
+const NONE = { text: "", html: false, over: false, differs: false };
+
+export function shownBody(root) {
+  const room = { plain: BODY_CAP, html: BODY_CAP };
+  const take = (key, body) => {
+    const n = Math.max(0, room[key]);
+    room[key] -= body.length;
+    return body.length > n ? { s: body.slice(0, n), over: true } : { s: body, over: false };
+  };
+  const leaf = (p) => {
+    const ct = String(p.contentType || "").toLowerCase();
+    if (typeof p.body !== "string") return NONE;
+    if (ct === "text/plain") {
+      const { s, over } = take("plain", p.body);
+      return { text: s, html: false, over, differs: false };
+    }
+    if (ct === "text/html") {
+      const { s, over } = take("html", p.body);
+      // blank HTML is no HTML: a plain sibling stands
+      if (s.trim() === "") return { ...NONE, over };
+      return { text: htmlToText(s), html: true, over, differs: false };
+    }
+    return NONE;
+  };
+  const combine = (p, rs) => {
+    const ct = String(p.contentType || "").toLowerCase();
+    if (ct === "multipart/alternative") {
+      let shown = null;
+      for (const r of rs) if (r.html) shown = r; // the last HTML alternative
+      const plain = rs.find((r) => !r.html && r.text.trim() !== "");
+      if (shown) {
+        const differs = shown.differs || Boolean(plain && plainDiffers(stripInvisible(plain.text), stripInvisible(shown.text)));
+        return { ...shown, differs };
+      }
+      let last = NONE;
+      for (const r of rs) if (r.text.trim() !== "") last = r;
+      return last;
+    }
+    const kept = rs.filter((r) => r.text.trim() !== "");
+    return {
+      text: kept.length === 1 ? kept[0].text : kept.map((r) => r.text).join("\n\n"),
+      html: rs.some((r) => r.html),
+      over: rs.some((r) => r.over),
+      differs: rs.some((r) => r.differs),
+    };
+  };
+  const top = { p: root, kids: null, r: NONE };
+  const stack = [top];
+  while (stack.length > 0) {
+    const f = stack[stack.length - 1];
+    const p = f.p;
+    if (!p || typeof p !== "object" || (f !== top && isAttachmentPart(p))) {
+      stack.pop();
+      continue;
+    }
+    if (Array.isArray(p.parts)) {
+      if (f.kids === null) {
+        f.kids = p.parts.map((q) => ({ p: q, kids: null, r: NONE }));
+        for (let i = f.kids.length - 1; i >= 0; i--) stack.push(f.kids[i]);
+        continue;
+      }
+      f.r = combine(p, f.kids.map((k) => k.r));
+    } else {
+      f.r = leaf(p);
+    }
+    stack.pop();
+  }
+  return top.r;
 }
 
 // truncate cuts s to n characters without splitting a surrogate pair.
@@ -657,14 +739,14 @@ async function mailRead(args, ctx) {
   answered(full);
   answered(atts);
 
-  // The text is what a reader sees: the HTML part through htmlToText
-  // when there is one (a plain alternative can hold text the reader is
-  // never shown), else the plain part.
-  const parts = bodyParts(full);
-  const useHtml = parts.html.trim() !== "";
-  const source = stripInvisible(useHtml ? htmlToText(parts.html) : parts.plain);
+  // The text is what a reader sees (shownBody): in each alternative group
+  // the HTML part through htmlToText (a plain alternative can hold text
+  // the reader is never shown), every text part of a mixed message, and
+  // nothing from inside an attached message.
+  const body = shownBody(full);
+  const source = stripInvisible(body.text);
   const { text, cut } = truncate(source, maxChars);
-  const over = useHtml ? parts.htmlOver : parts.plainOver;
+  const over = body.over;
   const out = {
     id: args.id,
     headers: {
@@ -682,9 +764,12 @@ async function mailRead(args, ctx) {
       name: clip(a && a.name),
       size: a && Number.isFinite(a.size) ? a.size : null,
       contentType: clip(a && a.contentType),
+      // Thunderbird's part name: mail_attachment's part picks this one
+      // among attachments that share a name
+      part: a && typeof a.partName === "string" ? clip(a.partName) : null,
     })),
   };
-  if (useHtml && plainDiffers(stripInvisible(parts.plain), source)) out.plainTextDiffers = true;
+  if (body.differs) out.plainTextDiffers = true;
   return out;
 }
 
@@ -695,7 +780,7 @@ export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024 };
 const ATTACHMENT_TEXT = 20_000;
 const NO_DIR = "Choose an attachment folder in MCP for Thunderbird's options first.";
 const TOO_LARGE = "The attachment is larger than 50 MiB.";
-const AMBIGUOUS = "Several attachments in this message have that name, so the attachment meant cannot be told apart.";
+const AMBIGUOUS = 'Several attachments in this message have that name; give the attachment\'s "part" from mail_read to pick one.';
 // base64 is built in pieces of whole 3-byte groups.
 const B64_PIECE = 3 * 16_384;
 
@@ -725,6 +810,7 @@ async function mailAttachment(args, ctx) {
   const s = ctx.settings;
   const name = optString(args, "name");
   if (name === undefined) fail("invalid_argument", "name is required.");
+  const part = optString(args, "part");
   const run = newRun();
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
@@ -732,8 +818,14 @@ async function mailAttachment(args, ctx) {
   // lists it (cleaned by clip: invisible characters stripped, markers
   // defused, at most 2000 characters). An exact name always wins, so an
   // attachment whose name differs only by invisible characters cannot
-  // stand in for it; a name that fits several attachments is refused.
-  const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
+  // stand in for it. A part (from mail_read) picks one attachment of
+  // the message, which must also have that name; without a part, a name
+  // that fits several attachments is refused.
+  let atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
+  if (part !== undefined) {
+    atts = atts.filter((a) => a.partName === part);
+    if (atts.length === 0) fail("not_found", "No attachment with that part in this message.");
+  }
   let found = atts.filter((a) => a.name === name);
   if (found.length === 0) found = atts.filter((a) => clip(a.name) === name);
   if (found.length === 0) fail("not_found", "No attachment of that name in this message.");

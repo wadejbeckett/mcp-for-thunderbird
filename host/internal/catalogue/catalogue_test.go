@@ -132,6 +132,21 @@ func props(t *testing.T, name string) map[string]map[string]any {
 	return out
 }
 
+func TestAttachmentPart(t *testing.T) {
+	part, ok := props(t, "mail_attachment")["part"]
+	if !ok || part["type"] != "string" || part["description"] == "" {
+		t.Fatalf("mail_attachment must take an optional part string with a description: %v", part)
+	}
+	for _, r := range byName(t, "mail_attachment").Input["required"].([]string) {
+		if r == "part" {
+			t.Error("part must be optional")
+		}
+	}
+	if !strings.Contains(byName(t, "mail_read").Description, "part") {
+		t.Error("mail_read description must mention each attachment's part")
+	}
+}
+
 func TestLimits(t *testing.T) {
 	if m := props(t, "mail_search")["limit"]["maximum"]; m != 200 {
 		t.Errorf("limit maximum = %v", m)

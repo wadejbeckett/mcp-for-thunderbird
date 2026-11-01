@@ -118,6 +118,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const refs = new Map();
   const htmlBodies = new Map();
   const extraHeaders = new Map();
+  const mimeTrees = new Map();
   const calls = {
     query: [],
     abortList: [],
@@ -393,7 +394,9 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       },
       // getFull builds a MessagePart tree: text/plain from `body`,
       // text/html from `html` (multipart/alternative when both), then the
-      // attachments. Headers are lower-case names with lists of values.
+      // attachments; or, when the message was added with `mime`, that part
+      // tree under the message. Headers are lower-case names with lists of
+      // values.
       getFull: async (id) => {
         calls.getFull.push(id);
         const h = store.get(id);
@@ -408,6 +411,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           subject: [h.subject],
           ...clone(extraHeaders.get(id) || {}),
         };
+        if (mimeTrees.has(id)) return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [clone(mimeTrees.get(id))] };
         const parts = [bodyPart, ...atts].filter(Boolean);
         return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [{ contentType: "multipart/mixed", partName: "1", parts }] };
       },
@@ -521,12 +525,13 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     const f = folderList.find((x) => x.accountId === accountId && x.path === path);
     if (!f) throw new Error(`no folder ${accountId} ${path}`);
     const id = nextId++;
-    const { body, html, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
+    const { body, html, mime, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
     const h = header(id, { ...f }, rest);
     store.set(id, h);
     if (body !== undefined) bodies.set(id, body);
     if (html !== undefined) htmlBodies.set(id, html);
     if (headers !== undefined) extraHeaders.set(id, headers);
+    if (mime !== undefined) mimeTrees.set(id, mime);
     if (atts !== undefined) attachments.set(id, atts);
     if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
     return clone(h);
