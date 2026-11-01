@@ -134,7 +134,8 @@ async function mailTag(args, ctx) {
   return forEachMessage(ids, run, ctx.settings, (h) =>
     oneAtATime(h.id, async () => {
       const now = answered(await call(run, () => tb().messages.get(h.id)));
-      const current = now && Array.isArray(now.tags) ? now.tags : [];
+      if (!now) fail("not_found", "The message is no longer there.");
+      const current = Array.isArray(now.tags) ? now.tags : [];
       const tags = [...new Set([...current, ...addKeys])].filter((k) => !removeKeys.has(k));
       return api(run, () => tb().messages.update(h.id, { tags }));
     }),
