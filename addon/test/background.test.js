@@ -136,6 +136,53 @@ test("an attachment folder changed while the hello is built still reaches the ho
   assert.deepEqual(port.sentOfType("config").at(-1), { type: "config", attachmentDir: "/changed-meanwhile" });
 });
 
+test("an attachment folder changed while the catch-up checks the tools is not overwritten", async () => {
+  // The second permission check is the catch-up's after the hello; the
+  // folder is changed while it waits.
+  await save({ send: { enabled: true, allow: ["x@example.org"] } });
+  const contains = mock.messenger.permissions.contains;
+  let n = 0;
+  mock.messenger.permissions.contains = async (arg) => {
+    if (++n === 2) {
+      await save({ attachmentDir: "/changed-during-catch-up" });
+      await flush();
+    }
+    return contains(arg);
+  };
+  await bg.start();
+  await flush();
+  const port = mock.lastPort();
+  assert.ok(n >= 2, `permission checks: ${n}`);
+  assert.deepEqual(port.sentOfType("config").at(-1), { type: "config", attachmentDir: "/changed-during-catch-up" });
+  assert.equal((await load()).attachmentDir, "/changed-during-catch-up");
+});
+
+test("a later attachment folder is not overtaken by an earlier change still checking the tools", async () => {
+  await save({ send: { enabled: true, allow: ["x@example.org"] } });
+  await bg.start();
+  const port = mock.lastPort();
+  welcome(port);
+  await flush();
+  const contains = mock.messenger.permissions.contains;
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let first = true;
+  mock.messenger.permissions.contains = async (arg) => {
+    if (first) {
+      first = false;
+      await gate;
+    }
+    return contains(arg);
+  };
+  await save({ attachmentDir: "/first" });
+  await flush();
+  await save({ attachmentDir: "/second" });
+  await flush();
+  release();
+  await flush();
+  assert.deepEqual(port.sentOfType("config").at(-1), { type: "config", attachmentDir: "/second" });
+});
+
 test("blobs are reassembled into call.args.attachments[i].data and freed after the call", async () => {
   await save({ groups: { compose: true } });
   let got;
