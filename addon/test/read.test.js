@@ -753,6 +753,29 @@ test("an attachment is found by the name mail_read lists", async () => {
   assert.equal(b.content.name, "n".repeat(2000));
 });
 
+test("an exact attachment name wins over one that differs only by invisible characters; an ambiguous name is refused", async () => {
+  const m = mock.addMessage("a1", "INBOX", {
+    date: ago(1),
+    attachments: [
+      { name: "invoice\u200B.txt", size: 4, contentType: "text/plain", partName: "1.2", content: "FAKE" },
+      { name: "invoice.txt", size: 4, contentType: "text/plain", partName: "1.3", content: "REAL" },
+      { name: "a\u200B.txt", size: 1, contentType: "text/plain", partName: "1.4", content: "1" },
+      { name: "a\u200C.txt", size: 1, contentType: "text/plain", partName: "1.5", content: "2" },
+      { name: "same.txt", size: 1, contentType: "text/plain", partName: "1.6", content: "3" },
+      { name: "same.txt", size: 1, contentType: "text/plain", partName: "1.7", content: "4" },
+    ],
+  });
+  assert.equal(inner((await ok("mail_attachment", { id: idOf(m), name: "invoice.txt" })).text), "REAL");
+  assert.equal(inner((await ok("mail_attachment", { id: idOf(m), name: "invoice\u200B.txt" })).text), "FAKE");
+  for (const name of ["a.txt", "same.txt"]) {
+    const r = await call("mail_attachment", { id: idOf(m), name });
+    assert.deepEqual(r.error, {
+      code: "invalid_argument",
+      message: "Several attachments in this message have that name, so the attachment meant cannot be told apart.",
+    }, name);
+  }
+});
+
 test("R23: a text/html attachment is cleaned like a body", async () => {
   const m = mock.addMessage("a1", "INBOX", {
     date: ago(1),

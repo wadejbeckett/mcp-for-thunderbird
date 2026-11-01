@@ -686,6 +686,7 @@ export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024 };
 const ATTACHMENT_TEXT = 20_000;
 const NO_DIR = "Choose an attachment folder in MCP for Thunderbird's options first.";
 const TOO_LARGE = "The attachment is larger than 50 MiB.";
+const AMBIGUOUS = "Several attachments in this message have that name, so the attachment meant cannot be told apart.";
 // base64 is built in pieces of whole 3-byte groups.
 const B64_PIECE = 3 * 16_384;
 
@@ -718,12 +719,17 @@ async function mailAttachment(args, ctx) {
   const run = newRun();
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
-  // Match the name as mail_read lists it (cleaned by clip: invisible
-  // characters stripped, markers defused, at most 2000 characters), else
-  // the name exactly as Thunderbird has it.
+  // Match the name exactly as Thunderbird has it first, else as mail_read
+  // lists it (cleaned by clip: invisible characters stripped, markers
+  // defused, at most 2000 characters). An exact name always wins, so an
+  // attachment whose name differs only by invisible characters cannot
+  // stand in for it; a name that fits several attachments is refused.
   const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
-  const att = atts.find((a) => clip(a.name) === name) || atts.find((a) => a.name === name);
-  if (!att) fail("not_found", "No attachment of that name in this message.");
+  let found = atts.filter((a) => a.name === name);
+  if (found.length === 0) found = atts.filter((a) => clip(a.name) === name);
+  if (found.length === 0) fail("not_found", "No attachment of that name in this message.");
+  if (found.length > 1) fail("invalid_argument", AMBIGUOUS);
+  const att = found[0];
   const contentType = String(att.contentType || "application/octet-stream");
   const isText = /^\s*text\//i.test(contentType);
   const isHtml = /^\s*text\/html\b/i.test(contentType);
