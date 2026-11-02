@@ -5,11 +5,11 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { DOMParser } from "linkedom";
-import { install, fetchFrom, COMPOSE_SIGNATURE } from "./mocks/messenger.js";
+import { install, fetchFrom, COMPOSE_NEW_BODY } from "./mocks/messenger.js";
 import { dispatch, HANDLERS } from "../src/rpc.js";
 import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, baseName, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
+import { isAllowed, baseName, insertAtTop, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -473,12 +473,19 @@ test("TestComposeOpensWindow", async () => {
   // No body goes to beginNew (it would replace the document and lose the
   // signature); the text is put at the top of the open window instead.
   assert.deepEqual(args[0], { identityId: "id1", to: ["x@example.test"], cc: [], bcc: [], subject: "S" });
-  const setNew = mock.calls.compose.find(([f]) => f === "setComposeDetails");
-  const newBody = setNew[1][1].body;
-  assert.match(newBody, /^<html><head><\/head><body><p>Hello<br>there<\/p>/);
-  // the text goes above the identity's signature, which stays as it was
-  assert.ok(newBody.includes(COMPOSE_SIGNATURE), newBody);
-  assert.ok(newBody.indexOf("<p>Hello<br>there</p>") < newBody.indexOf('<div class="moz-signature">'), newBody);
+  // The text is inserted at the top of the open document, which keeps the
+  // signature's elements (and its remote images) as Thunderbird loaded
+  // them; the body is never set anew.
+  assert.equal(composeCalls("setComposeDetails"), 0);
+  const ins = mock.calls.compose.find(([f]) => f === "executeScript");
+  assert.deepEqual(ins[1][0].target, { tabId: 101 });
+  assert.equal(ins[1][0].func, insertAtTop);
+  assert.deepEqual(ins[1][0].args, ["<p>Hello<br>there</p>"]);
+  const doc = new DOMParser().parseFromString(`<html><head></head><body>${COMPOSE_NEW_BODY}</body></html>`, "text/html");
+  const sig = doc.querySelector(".moz-signature");
+  inDocument(doc, () => insertAtTop(ins[1][0].args[0]));
+  assert.equal(doc.body.innerHTML, `<p>Hello<br>there</p>${COMPOSE_NEW_BODY}`);
+  assert.equal(doc.querySelector(".moz-signature"), sig);
 
   const o = original();
   r = await call("mail_compose", { kind: "reply_all", id: o.id, body: "Yes" });
@@ -488,8 +495,8 @@ test("TestComposeOpensWindow", async () => {
   assert.equal(reply[1][1], "replyToAll");
   assert.deepEqual(reply[1][2], { identityId: "id1" });
   const replyAt = mock.calls.compose.findIndex(([f]) => f === "beginReply");
-  const set = mock.calls.compose.slice(replyAt).find(([f]) => f === "setComposeDetails");
-  assert.match(set[1][1].body, /<body><p>Yes<\/p><div class="moz-cite-prefix">/);
+  const set = mock.calls.compose.slice(replyAt).find(([f]) => f === "executeScript");
+  assert.deepEqual(set[1][0].args, ["<p>Yes</p>"]);
 
   r = await call("mail_compose", { kind: "forward", id: o.id, to: ["y@example.test"], body: "FYI" });
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -498,6 +505,29 @@ test("TestComposeOpensWindow", async () => {
   assert.deepEqual(fwd[1][2].to, ["y@example.test"]);
 
   assert.equal(mock.calls.sendMessage.length + mock.calls.saveMessage.length + mock.calls.import.length, 0);
+});
+
+// inDocument runs fn with doc as the global document, as a script that
+// executeScript puts in a compose window sees it.
+function inDocument(doc, fn) {
+  const had = Object.hasOwn(globalThis, "document");
+  const before = globalThis.document;
+  globalThis.document = doc;
+  try {
+    fn();
+  } finally {
+    if (had) globalThis.document = before;
+    else delete globalThis.document;
+  }
+}
+
+test("mail_compose puts the text above a plain-text window's signature", async () => {
+  mock.messenger.compose.getComposeDetails = async () => ({ isPlainText: true, plainTextBody: "-- \nMe Myself" });
+  const r = await call("mail_compose", { kind: "new", body: "Hello" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const set = mock.calls.compose.find(([f]) => f === "setComposeDetails");
+  assert.deepEqual(set[1][1], { plainTextBody: "Hello\n\n-- \nMe Myself" });
+  assert.equal(composeCalls("executeScript"), 0);
 });
 
 // composeDirect calls the handler itself, so the test sees the error the
@@ -517,17 +547,19 @@ test("mail_compose: a failure after the window opened says so and may have compl
   const o = original();
   const cases = [
     ["getComposeDetails rejects", () => (mock.messenger.compose.getComposeDetails = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
-    ["setComposeDetails rejects", () => (mock.messenger.compose.setComposeDetails = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
+    ["executeScript rejects", () => (mock.messenger.scripting.executeScript = async () => Promise.reject(new Error("gone"))), /could not put the text in it/],
     ["getComposeDetails never answers", () => (mock.messenger.compose.getComposeDetails = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
-    ["setComposeDetails never answers", () => (mock.messenger.compose.setComposeDetails = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
+    ["executeScript never answers", () => (mock.messenger.scripting.executeScript = () => new Promise(() => {})), /did not answer in time; the compose window is open, but the text may not be in it/],
   ];
   const budget = COMPOSE.budgetMs;
   COMPOSE.budgetMs = 300;
   try {
     const working = { ...mock.messenger.compose };
+    const workingScripting = { ...mock.messenger.scripting };
     for (const [what, breakIt, message] of cases) {
       for (const args of [{ kind: "new", body: "Hi" }, { kind: "reply", id: o.id, body: "Hi" }]) {
         Object.assign(mock.messenger.compose, working);
+        Object.assign(mock.messenger.scripting, workingScripting);
         mock.calls.compose.length = 0;
         breakIt();
         const e = await composeDirect(args);
@@ -559,7 +591,7 @@ test("mail_compose fails when Thunderbird opens the window without reporting its
     assert.match(e.message, /^The compose window opened, but Thunderbird did not report the window it opened, so the text was not put in it\./);
     assert.equal(e.mayHaveCompleted, true);
   }
-  assert.equal(composeCalls("setComposeDetails"), 0);
+  assert.equal(composeCalls("setComposeDetails") + composeCalls("executeScript"), 0);
 });
 
 test("mail_compose: a timeout of the call that opens the window may have completed", async () => {

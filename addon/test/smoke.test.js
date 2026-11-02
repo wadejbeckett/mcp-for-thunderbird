@@ -32,6 +32,7 @@ test("manifest is MV3 with a module event page and the agreed permissions", () =
     "messagesImport",
     "messages.save",
     "compose",
+    "scripting",
     "addressBooks",
     "nativeMessaging",
     "storage",

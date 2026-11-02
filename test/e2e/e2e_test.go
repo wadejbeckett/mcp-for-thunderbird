@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/smtp"
 	"net/textproto"
 	"net/url"
@@ -1637,6 +1638,112 @@ func TestE2EInjectionDefaults(t *testing.T) {
 }
 
 // TestE2EConnectRestart checks that one connect-mode session survives
+// sigImagePNG is a 1x1 PNG the signature image test serves.
+const sigImagePNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+
+// composeImagesScript waits for the compose window with the subject WANT
+// to hold text, then for its images to finish loading, and returns each
+// image's src, moz-do-not-send attribute, whether it finished and its
+// natural width (0 for a broken image).
+const composeImagesScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let win = null;
+  for (let i = 0; i < 40 && !win; i++) {
+    win = [...Services.wm.getEnumerator("msgcompose")].find((w) =>
+      w.document.getElementById("msgSubject").value === WANT &&
+      w.GetCurrentEditor().document.body.textContent.includes(TEXT));
+    if (!win) await sleep(250);
+  }
+  if (!win) return [{ error: "no compose window with the text" }];
+  const doc = win.GetCurrentEditor().document;
+  const imgs = () => [...doc.images];
+  for (let i = 0; i < 40 && imgs().some((im) => !im.complete); i++) await sleep(250);
+  if (imgs().length === 0) {
+    const html = doc.body.innerHTML;
+    win.close();
+    return [{ error: "no image in the window: " + html }];
+  }
+  const out = imgs().map((im) => ({
+    src: im.getAttribute("src"),
+    mozDoNotSend: im.getAttribute("moz-do-not-send"),
+    complete: im.complete,
+    naturalWidth: im.naturalWidth,
+  }));
+  win.close();
+  return out;
+})().then(resolve, (e) => resolve([{ error: String(e) }]));
+`
+
+// identityHTMLSigScript sets whether identity id1's signature is HTML and
+// returns the setting it had.
+const identityHTMLSigScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const id = MailServices.accounts.getIdentity("id1");
+const before = id.htmlSigFormat;
+id.htmlSigFormat = %v;
+return before;
+`
+
+// TestE2EComposeSignatureImages opens a new message whose identity's HTML
+// signature holds a remote image marked moz-do-not-send="false" (as a
+// signature that is to travel embedded is) and checks that the image
+// still loads in the window once mail_compose has put the text above the
+// signature.
+func TestE2EComposeSignatureImages(t *testing.T) {
+	png, err := base64.StdEncoding.DecodeString(sigImagePNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("image server: %s %s", r.Method, r.URL)
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(png)
+	}))
+	defer srv.Close()
+	src := srv.URL + "/sig.png"
+	sig := `<p>E2E image signature</p><img moz-do-not-send="false" src="` + src + `" width="10" height="10" alt="sig">`
+
+	cs := httpSession(t)
+	var sigBefore string
+	var htmlBefore bool
+	marionette(t, fmt.Sprintf(identitySignatureScript, sig), &sigBefore)
+	marionette(t, fmt.Sprintf(identityHTMLSigScript, true), &htmlBefore)
+	t.Cleanup(func() {
+		var ignoredS string
+		var ignoredB bool
+		marionette(t, fmt.Sprintf(identitySignatureScript, sigBefore), &ignoredS)
+		marionette(t, fmt.Sprintf(identityHTMLSigScript, htmlBefore), &ignoredB)
+	})
+	const subj, text = "E2E signature image", "Text above the image."
+	var opened struct{ Opened bool }
+	callOK(t, cs, "mail_compose", map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": subj, "body": text}, &opened)
+	script := strings.NewReplacer("WANT", fmt.Sprintf("%q", subj), "TEXT", fmt.Sprintf("%q", text)).Replace(composeImagesScript)
+	var imgs []struct {
+		Src          string `json:"src"`
+		MozDoNotSend string `json:"mozDoNotSend"`
+		Complete     bool   `json:"complete"`
+		NaturalWidth int    `json:"naturalWidth"`
+		Error        string `json:"error"`
+	}
+	marionette(t, script, &imgs)
+	if len(imgs) == 1 && imgs[0].Error != "" {
+		t.Fatalf("reading the compose window: %s", imgs[0].Error)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("compose window images = %+v, want the signature's one", imgs)
+	}
+	im := imgs[0]
+	if im.Src != src || im.MozDoNotSend != "false" {
+		t.Fatalf("signature image = %+v, want src %s with moz-do-not-send=\"false\"", im, src)
+	}
+	if !im.Complete || im.NaturalWidth == 0 {
+		t.Fatalf("signature image did not load in the compose window: %+v", im)
+	}
+	t.Logf("signature image loaded: %+v", im)
+}
+
 // Thunderbird restarts: a plain restart (new token, R33), a removed
 // connection file, and a new port; and a quick restart the proxy's 5 s
 // poll may not notice. A clean stop clears the port and token in the file.

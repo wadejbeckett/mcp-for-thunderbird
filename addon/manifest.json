@@ -28,6 +28,7 @@
     "messagesImport",
     "messages.save",
     "compose",
+    "scripting",
     "addressBooks",
     "nativeMessaging",
     "storage"

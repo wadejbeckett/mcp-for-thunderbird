@@ -544,6 +544,13 @@ async function intoOpenWindow(run, fn) {
   return done(v, "the compose window is open, but the text may not be in it. Check the window before trying again");
 }
 
+// insertAtTop runs in the compose window's document (scripting
+// executeScript) and puts the text's HTML at the top of the body, above
+// the signature or quote, leaving the elements already there as they are.
+export function insertAtTop(html) {
+  document.body.insertAdjacentHTML("afterbegin", html);
+}
+
 async function mailCompose(args, ctx) {
   const s = ctx.settings;
   const kind = kindArg(args);
@@ -587,14 +594,16 @@ async function mailCompose(args, ctx) {
   if (html) {
     if (!tab || tab.id === undefined) throw openedWithoutText("Thunderbird did not report the window it opened, so the text was not put in it");
     const d = await intoOpenWindow(run, () => tb().compose.getComposeDetails(tab.id));
-    let upd;
     if (d && d.isPlainText) {
-      upd = { plainTextBody: stripInvisible(a.body) + "\n\n" + (d.plainTextBody || "") };
+      const upd = { plainTextBody: stripInvisible(a.body) + "\n\n" + (d.plainTextBody || "") };
+      await intoOpenWindow(run, () => tb().compose.setComposeDetails(tab.id, upd));
     } else {
-      const cur = String((d && d.body) || "");
-      upd = { body: /<body[^>]*>/i.test(cur) ? cur.replace(/<body([^>]*)>/i, (m, attrs) => `<body${attrs}>${html}`) : html + cur };
+      // An HTML text is inserted into the open document, not set as a new
+      // body: setComposeDetails rebuilds the whole document, and Thunderbird
+      // does not load the remote images of the rebuilt signature again, so
+      // they show broken in the window.
+      await intoOpenWindow(run, () => tb().scripting.executeScript({ target: { tabId: tab.id }, func: insertAtTop, args: [html] }));
     }
-    await intoOpenWindow(run, () => tb().compose.setComposeDetails(tab.id, upd));
   }
   return { opened: true };
 }

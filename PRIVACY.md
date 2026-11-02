@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 1 November 2026.
+Last updated: 2 November 2026.
 
 This policy covers MCP for Thunderbird: the Thunderbird add-on and the host program it works with. MCP for Thunderbird lets AI apps on your computer, such as Claude Desktop, Claude Code, Codex or Cursor, work with the mail in Thunderbird, within limits you set in Thunderbird. MCP for Thunderbird is published by Wade J. Beckett, whose company is Noiz.
 
@@ -54,6 +54,7 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `messagesImport` | Saving reply and forward drafts into your Drafts folder with their threading kept. |
 | `messages.save` | Saving new drafts. |
 | `compose` | Opening a filled-in compose window for you to check and send. |
+| `scripting` | Putting the text at the top of a compose window it opened, so the signature and its images stay as Thunderbird laid them out. |
 | `addressBooks` | Looking up contacts, only when the contacts group is on. MCP for Thunderbird does not change contacts. |
 | `nativeMessaging` | Talking to the native program. |
 | `storage` | Your settings and the activity log. |

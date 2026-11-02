@@ -506,6 +506,14 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.compose.push(["setComposeDetails", args]);
       },
     },
+    // executeScript records the call; compose tests read the body it would
+    // leave from the window's details and the function's argument.
+    scripting: {
+      executeScript: async (...args) => {
+        calls.compose.push(["executeScript", args]);
+        return [{ result: undefined }];
+      },
+    },
     messengerUtilities: {
       parseMailboxString: async (text) => {
         calls.parseMailboxString.push(text);
