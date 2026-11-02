@@ -26,7 +26,7 @@ case "$goos/$goarch" in
 linux/*)
   cd "$root"
   MFT_VERSION=$version MFT_ARCH=$goarch MFT_BINARY=$binary \
-    GOTOOLCHAIN=${MFT_GOTOOLCHAIN:-go1.25.14} \
+    GOTOOLCHAIN=${MFT_GOTOOLCHAIN:-go1.26.10} \
     go run "$NFPM" pkg --config packaging/nfpm.yaml --packager deb --target "$dist/" >/dev/null
   ;;
 windows/* | darwin/all)

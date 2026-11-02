@@ -108,6 +108,8 @@ Three more workflows check the code and the workflows themselves:
 - **OpenSSF Scorecard** (`.github/workflows/scorecard.yml`) rates the repository's supply-chain practices, such as pinned dependencies and token permissions, on every push to `main` and once a week, and publishes the result.
 - **zizmor** (`.github/workflows/zizmor.yml`) checks the GitHub Actions workflows for problems such as untrusted input in commands, credentials left in a checkout and excessive permissions, on every push and pull request that changes `.github/workflows/`. It fails on any finding.
 
+The `test` workflow also runs [govulncheck](https://go.dev/doc/tutorial/govulncheck) on the host for Linux, Windows and macOS. It fails when the host's code can reach a known Go vulnerability, including one in the standard library of the toolchain named in `host/go.mod`; the fix is usually a newer toolchain or module version.
+
 ## Safety rules for the end-to-end tests
 
 The end-to-end tests start a real Thunderbird. Run them so they can never touch your own mail:

@@ -2,12 +2,12 @@ module github.com/wadejbeckett/mcp-for-thunderbird/host
 
 go 1.25.0
 
-toolchain go1.25.14
+toolchain go1.26.10
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pelletier/go-toml/v2 v2.4.3
-	golang.org/x/sys v0.41.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/time v0.15.0
 )
 

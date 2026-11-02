@@ -4,7 +4,7 @@
 #
 # Release build for MCP for Thunderbird. From the repository root:
 #
-#   GOTOOLCHAIN=go1.25.14 go run github.com/goreleaser/goreleaser/v2@v2.13.3 \
+#   GOTOOLCHAIN=go1.26.10 go run github.com/goreleaser/goreleaser/v2@v2.13.3 \
 #     release --snapshot --clean --config packaging/goreleaser.yaml
 #
 # (packaging/build.sh does exactly this.) GoReleaser v2.13.3 is the newest
@@ -32,7 +32,7 @@ builds:
     binary: mcp-for-thunderbird
     env:
       - CGO_ENABLED=0
-      - GOTOOLCHAIN=go1.25.14
+      - GOTOOLCHAIN=go1.26.10
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     flags: [-trimpath]
@@ -89,7 +89,7 @@ sboms:
     # keep it equal to the version after the @.
     cmd: go
     env:
-      - GOTOOLCHAIN=go1.25.14
+      - GOTOOLCHAIN=go1.26.10
     args:
       - run
       - -ldflags=-X main.version=1.44.0

@@ -75,6 +75,16 @@ jobs:
       - name: third-party-licenses.sh handles replaced modules and several licence files
         if: runner.os == 'Linux'
         run: sh ../packaging/third-party-licenses-selftest.sh
+      # The standard library comes from the toolchain named in go.mod, so a
+      # toolchain that no longer gets security fixes fails here too.
+      - name: No known vulnerability reachable from the host, on any system
+        if: runner.os == 'Linux'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          for os in linux windows darwin; do
+            echo "GOOS=$os"
+            GOOS=$os "$(go env GOPATH)/bin/govulncheck" ./...
+          done
       # The Windows-only tests (owner-only DACLs, HKCU registration) must
       # really run there, not be skipped or filtered out.
       - name: Windows-only tests ran

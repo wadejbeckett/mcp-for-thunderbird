@@ -16,7 +16,7 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 GORELEASER=github.com/goreleaser/goreleaser/v2@v2.13.3
-export GOTOOLCHAIN="${MFT_GOTOOLCHAIN:-go1.25.14}"
+export GOTOOLCHAIN="${MFT_GOTOOLCHAIN:-go1.26.10}"
 
 [ $# -gt 0 ] || set -- --snapshot --clean
 
