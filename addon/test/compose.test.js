@@ -9,7 +9,7 @@ import { install, fetchFrom, COMPOSE_NEW_BODY } from "./mocks/messenger.js";
 import { dispatch, HANDLERS } from "../src/rpc.js";
 import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, baseName, insertAtTop, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
+import { isAllowed, baseName, insertAtTop, textToHtml, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -704,4 +704,54 @@ test("mail_draft reply, reply_all and forward refuse a recipient that is not an 
     }
   }
   assert.equal(mock.calls.import.length, 0);
+});
+
+// ---- lists in the body ----
+
+test("textToHtml turns '- ' and '* ' paragraphs into a bulleted list", () => {
+  assert.equal(textToHtml("Prices:\n\n- Basic R99\n* Pro R199\n\nThanks"), "<p>Prices:</p><ul><li>Basic R99</li><li>Pro R199</li></ul><p>Thanks</p>");
+  // a trailing line break or blank line around the list changes nothing
+  assert.equal(textToHtml("\n- a\n- b\n"), "<ul><li>a</li><li>b</li></ul>");
+  assert.equal(textToHtml("- a\r\n- b"), "<ul><li>a</li><li>b</li></ul>");
+});
+
+test("textToHtml turns '1. ' paragraphs into a numbered list, starting at the first number", () => {
+  assert.equal(textToHtml("1. One\n2. Two\n10. Ten"), "<ol><li>One</li><li>Two</li><li>Ten</li></ol>");
+  assert.equal(textToHtml("3. Three\n4. Four"), '<ol start="3"><li>Three</li><li>Four</li></ol>');
+});
+
+test("textToHtml joins an indented line to the item above it", () => {
+  assert.equal(textToHtml("- First item\n  wraps here\n- Second\n\tand tab"), "<ul><li>First item<br>wraps here</li><li>Second<br>and tab</li></ul>");
+  assert.equal(textToHtml("1. Step\n   more\n2. Next"), "<ol><li>Step<br>more</li><li>Next</li></ol>");
+});
+
+test("textToHtml keeps a paragraph as text unless every line is a list line", () => {
+  // a lead-in line in the same paragraph, a mixed list, or a marker
+  // without its space leaves the paragraph as typed
+  assert.equal(textToHtml("Prices:\n- Basic\n- Pro"), "<p>Prices:<br>- Basic<br>- Pro</p>");
+  assert.equal(textToHtml("- a\nb"), "<p>- a<br>b</p>");
+  assert.equal(textToHtml("- a\n1. b"), "<p>- a<br>1. b</p>");
+  assert.equal(textToHtml("1. a\n- b"), "<p>1. a<br>- b</p>");
+  assert.equal(textToHtml("-5 degrees\n*bold*"), "<p>-5 degrees<br>*bold*</p>");
+  assert.equal(textToHtml("2026. A year"), '<ol start="2026"><li>A year</li></ol>');
+  assert.equal(textToHtml("1.5 litres"), "<p>1.5 litres</p>");
+  assert.equal(textToHtml(" - indented first line"), "<p> - indented first line</p>");
+});
+
+test("textToHtml escapes list items and strips invisible characters from them", () => {
+  assert.equal(textToHtml('- <b>x</b> & "y"\n  <i>z</i>'), "<ul><li>&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;<br>&lt;i&gt;z&lt;/i&gt;</li></ul>");
+  assert.equal(textToHtml("- a​b\n- ‮c"), "<ul><li>ab</li><li>c</li></ul>");
+  // an invisible character cannot hide a list marker or forge one
+  assert.equal(textToHtml("​- a\n- b"), "<ul><li>a</li><li>b</li></ul>");
+});
+
+test("mail_compose and mail_draft send a list body as HTML lists", async () => {
+  let r = await call("mail_compose", { kind: "new", to: ["x@example.test"], subject: "S", body: "Hi\n\n- one\n- two" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const ins = mock.calls.compose.find(([f]) => f === "executeScript");
+  assert.deepEqual(ins[1][0].args, ["<p>Hi</p><ul><li>one</li><li>two</li></ul>"]);
+
+  r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "S", body: "1. a\n2. b" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(mock.calls.saveMessage[0][0].body, "<ol><li>a</li><li>b</li></ol>");
 });

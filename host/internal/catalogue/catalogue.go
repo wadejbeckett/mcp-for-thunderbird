@@ -47,6 +47,10 @@ func schema(required []string, props m) m {
 	return s
 }
 
+// bodyDesc tells callers how the plain-text body becomes the HTML message
+// (addon/src/handlers/compose.js, textToHtml).
+const bodyDesc = "Plain-text body. A blank line starts a new paragraph. A paragraph whose lines all start with \"- \" or \"* \" becomes a bulleted list, and one whose lines all start with \"1. \", \"2. \" and so on becomes a numbered list; an indented line continues the item above it. Put a blank line between a list and the text around it."
+
 func composeProps() m {
 	return m{
 		"account":     account(),
@@ -56,7 +60,7 @@ func composeProps() m {
 		"cc":          strs("Cc recipients."),
 		"bcc":         strs("Bcc recipients."),
 		"subject":     str("Subject; defaults to the original's for replies and forwards."),
-		"body":        str("Plain-text body."),
+		"body":        str(bodyDesc),
 		"attachments": attachments(),
 	}
 }
@@ -148,7 +152,7 @@ var tools = []Tool{
 		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message. Direct send accepts only simple addresses (letters, digits, . _ + -) before the @ and a plain ASCII domain; use mail_draft for any other address.",
 		Input: schema([]string{"to", "subject", "body"}, m{
 			"account": account(), "to": strs("To recipients."), "cc": strs("Cc recipients."), "bcc": strs("Bcc recipients."),
-			"subject": str("Subject."), "body": str("Plain-text body."), "attachments": attachments(),
+			"subject": str("Subject."), "body": str(bodyDesc), "attachments": attachments(),
 		})},
 }
 

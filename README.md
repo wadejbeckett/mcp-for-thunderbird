@@ -27,6 +27,8 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 | Contacts | `mail_contacts` | Look people up in your address books. |
 | Sending | `mail_send` | Send a message with no window, only to recipients you have listed (Thunderbird 153 or later). Off unless you turn it on. |
 
+AI apps write the body of a message as plain text, and the add-on turns it into an HTML message: a blank line starts a new paragraph, a paragraph of lines that start with `- ` or `* ` becomes a bulleted list, and a paragraph of lines that start with `1. `, `2. ` and so on becomes a numbered list. An indented line continues the list item above it. A list needs a blank line between it and the text around it; otherwise its lines stay as typed.
+
 ## What it cannot do
 
 - **Delete mail for good.** The organise tools can move mail to Trash, but no tool empties Trash or Junk, deletes a folder or changes account settings.

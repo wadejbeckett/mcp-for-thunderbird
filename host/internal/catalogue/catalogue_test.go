@@ -231,3 +231,14 @@ func TestSearchBodyOfflineAndMoveTrashResults(t *testing.T) {
 		t.Errorf("mail_move must say it refuses the Outbox: %s", d)
 	}
 }
+
+func TestBodyDescribesLists(t *testing.T) {
+	for _, n := range []string{"mail_draft", "mail_compose", "mail_send"} {
+		d, _ := props(t, n)["body"]["description"].(string)
+		for _, want := range []string{`"- "`, `"* "`, `"1. "`, "indented line", "blank line"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s body description must mention %s", n, want)
+			}
+		}
+	}
+}

@@ -1744,6 +1744,64 @@ func TestE2EComposeSignatureImages(t *testing.T) {
 	t.Logf("signature image loaded: %+v", im)
 }
 
+// composeListsScript finds the compose window with subject WANT once its
+// editor holds TEXT, reads the items of its bulleted and numbered lists and
+// its paragraphs, and closes it.
+const composeListsScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let win = null;
+  for (let i = 0; i < 40 && !win; i++) {
+    win = [...Services.wm.getEnumerator("msgcompose")].find((w) =>
+      w.document.getElementById("msgSubject").value === WANT &&
+      w.GetCurrentEditor().document.body.textContent.includes(TEXT));
+    if (!win) await sleep(250);
+  }
+  if (!win) return { error: "no compose window with the text" };
+  const doc = win.GetCurrentEditor().document;
+  const items = (sel) => [...doc.querySelectorAll(sel)].map((li) => li.innerHTML);
+  const out = {
+    ul: items("body > ul > li"),
+    ol: items("body > ol > li"),
+    p: [...doc.querySelectorAll("body > p")].map((p) => p.textContent),
+  };
+  win.close();
+  return out;
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2EComposeLists opens a new message whose plain-text body holds a
+// "- " list (with an indented continuation line) and a "1. " list, and
+// checks that the compose window shows them as HTML lists.
+func TestE2EComposeLists(t *testing.T) {
+	cs := httpSession(t)
+	const subj, text = "E2E compose lists", "Prices for 2027:"
+	body := text + "\n\n- Basic <R99>\n  per month\n- Pro R199\n\n1. Pay\n2. Install\n\nThanks"
+	var opened struct{ Opened bool }
+	callOK(t, cs, "mail_compose", map[string]any{"account": "account1", "kind": "new", "to": []string{"test@localhost"}, "subject": subj, "body": body}, &opened)
+	script := strings.NewReplacer("WANT", fmt.Sprintf("%q", subj), "TEXT", fmt.Sprintf("%q", text)).Replace(composeListsScript)
+	var got struct {
+		UL    []string `json:"ul"`
+		OL    []string `json:"ol"`
+		P     []string `json:"p"`
+		Error string   `json:"error"`
+	}
+	marionette(t, script, &got)
+	if got.Error != "" {
+		t.Fatalf("reading the compose window: %s", got.Error)
+	}
+	wantUL := []string{"Basic &lt;R99&gt;<br>per month", "Pro R199"}
+	wantOL := []string{"Pay", "Install"}
+	if strings.Join(got.UL, "|") != strings.Join(wantUL, "|") || strings.Join(got.OL, "|") != strings.Join(wantOL, "|") {
+		t.Fatalf("compose window lists: ul %q, ol %q; want ul %q, ol %q", got.UL, got.OL, wantUL, wantOL)
+	}
+	if !contains(got.P, text) || !contains(got.P, "Thanks") {
+		t.Fatalf("compose window paragraphs = %q, want %q and %q", got.P, text, "Thanks")
+	}
+	t.Logf("compose window lists: ul %q, ol %q", got.UL, got.OL)
+}
+
 // Thunderbird restarts: a plain restart (new token, R33), a removed
 // connection file, and a new port; and a quick restart the proxy's 5 s
 // poll may not notice. A clean stop clears the port and token in the file.

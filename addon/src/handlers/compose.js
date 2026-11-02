@@ -17,7 +17,8 @@
 // addresses Thunderbird is given are exactly the ones checked. The
 // optional messages.send permission is checked before any send (ruling R7).
 //
-// The body is plain text from the client; it becomes minimal HTML. Body,
+// The body is plain text from the client; it becomes minimal HTML, with
+// "- ", "* " and "1. " paragraphs as lists (textToHtml). Body,
 // subject, recipients and attachment names lose invisible characters
 // (ruling R21), and line breaks in header values become spaces, so a value
 // cannot add a header of its own.
@@ -165,14 +166,37 @@ function common(args, { needTo = false } = {}) {
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+const BULLET = /^[-*] /;
+const NUMBER = /^(\d{1,9})\. /;
+
+// listHtml returns a paragraph as a list when every line is an item ("- "
+// or "* " for <ul>, "1. " for <ol>) or an indented line that continues the
+// item above it (joined with <br>); otherwise null. An <ol> starts at the
+// first item's number.
+function listHtml(p) {
+  const lines = p.replace(/^\n+|\s+$/g, "").split("\n");
+  const marker = BULLET.test(lines[0]) ? BULLET : NUMBER.test(lines[0]) ? NUMBER : null;
+  if (!marker) return null;
+  const items = [];
+  for (const line of lines) {
+    if (marker.test(line)) items.push([line.replace(marker, "")]);
+    else if (/^\s/.test(line)) line.trim() !== "" && items[items.length - 1].push(line.trim());
+    else return null;
+  }
+  const lis = items.map((it) => `<li>${it.map(esc).join("<br>")}</li>`).join("");
+  if (marker === BULLET) return `<ul>${lis}</ul>`;
+  const start = Number(NUMBER.exec(lines[0])[1]);
+  return `<ol${start === 1 ? "" : ` start="${start}"`}>${lis}</ol>`;
+}
+
 // textToHtml turns plain text into paragraphs; single line breaks become
-// <br>.
+// <br>, and a paragraph made only of list lines becomes a list (listHtml).
 export function textToHtml(text) {
   return stripInvisible(text)
     .replace(/\r\n?/g, "\n")
     .split(/\n{2,}/)
     .filter((p) => p.trim() !== "")
-    .map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`)
+    .map((p) => listHtml(p) ?? `<p>${esc(p).replace(/\n/g, "<br>")}</p>`)
     .join("");
 }
 
