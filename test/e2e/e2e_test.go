@@ -1640,7 +1640,8 @@ func TestE2EInjectionDefaults(t *testing.T) {
 // contactsSeedScript adds (SEED true) or removes (SEED false) the contacts
 // TestE2EContacts looks up: in the Personal Address Book, Quinn with two
 // addresses, Rae, and the mailing list "Econtact board" holding both; in
-// Collected Addresses, a second copy of Quinn. It returns the two books'
+// Collected Addresses, a second copy of Quinn with only one of his
+// addresses in another case, as Thunderbird collects it. It returns the two books'
 // names and the number of seeded cards and lists it found afterwards.
 const contactsSeedScript = `
 const resolve = arguments[arguments.length - 1];
@@ -1662,7 +1663,7 @@ const resolve = arguments[arguments.length - 1];
   if (seed) {
     const quinn = pab.addCard(card("Quinn Econtact", ["quinn@e2econtact.test", "quinn@work.e2econtact.test"]));
     const rae = pab.addCard(card("Rae Econtact", ["rae@e2econtact.test"]));
-    history.addCard(card("Quinn E.", ["QUINN@work.e2econtact.test", "quinn@e2econtact.test"]));
+    history.addCard(card("Quinn E.", ["QUINN@e2econtact.test"]));
     const ml = Cc["@mozilla.org/addressbook/directoryproperty;1"].createInstance(Ci.nsIAbDirectory);
     ml.isMailList = true;
     ml.dirName = "Econtact board";
@@ -1705,10 +1706,11 @@ type contactResult struct {
 
 // TestE2EContacts looks people up with mail_contacts in Thunderbird's own
 // address books: a person in the Personal Address Book and in Collected
-// Addresses comes back once with both book names, truncated says when
-// more people matched than the limit, book limits the search to one book,
-// include_lists returns the mailing list with its members, and an account
-// is refused.
+// Addresses (holding one of his addresses) comes back once with both book
+// names, truncated says when more people matched than the limit, book
+// limits the search to one book, include_lists returns the mailing list
+// with its members, also for a quoted phrase, and an account is refused,
+// whether it is enabled or not.
 func TestE2EContacts(t *testing.T) {
 	cs := httpSession(t)
 	orig := addonSettings(t, nil)
@@ -1769,6 +1771,11 @@ func TestE2EContacts(t *testing.T) {
 		t.Fatalf("mail_contacts include_lists: %+v", r)
 	}
 	l := r.Lists[0]
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": `"Econtact board"`, "include_lists": true}, &r)
+	if len(r.Contacts) != 0 || len(r.Lists) != 1 || r.Lists[0].Name != "Econtact board" {
+		t.Fatalf("mail_contacts quoted phrase with include_lists: %+v", r)
+	}
 	var members []string
 	for _, m := range l.Members {
 		members = append(members, m.Name)
@@ -1779,8 +1786,10 @@ func TestE2EContacts(t *testing.T) {
 		t.Fatalf("mailing list: %+v", l)
 	}
 
-	if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "account": "account1"}); !isErr || !strings.HasPrefix(text, "invalid_argument:") {
-		t.Fatalf("mail_contacts with account: %v %s", isErr, text)
+	for _, account := range []string{"account1", "account99", ""} {
+		if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "account": account}); !isErr || !strings.HasPrefix(text, "invalid_argument:") {
+			t.Fatalf("mail_contacts with account %q: %v %s", account, isErr, text)
+		}
 	}
 	if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "book": "No such book"}); !isErr || !strings.HasPrefix(text, "not_found:") {
 		t.Fatalf("mail_contacts unknown book: %v %s", isErr, text)

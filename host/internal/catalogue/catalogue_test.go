@@ -207,7 +207,7 @@ func TestContactsArguments(t *testing.T) {
 		t.Errorf("mail_contacts required = %v, want [query]", req)
 	}
 	d := byName(t, "mail_contacts").Description
-	for _, w := range []string{"truncated", "include_lists", "whole Thunderbird profile", "returned once"} {
+	for _, w := range []string{"truncated", "include_lists", "whole Thunderbird profile", "returned once", "sharing an address"} {
 		if !strings.Contains(d, w) {
 			t.Errorf("mail_contacts description lacks %q", w)
 		}

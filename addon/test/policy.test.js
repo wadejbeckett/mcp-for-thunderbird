@@ -28,6 +28,14 @@ test("paused beats everything", () => {
   }
 });
 
+test("an account sent to mail_contacts is refused before it is checked", () => {
+  const on = s({ groups: { ...DEFAULTS.groups, contacts: true } });
+  for (const account of ["a1", "off", "unknown", "", 5]) {
+    assert.throws(() => check("mail_contacts", { query: "x", account }, on), { code: "invalid_argument", message: /whole profile/ });
+  }
+  check("mail_contacts", { query: "x" }, on);
+});
+
 test("a disabled account gives not_enabled", () => {
   assert.throws(() => check("mail_folders", { account: "off" }, s()), { code: "not_enabled" });
   assert.throws(() => check("mail_folders", { account: "unknown" }, s()), { code: "not_enabled" });

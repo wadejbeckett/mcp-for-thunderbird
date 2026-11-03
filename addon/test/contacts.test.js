@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { install, fetchFrom } from "./mocks/messenger.js";
 import { dispatch } from "../src/rpc.js";
 import { save } from "../src/settings.js";
-import "../src/handlers/contacts.js";
+import { searchTokens } from "../src/handlers/contacts.js";
 
 const vcard = (lines) => ["BEGIN:VCARD", "VERSION:4.0", ...lines, "END:VCARD"].join("\r\n");
 
@@ -82,22 +82,58 @@ test("contacts say truncated only when more people matched than the limit", asyn
 test("a person in two address books is returned once, with both book names", async () => {
   const books = [
     { id: "pab", name: "Personal Address Book", contacts: [vcard(["FN:Dan Double", "EMAIL:dan@example.org", "EMAIL:dan@work.example"]), vcard(["FN:Erin Other", "EMAIL:erin@example.org"])] },
-    { id: "history", name: "Collected Addresses", contacts: [vcard(["FN:Dan D.", "EMAIL:DAN@work.example", "EMAIL:dan@example.org"]), vcard(["FN:Dan Single", "EMAIL:dan@example.org"])] },
+    {
+      id: "history",
+      name: "Collected Addresses",
+      contacts: [
+        vcard(["FN:Dan D.", "EMAIL:DAN@work.example", "EMAIL:dan@example.org"]),
+        // Thunderbird collects the one address mail went to.
+        vcard(["FN:Dan Single", "EMAIL:dan@example.org"]),
+        vcard(["FN:Dan Home", "EMAIL:dan@work.example", "EMAIL:dan@home.example"]),
+      ],
+    },
   ];
   mock = install({ accounts: [{ id: "a1", name: "Work", type: "imap", folders: [] }], books });
   await save({ accounts: { a1: true }, groups: { contacts: true } });
   const r = await call({ query: "example" });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(r.content.contacts, [
-    { name: "Dan Double", emails: ["dan@example.org", "dan@work.example"], organisation: "", books: ["Personal Address Book", "Collected Addresses"] },
-    { name: "Erin Other", emails: ["erin@example.org"], organisation: "", books: ["Personal Address Book"] },
-    { name: "Dan Single", emails: ["dan@example.org"], organisation: "", books: ["Collected Addresses"] },
-  ]);
-  // The repeat does not use up a place: with limit 2 the second person is
-  // still returned, and the repeat found after the cut-off still adds its book.
+  assert.deepEqual(r.content, {
+    contacts: [
+      { name: "Dan Double", emails: ["dan@example.org", "dan@work.example", "dan@home.example"], organisation: "", books: ["Personal Address Book", "Collected Addresses"] },
+      { name: "Erin Other", emails: ["erin@example.org"], organisation: "", books: ["Personal Address Book"] },
+    ],
+    truncated: false,
+  });
+  // The repeats do not use up places: with limit 2 nothing is cut, and
+  // with limit 1 the repeats found after the cut-off still add their book.
   const two = await call({ query: "example", limit: 2 });
-  assert.deepEqual(two.content.contacts.map((c) => [c.name, c.books.length]), [["Dan Double", 2], ["Erin Other", 1]]);
-  assert.equal(two.content.truncated, true);
+  assert.equal(two.content.contacts.length, 2);
+  assert.equal(two.content.truncated, false);
+  const one = await call({ query: "example", limit: 1 });
+  assert.deepEqual(one.content.contacts.map((c) => [c.name, c.books.length, c.emails.length]), [["Dan Double", 2, 3]]);
+  assert.equal(one.content.truncated, true);
+});
+
+test("contacts with no address are one person only with the same name and organisation", async () => {
+  const books = [
+    {
+      id: "pab",
+      name: "Personal",
+      contacts: [vcard(["FN:John Smith", "ORG:Acme", "TEL:1"]), vcard(["FN:John Smith", "ORG:Globex", "TEL:2"]), vcard(["FN:John Smith", "EMAIL:john@example.org"])],
+    },
+    { id: "history", name: "Collected", contacts: [vcard(["FN:john smith", "ORG:acme"])] },
+  ];
+  mock = install({ accounts: [{ id: "a1", name: "Work", type: "imap", folders: [] }], books });
+  await save({ accounts: { a1: true }, groups: { contacts: true } });
+  const r = await call({ query: "john smith" });
+  assert.deepEqual(
+    r.content.contacts.map((c) => [c.organisation, c.emails, c.books]),
+    [
+      ["Acme", [], ["Personal", "Collected"]],
+      ["Globex", [], ["Personal"]],
+      ["", ["john@example.org"], ["Personal"]],
+    ],
+  );
 });
 
 test("contacts are returned in the order of the address books", async () => {
@@ -138,10 +174,14 @@ test("book limits the search to the local books of that name or id", async () =>
 
 test("contacts refuse an account: address books belong to the whole profile", async () => {
   await save({ groups: { contacts: true } });
-  const r = await call({ query: "ann", account: "a1" });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.code, "invalid_argument");
-  assert.match(r.error.message, /whole profile/);
+  // An enabled account, one that is not enabled, an empty one and a wrong
+  // type all get the same answer, not "enable this account".
+  for (const account of ["a1", "a2", "", 5]) {
+    const r = await call({ query: "ann", account });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, "invalid_argument", `${JSON.stringify(account)}: ${r.error.message}`);
+    assert.match(r.error.message, /whole profile/);
+  }
   assert.equal(mock.calls.contactsQuery.length, 0);
   assert.equal((await call({ query: "ann", account: null })).ok, true);
 });
@@ -186,6 +226,11 @@ test("include_lists returns matching mailing lists with their members", async ()
   // Every word must be in the name or nickname; book limits the lists too.
   assert.deepEqual((await call({ query: "old board", include_lists: true })).content.lists.map((l) => l.name), ["Old board"]);
   assert.deepEqual((await call({ query: "board", include_lists: true, book: "Personal" })).content.lists.map((l) => l.name), ["Board"]);
+  // A quoted phrase is one word without its quotes, as in Thunderbird's
+  // own contact search, and commas split words.
+  assert.deepEqual((await call({ query: '"old board"', include_lists: true })).content.lists.map((l) => l.name), ["Old board"]);
+  assert.deepEqual((await call({ query: '"board old"', include_lists: true })).content.lists, []);
+  assert.deepEqual((await call({ query: "board, old", include_lists: true })).content.lists.map((l) => l.name), ["Old board"]);
   assert.equal((await call({ query: "board", include_lists: "yes" })).error.code, "invalid_argument");
 });
 
@@ -219,6 +264,20 @@ test("mailing list names and members are cleaned like header values", async () =
   assert.equal(r.content.lists[0].book, "Book [marker removed]");
   assert.equal(r.content.lists[0].members[0].name, "Mal Member");
   assert.doesNotMatch(JSON.stringify(r.content), /[\u{E0000}-\u{E007F}\u200B\u202E\u2066]|UNTRUSTED/u);
+});
+
+test("searchTokens splits a query like Thunderbird's getSearchTokens", () => {
+  assert.deepEqual(searchTokens("Ann  Example"), ["ann", "example"]);
+  assert.deepEqual(searchTokens(' ,"Econtact Board" quinn,rae, '), ["econtact board", "quinn", "rae"]);
+  assert.deepEqual(searchTokens('a "b c" d "e f'), ["b c", "e f", "a", "d"]);
+  assert.deepEqual(searchTokens('""'), []);
+});
+
+test("the fallback matches quoted phrases like the query does", async () => {
+  await save({ groups: { contacts: true } });
+  delete mock.messenger.addressBooks.contacts.query;
+  assert.deepEqual((await call({ query: '"ann example"' })).content.contacts.map((c) => c.name), ["Ann Example"]);
+  assert.deepEqual((await call({ query: '"example ann"' })).content.contacts, []);
 });
 
 test("contacts need a query", async () => {

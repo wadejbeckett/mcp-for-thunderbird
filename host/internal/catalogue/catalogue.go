@@ -119,9 +119,9 @@ var tools = []Tool{
 			})},
 		})},
 	{Name: "mail_contacts", Group: "contacts", ReadOnly: true, Idempotent: true,
-		Description: "Searches the user's local address books and returns each person's name, email addresses, organisation and the names of the address books they are in; a person in several books is returned once. Address books belong to the whole Thunderbird profile, not to one account. truncated is true when more people or lists matched than limit. With include_lists, also returns the mailing lists whose name or nickname holds every word of query, each with its book and members (at most 200; membersTruncated is true when it has more).",
+		Description: "Searches the user's local address books and returns each person's name, email addresses, organisation and the names of the address books they are in; a person in several books (cards sharing an address) is returned once, with every address from them. Address books belong to the whole Thunderbird profile, not to one account. truncated is true when more people or lists matched than limit. With include_lists, also returns the mailing lists whose name or nickname holds every word of query, each with its book and members (at most 200; membersTruncated is true when it has more).",
 		Input: schema([]string{"query"}, m{
-			"query":         str("Name or address fragment; every word must match."),
+			"query":         str("Name or address fragment; every word must match. A \"quoted phrase\" is one word."),
 			"book":          str("Only the local address book with this name or id."),
 			"include_lists": boolean("Also return matching mailing lists and their members."),
 			"limit":         m{"type": "integer", "minimum": 1, "maximum": 200, "default": 25, "description": "Maximum people, and separately maximum lists."},
