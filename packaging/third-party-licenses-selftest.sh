@@ -8,9 +8,10 @@
 # Proves packaging/third-party-licenses.sh lists what it claims to, on a
 # small module of its own made in a temporary directory (no network): a
 # module that go.mod replaces with a local path is listed with its
-# replacement and its licence, every licence file of a module is embedded
-# (LICENSE and COPYING both), the main module is left out, and --check
-# tells a current file from a changed one. Prints PASS or the first failure.
+# replacement and its licence, every licence and notice file of a module is
+# embedded (LICENSE, COPYING and NOTICE), the main module is left out,
+# --check tells a current file from a changed one, and a module under a
+# copyleft licence makes the script fail. Prints PASS or the first failure.
 # Needs sh, go and grep.
 set -eu
 
@@ -58,6 +59,7 @@ printf 'module example.test/two\n\ngo 1.25.0\n' >"$work/two/go.mod"
 printf 'package two\n\nfunc F() {}\n' >"$work/two/two.go"
 echo "First licence of module two." >"$work/two/LICENSE"
 echo "Second licence of module two." >"$work/two/COPYING"
+echo "Attribution notice of module two." >"$work/two/NOTICE"
 echo "Licence of the main module, never listed." >"$work/app/LICENSE"
 
 out="$work/THIRD_PARTY_LICENSES"
@@ -68,10 +70,10 @@ grep -qxF "example.test/dep v1.2.3 => ../dep" "$out" || fail "the replaced modul
 grep -qxF "Licence text of the replaced dep module." "$out" || fail "the replaced module's licence is missing"
 echo "listed: example.test/dep v1.2.3 => ../dep, with its licence"
 grep -qxF "example.test/two v0.1.0 => ../two" "$out" || fail "module two is not listed with its replacement"
-for want in "--- COPYING ---" "--- LICENSE ---" "First licence of module two." "Second licence of module two."; do
+for want in "--- COPYING ---" "--- LICENSE ---" "--- NOTICE ---" "First licence of module two." "Second licence of module two." "Attribution notice of module two."; do
   grep -qxF -- "$want" "$out" || fail "module two lacks: $want"
 done
-echo "embedded: both licence files of example.test/two"
+echo "embedded: both licence files and the notice of example.test/two"
 if grep -qF "example.test/app" "$out" || grep -qF "Licence of the main module" "$out"; then
   fail "the main module is listed"
 fi
@@ -85,5 +87,14 @@ if MFT_LICENSES_MODULE="$work/app" MFT_LICENSES_OUT="$out" GOFLAGS=-mod=mod GOPR
   fail "--check passes a changed file"
 fi
 echo "--check: passes a current file, fails a changed one"
+
+# A dependency under the GPL must stop the build, whatever its version.
+printf '                    GNU GENERAL PUBLIC LICENSE\n                       Version 3, 29 June 2007\n' >"$work/dep/LICENSE"
+if MFT_LICENSES_MODULE="$work/app" MFT_LICENSES_OUT="$out" GOFLAGS=-mod=mod GOPROXY=off \
+  sh "$script" >/dev/null 2>&1; then
+  fail "a module under the GPL was accepted"
+fi
+grep -qxF "Licence text of the replaced dep module." "$out" || fail "a refused run changed the output file"
+echo "refused: a module under the GPL, with the output file left as it was"
 
 echo PASS

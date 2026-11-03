@@ -60,8 +60,11 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout))
 }
 
-// run dispatches on args and returns the process exit code.
+// run dispatches on args and returns the process exit code. The MCP
+// servers of both modes report the build version: connect's server reads
+// server.Version when it starts, so it is set here, before any mode runs.
 func run(args []string, out io.Writer) int {
+	server.Version = Version
 	if len(args) == 1 && args[0] == "version" {
 		fmt.Fprintf(out, "mcp-for-thunderbird %s\n", Version)
 		return 0
