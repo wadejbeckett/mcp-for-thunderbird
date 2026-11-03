@@ -213,8 +213,8 @@ func TestLimits(t *testing.T) {
 func TestAccountAndIdArguments(t *testing.T) {
 	for _, tl := range catalogue.All() {
 		_, has := props(t, tl.Name)["account"]
-		// Accounts and tags belong to the whole profile.
-		if tl.Name == "mail_accounts" || tl.Name == "mail_tags" {
+		// Accounts, tags and address books belong to the whole profile.
+		if tl.Name == "mail_accounts" || tl.Name == "mail_tags" || tl.Name == "mail_contacts" {
 			if has {
 				t.Errorf("%s must not take account", tl.Name)
 			}
@@ -232,6 +232,26 @@ func TestAccountAndIdArguments(t *testing.T) {
 	for _, n := range []string{"mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"} {
 		if _, ok := props(t, n)["ids"]; !ok {
 			t.Errorf("%s lacks ids", n)
+		}
+	}
+}
+
+func TestContactsArguments(t *testing.T) {
+	p := props(t, "mail_contacts")
+	if p["book"]["type"] != "string" {
+		t.Errorf("mail_contacts book = %v", p["book"])
+	}
+	if p["include_lists"]["type"] != "boolean" {
+		t.Errorf("mail_contacts include_lists = %v", p["include_lists"])
+	}
+	req := byName(t, "mail_contacts").Input["required"].([]string)
+	if len(req) != 1 || req[0] != "query" {
+		t.Errorf("mail_contacts required = %v, want [query]", req)
+	}
+	d := byName(t, "mail_contacts").Description
+	for _, w := range []string{"truncated", "include_lists", "whole Thunderbird profile", "returned once", "sharing an address"} {
+		if !strings.Contains(d, w) {
+			t.Errorf("mail_contacts description lacks %q", w)
 		}
 	}
 }

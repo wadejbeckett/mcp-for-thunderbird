@@ -59,8 +59,16 @@ export function enabledAccountIds(s) {
 
 const CROSS_ACCOUNT = "Moving mail between accounts is not allowed.";
 
+// NO_ACCOUNT holds the tools that take no account, with why. An account
+// sent to one of them (an older client may still send one) is refused
+// before it is checked, so the answer is not "enable this account".
+const NO_ACCOUNT = {
+  mail_contacts: "mail_contacts takes no account: address books belong to the whole profile, not to one account.",
+};
+
 // check refuses a call the settings do not allow. Order: paused, tool
-// group, argument types, account, the ids, then the folder. Policy owns the
+// group, an account the tool does not take, argument types, account, the
+// ids, then the folder. Policy owns the
 // account and folder checks; handlers repeat assertFolderAllowed for every
 // message they reach.
 export function check(tool, args, s) {
@@ -74,6 +82,7 @@ export function check(tool, args, s) {
   }
 
   const has = (k) => Object.prototype.hasOwnProperty.call(args, k);
+  if (has("account") && Object.hasOwn(NO_ACCOUNT, tool)) fail("invalid_argument", NO_ACCOUNT[tool]);
   if (has("account") && typeof args.account !== "string") fail("invalid_argument", "account must be a string.");
   if (has("id") && typeof args.id !== "string") fail("invalid_argument", "id must be a string.");
   if (has("ids") && !(Array.isArray(args.ids) && args.ids.every((x) => typeof x === "string"))) {
