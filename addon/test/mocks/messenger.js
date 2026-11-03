@@ -12,7 +12,9 @@
 // and address books. Task 12 added getFull (plain and HTML parts, extra
 // headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
 // saveMessage, import, sendMessage, compose and messengerUtilities;
-// `release` below 153 takes away what Thunderbird 140 ESR lacks.
+// `release` below 153 takes away what Thunderbird 140 ESR lacks. Message
+// lists, the address, junk, me and tag filters, getHeaders and priority
+// follow Thunderbird 153.6 (ExtensionMessages.sys.mjs).
 
 export function event() {
   const listeners = [];
@@ -42,6 +44,7 @@ export function header(id, folder, extra = {}) {
     junk: false,
     size: 10,
     tags: [],
+    priority: "none",
     recipients: [],
     ccList: [],
     bccList: [],
@@ -140,6 +143,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     continueList: [],
     get: [],
     getRaw: [],
+    getHeaders: [],
     getFull: [],
     listAttachments: [],
     getAttachmentFile: [],
@@ -277,6 +281,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           });
         };
         const has = (s, sub) => String(s ?? "").includes(sub);
+        const mine = accounts.flatMap((a) => (a.identities || []).map((i) => String(i.email).toLowerCase()));
+        const isMine = (list) => list.some((x) => mine.includes(String(parseMailboxes(x)[0]?.email ?? "").toLowerCase()));
         const all = [...store.values()]
           .filter(
             (h) =>
@@ -285,19 +291,22 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
               (q.headerMessageId == null || h.headerMessageId === q.headerMessageId) &&
               (q.fromDate == null || h.date.getTime() >= q.fromDate.getTime()) &&
               (q.toDate == null || h.date.getTime() <= q.toDate.getTime()) &&
-              (q.author == null || has(h.author, q.author)) &&
-              (q.recipients == null || [...h.recipients, ...h.ccList, ...h.bccList].some((r) => has(r, q.recipients))) &&
+              (q.author == null || addressMatch(q.author, [h.author])) &&
+              (q.recipients == null || addressMatch(q.recipients, [...h.recipients, ...h.ccList, ...h.bccList])) &&
               (q.subject == null || has(h.subject, q.subject)) &&
               (q.fullText == null || has(h.subject, q.fullText) || has(h.author, q.fullText) || has(bodies.get(h.id), q.fullText)) &&
               (q.read == null || h.read === q.read) &&
               (q.flagged == null || h.flagged === q.flagged) &&
-              (q.tags == null || Object.keys(q.tags.tags || {}).every((t) => h.tags.includes(t))) &&
+              (q.junk == null || h.junk === q.junk) &&
+              (q.toMe == null || isMine([...h.recipients, ...h.ccList, ...h.bccList]) === q.toMe) &&
+              (q.fromMe == null || isMine([h.author]) === q.fromMe) &&
+              (q.tags == null || tagsMatch(q.tags, h.tags)) &&
               (q.attachment == null || (attachments.get(h.id) || []).length > 0 === q.attachment),
           )
           .sort((a, b) => a.date - b.date);
         if (q.returnMessageListId) {
           const listId = `list-${nextList++}`;
-          lists.set(listId, { items: all, per: q.messagesPerPage || 100, root, hang });
+          lists.set(listId, { items: all, per: q.messagesPerPage || 100, root, hang, done: false });
           return listId;
         }
         pagesByQuery.set(root, 1);
@@ -306,11 +315,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       continueList: async (listId) => {
         calls.continueList.push(listId);
         const rest = lists.get(listId);
-        if (!rest) throw new Error(`No message list for id ${listId}`);
+        if (!rest) throw new Error(`No message list for id ${listId}. Have you reached the end of a list?`);
         pagesByQuery.set(rest.root, (pagesByQuery.get(rest.root) || 0) + 1);
-        if (rest.hang) return new Promise(() => {});
+        // An aborted list answers at once: abortList resolves its page.
+        if (rest.hang && !rest.done) return new Promise(() => {});
         lists.delete(listId);
-        return page(rest.items, rest.per, false, rest.root);
+        return page(rest.done ? [] : rest.items, rest.per, false, rest.root);
       },
       // Organise calls (Task 15). Ids stay the same when a message moves.
       update: async (id, props) => {
@@ -391,9 +401,13 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           { key: "$label4", tag: "To Do", color: "#3333FF", ordinal: "" },
         ],
       },
+      // abortList ends the search but, as in Thunderbird, keeps the list
+      // until its last page (id null) is read with continueList.
       abortList: async (listId) => {
         calls.abortList.push(listId);
-        lists.delete(listId);
+        const l = lists.get(listId);
+        if (!l) throw new Error(`No message list for id ${listId}. Have you reached the end of a list?`);
+        l.done = true;
       },
       listAttachments: async (id) => {
         calls.listAttachments.push(id);
@@ -431,6 +445,18 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (mimeTrees.has(id)) return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [clone(mimeTrees.get(id))] };
         const parts = [bodyPart, ...atts].filter(Boolean);
         return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [{ contentType: "multipart/mixed", partName: "1", parts }] };
+      },
+      // getHeaders returns the header block getRaw builds, as lower-case
+      // names with lists of values (Thunderbird 147 and later).
+      getHeaders: async (id) => {
+        calls.getHeaders.push(id);
+        const h = store.get(id);
+        if (!h) throw new Error(`Message not found: ${id}.`);
+        const r = refs.get(id) || {};
+        const out = { "message-id": [`<${h.headerMessageId}>`], from: [h.author], subject: [h.subject] };
+        if (r.inReplyTo) out["in-reply-to"] = [`<${r.inReplyTo}>`];
+        if (r.references && r.references.length) out.references = [r.references.map((x) => `<${x}>`).join(" ")];
+        return out;
       },
       // getRaw builds a small RFC 5322 source from the header and side data;
       // a File (Blob) unless data_format is "BinaryString".
@@ -553,6 +579,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     const id = nextId++;
     const { body, html, mime, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
     const h = header(id, { ...f }, rest);
+    if (release < 153) delete h.priority;
     store.set(id, h);
     if (body !== undefined) bodies.set(id, body);
     if (html !== undefined) htmlBodies.set(id, html);
@@ -594,6 +621,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // messages.saveMessage or sendMessage, and rejects the messages.save and
   // messages.send permissions it does not know.
   if (release < 153) {
+    delete messenger.messages.getHeaders;
     delete messenger.messages.saveMessage;
     delete messenger.messages.sendMessage;
     const unknown = (permissions) => {
@@ -650,6 +678,49 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     pagesPerQuery: () => [...pagesByQuery.values()],
   };
   return mock;
+}
+
+// addressMatch is Thunderbird's isAddressMatch for author and recipients:
+// every mailbox of the search must match one of the addresses, its address
+// part in full and its name part as a fragment, in any case. Text without
+// "@" is a name.
+export function addressMatch(search, list) {
+  const prep = (m) => {
+    let email = m.email ? m.email.toLowerCase() : undefined;
+    let name = m.name ? m.name.toLowerCase() : undefined;
+    if (email && !name && !email.includes("@")) [name, email] = [email, undefined];
+    return { name, email };
+  };
+  const wanted = parseMailboxes(String(search).replaceAll(";", ",")).map(prep);
+  const have = list.flatMap((x) => parseMailboxes(x)).map(prep);
+  if (wanted.length === 0 || have.length === 0) return false;
+  return wanted.every((w) =>
+    have.some((a) => {
+      const nameOk = Boolean(w.name && a.name && a.name.includes(w.name));
+      if ((nameOk || !w.name) && w.email && a.email === w.email) return true;
+      return !w.email && nameOk;
+    }),
+  );
+}
+
+// tagsMatch is Thunderbird 153.6's TagsDetail check: tags set to true are
+// required (all or any of them), tags set to false forbidden (a message
+// with all of them, or with any, is left out). Mode "none" is not handled
+// by 153.6 and so filters nothing.
+function tagsMatch(detail, tags) {
+  const entries = Object.entries(detail.tags || {});
+  const required = entries.filter(([, v]) => v).map(([k]) => k);
+  const forbidden = entries.filter(([, v]) => !v).map(([k]) => k);
+  const mode = detail.mode;
+  if (required.length > 0) {
+    if (mode === "all" && !required.every((t) => tags.includes(t))) return false;
+    if (mode === "any" && !required.some((t) => tags.includes(t))) return false;
+  }
+  if (forbidden.length > 0) {
+    if (mode === "all" && forbidden.every((t) => tags.includes(t))) return false;
+    if (mode === "any" && forbidden.some((t) => tags.includes(t))) return false;
+  }
+  return true;
 }
 
 // The bodies of an open compose window (getComposeDetails), by how the

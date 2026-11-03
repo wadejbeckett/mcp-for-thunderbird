@@ -259,6 +259,7 @@ type pointer struct {
 	} `json:"from"`
 	HasAttachments *bool    `json:"hasAttachments"`
 	Tags           []string `json:"tags"`
+	Priority       *string  `json:"priority"`
 }
 
 type searchResult struct {
@@ -438,6 +439,89 @@ func TestE2EFolderSearch(t *testing.T) {
 	text, isErr := call(t, cs, "mail_search", map[string]any{"account": "account1", "folder": "/No such folder"})
 	if !isErr || !strings.HasPrefix(text, "not_found:") {
 		t.Fatalf("unknown folder: %v %s", isErr, text)
+	}
+}
+
+// TestE2ESearchAndThread follows a two-message conversation with
+// mail_thread (messages.getHeaders on 147 and later, the raw source on 140)
+// and searches it with the arguments Thunderbird matches itself (a whole
+// address, to_me, from_me, junk) and those the add-on matches (part of an
+// address, untagged). The root carries X-Priority: 1. Thunderbird shows the
+// reply's subject without "Re: ", so the two are told apart by sender. Both
+// have the same date, so the root is seeded first (file name order) to come
+// first.
+func TestE2ESearchAndThread(t *testing.T) {
+	cs := httpSession(t)
+	const subj, carol, me = "Budget review", "carol@example.test", "test@localhost"
+	res, _ := searchUntil(t, cs, map[string]any{"subject": "Budget"}, subj)
+	var root, reply pointer
+	for _, m := range res.Messages {
+		switch m.From.Address {
+		case carol:
+			root = m
+		case me:
+			reply = m
+		}
+	}
+	if root.ID == "" || reply.ID == "" {
+		t.Fatalf("seeded conversation: %+v", res)
+	}
+	var major int
+	fmt.Sscanf(os.Getenv("MFT_E2E_TB_VERSION"), "%d", &major)
+	if major == 0 || major >= 148 {
+		if root.Priority == nil || *root.Priority != "highest" {
+			t.Errorf("root priority = %v, want highest", root.Priority)
+		}
+	} else if root.Priority != nil {
+		t.Errorf("priority before 148 = %q, want null", *root.Priority)
+	}
+
+	senders := func(r searchResult) string {
+		var got []string
+		for _, m := range r.Messages {
+			got = append(got, m.From.Address)
+		}
+		return strings.Join(got, "|")
+	}
+	for _, from := range []pointer{root, reply} {
+		var thread searchResult
+		callOK(t, cs, "mail_thread", map[string]any{"id": from.ID}, &thread)
+		if got := senders(thread); got != carol+"|"+me || thread.Truncated {
+			t.Fatalf("mail_thread from %s = %s (truncated %v)", from.From.Address, got, thread.Truncated)
+		}
+	}
+
+	only := func(args map[string]any, want ...string) {
+		t.Helper()
+		var r searchResult
+		callOK(t, cs, "mail_search", args, &r)
+		var got []string
+		for _, m := range r.Messages {
+			got = append(got, m.From.Address)
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("mail_search %v = %v, want %v", args, got, want)
+		}
+	}
+	only(map[string]any{"subject": "Budget", "from": "example.test"}, carol)
+	only(map[string]any{"subject": "Budget", "from": "CAROL"}, carol)
+	only(map[string]any{"subject": "Budget", "from": carol}, carol)
+	only(map[string]any{"subject": "Budget", "to": "example.test"}, me)
+	only(map[string]any{"subject": "Budget", "from_me": true}, me)
+	only(map[string]any{"subject": "Budget", "to_me": true}, carol)
+	only(map[string]any{"subject": "Budget", "junk": false}, carol, me)
+	only(map[string]any{"subject": "Budget", "tags_mode": "untagged"}, carol, me)
+	only(map[string]any{"subject": "Budget", "tags_mode": "none", "tag": "important"}, carol, me)
+
+	var cut struct {
+		searchResult
+		Note string `json:"note"`
+	}
+	callOK(t, cs, "mail_search", map[string]any{"subject": "Budget", "limit": 1}, &cut)
+	if !cut.Truncated || len(cut.Messages) != 1 || !strings.Contains(cut.Note, "Narrow the search") {
+		t.Fatalf("a search cut at limit = %+v", cut)
 	}
 }
 

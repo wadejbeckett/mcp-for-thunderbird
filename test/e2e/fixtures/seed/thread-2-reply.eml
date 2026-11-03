@@ -1,0 +1,12 @@
+From: Test User <test@localhost>
+To: Carol Example <carol@example.test>
+Subject: Re: Budget review
+Date: @DATE@
+Message-ID: <thread-reply@seed.test>
+In-Reply-To: <thread-root@seed.test>
+References: <thread-root@seed.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Monday works for me.

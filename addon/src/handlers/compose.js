@@ -29,7 +29,7 @@
 // budget (COMPOSE.budgetMs) for the whole tool call.
 
 import { HANDLERS } from "../rpc.js";
-import { encodeId } from "../ids.js";
+import { encodeId, endList } from "../ids.js";
 import { isPlainAddress } from "../address.js";
 import { assertFolderAllowed, enabledAccountIds } from "../policy.js";
 import { fail, ToolError } from "../errors.js";
@@ -553,7 +553,7 @@ async function findDraft(outer, drafts, tag, since) {
   for (;;) {
     const page = await call(run, () => tb().messages.query({ accountId: drafts.accountId, folderId: drafts.id, fromDate: new Date(since - LOOKUP_SLACK_MS), messagesPerPage: 100 }));
     if (page === TIMEOUT) return null;
-    if (page && page.id) await call(run, () => tb().messages.abortList(page.id)).catch(() => {});
+    if (page && page.id) await endList(page.id);
     const candidates = (page && Array.isArray(page.messages) ? page.messages : [])
       .filter((h) => !checked.has(h.id))
       .sort((x, y) => new Date(y.date) - new Date(x.date) || y.id - x.id)
