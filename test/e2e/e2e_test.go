@@ -839,6 +839,133 @@ func TestE2EExcludedLocalFolderFollows(t *testing.T) {
 	waitExcluded("account2:/MftArchive/MftExcluded2", "account2:/MftExcludedNot")
 }
 
+// settingsLockScript opens the add-on's options page in a tab and, from a
+// process script in the extension process, has that page take the Web
+// Lock settings.js holds for every load and save. While the page holds it,
+// Local Folders' MftLock is renamed to MftLock2, so the background page
+// would follow the exclusion; the stored exclusions are read after two
+// seconds, the lock is let go, and they are read again once they changed
+// (or after 15 seconds).
+const settingsLockScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const ID = "mcp-for-thunderbird@wadejbeckett.github.io";
+  const { ExtensionParent } = ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs");
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const policy = WebExtensionPolicy.getByID(ID);
+  const ext = policy.extension;
+  const bg = [...ext.views].find((v) => v.viewType === "background");
+  const api = await ExtensionParent.apiManager.asyncGetAPI("storage", ext, "addon_parent");
+  const local = api.getAPI(bg).storage.local;
+  const excluded = async () => {
+    const got = await local.callMethodInParentProcess("get", [["settings"]]);
+    return ((got.settings && got.settings.excludedFolders) || []).map((e) => e.accountId + ":" + e.path);
+  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const root = MailServices.accounts.localFoldersServer.rootFolder;
+  const child = (name) => root.subFolders.find((f) => f.name === name) || null;
+  if (!child("MftLock")) return { error: "no MftLock folder" };
+
+  const tabmail = Services.wm.getMostRecentWindow("mail:3pane").document.getElementById("tabmail");
+  const url = "moz-extension://" + policy.mozExtensionHostname + "/ui/options.html";
+  const tab = tabmail.openTab("contentTab", { url, background: false });
+  const out = {};
+  const held = new Promise((r) => Services.ppmm.addMessageListener("mft-e2e:held", function on() {
+    Services.ppmm.removeMessageListener("mft-e2e:held", on);
+    r();
+  }));
+  try {
+    for (let i = 0; i < 40 && ![...ext.views].some((v) => v.uri && v.uri.spec === url); i++) await sleep(250);
+    const probe = "(" + function (id, page) {
+      let mod;
+      try {
+        mod = ChromeUtils.importESModule("resource://gre/modules/ExtensionPageChild.sys.mjs");
+      } catch {
+        return;
+      }
+      const ctx = [...mod.ExtensionPageChild.extensionContexts.values()].find((c) => c.extension && c.extension.id === id && c.uri && c.uri.spec === page);
+      if (!ctx) return;
+      const w = ctx.contentWindow;
+      const mm = this;
+      w.navigator.locks.request("settings", () => {
+        mm.sendAsyncMessage("mft-e2e:held", {});
+        return new w.Promise((r) => mm.addMessageListener("mft-e2e:release", () => r()));
+      });
+    } + ").call(this, " + JSON.stringify(ID) + ", " + JSON.stringify(url) + ")";
+    Services.ppmm.loadProcessScript("data:," + encodeURIComponent(probe), false);
+    const t = await Promise.race([held.then(() => "held"), sleep(15000).then(() => "timed out")]);
+    if (t !== "held") return { error: "the options page did not take the lock: " + t };
+    out.before = await excluded();
+    child("MftLock").rename("MftLock2", null);
+    for (let i = 0; i < 40 && !child("MftLock2"); i++) await sleep(250);
+    await sleep(2000);
+    out.held = await excluded();
+  } finally {
+    Services.ppmm.broadcastAsyncMessage("mft-e2e:release", {});
+  }
+  for (let i = 0; i < 60; i++) {
+    out.after = await excluded();
+    if (JSON.stringify(out.after) !== JSON.stringify(out.held)) break;
+    await sleep(250);
+  }
+  tabmail.closeTab(tab);
+  return out;
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2ESettingsLock checks that the background page's settings writes
+// wait for a save made in another of the add-on's pages: the options page
+// holds the settings lock while an excluded folder is renamed, and the
+// exclusion follows the rename only once the lock is let go. Each page has
+// its own copy of settings.js, so without the shared Web Lock the
+// background's write would land at once, and a save from the page in that
+// time would overwrite it with what it read before.
+func TestE2ESettingsLock(t *testing.T) {
+	before := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, before) })
+	var made string
+	marionette(t, `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const root = MailServices.accounts.localFoldersServer.rootFolder;
+  const has = (n) => root.subFolders.some((f) => f.name === n);
+  if (has("MftLock2")) return "MftLock2 is left from an earlier run";
+  if (!has("MftLock")) root.createSubfolder("MftLock", null);
+  for (let i = 0; i < 40 && !has("MftLock"); i++) await new Promise((r) => setTimeout(r, 250));
+  return has("MftLock") ? "ok" : "timed out";
+})().then(resolve, (e) => resolve("error: " + e));
+`, &made)
+	if made != "ok" {
+		t.Fatalf("Local Folders MftLock: %s", made)
+	}
+	next := map[string]any{}
+	for k, v := range before {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{map[string]any{"accountId": "account2", "path": "/MftLock"}}
+	addonSettings(t, next)
+
+	var got struct {
+		Before []string `json:"before"`
+		Held   []string `json:"held"`
+		After  []string `json:"after"`
+		Error  string   `json:"error"`
+	}
+	marionette(t, settingsLockScript, &got)
+	if got.Error != "" {
+		t.Fatal(got.Error)
+	}
+	want := "account2:/MftLock"
+	if strings.Join(got.Before, ",") != want || strings.Join(got.Held, ",") != want {
+		t.Fatalf("exclusions while the options page held the lock: before %v, after the rename %v; want %s both times", got.Before, got.Held, want)
+	}
+	if strings.Join(got.After, ",") != "account2:/MftLock2" {
+		t.Fatalf("exclusions once the lock was let go = %v, want account2:/MftLock2", got.After)
+	}
+	t.Logf("exclusion %v kept while the lock was held, %v after", got.Held, got.After)
+}
+
 // TestE2EConnectStdio is the Claude Code check done by a go-sdk client:
 // connect mode over stdio, asking for today's unread mail.
 func TestE2EConnectStdio(t *testing.T) {

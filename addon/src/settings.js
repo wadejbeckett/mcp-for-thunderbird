@@ -96,10 +96,21 @@ async function seedSettings() {
 
 // load and save run one at a time, so concurrent first loads agree on
 // one instance id and concurrent saves do not lose each other's changes.
+// Each of the add-on's pages (background, options, setup) has its own
+// copy of this module, so the queue alone orders only one page's calls:
+// every load and save also holds the Web Lock named after the storage key,
+// which all the add-on's pages share (they have one origin). Without Web
+// Locks only the queue orders them.
 let queue = Promise.resolve();
 
+const locks = () => (globalThis.navigator && globalThis.navigator.locks) || null;
+
 function serial(fn) {
-  const next = queue.then(fn, fn);
+  const locked = () => {
+    const l = locks();
+    return l ? l.request(STORAGE_KEY, () => fn()) : fn();
+  };
+  const next = queue.then(locked, locked);
   queue = next.catch(() => {});
   return next;
 }
@@ -154,7 +165,8 @@ export function save(patch) {
 }
 
 // update saves the patch that fn(current settings) returns, in the same
-// turn as the load, so a change made meanwhile is not lost. fn returning
+// turn as the load, so a change made meanwhile, in this page or another
+// (serial), is not lost. fn returning
 // null saves nothing. It resolves to the settings now stored.
 export function update(fn) {
   return serial(async () => {
