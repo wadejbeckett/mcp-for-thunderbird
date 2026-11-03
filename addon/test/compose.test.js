@@ -835,3 +835,32 @@ test("mail_draft reply with html: true imports the HTML above the quote", async 
   const html = Buffer.from(b.replace(/\s+/g, ""), "base64").toString("utf8");
   assert.match(html, /<body><p>Hi<\/p><table border="1"[^>]*>.*<td style="border: 1px solid #999999;[^>]*>a<\/td>.*<blockquote type="cite"/);
 });
+
+// ---- long runs of white space and deep nesting ----
+
+test("mail_draft reply quotes an original with a long run of spaces in linear time", async () => {
+  const o = original({ body: "a" + " ".repeat(300000) + "b" });
+  const t0 = performance.now();
+  const r = await call("mail_draft", { kind: "reply", id: o.id, body: "x" });
+  const ms = performance.now() - t0;
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(ms < 5000, `took ${ms} ms`);
+  const html = b64text(parse(mock.calls.import[0].raw).body);
+  assert.ok(html.includes(">a" + " ".repeat(300000) + "b</blockquote>"));
+});
+
+test("textToHtml handles a long run of tabs in linear time, and trims a list's trailing white space", () => {
+  const body = "a" + "\t".repeat(160000) + "b";
+  const t0 = performance.now();
+  const html = textToHtml(body);
+  const ms = performance.now() - t0;
+  assert.ok(ms < 5000, `took ${ms} ms`);
+  assert.equal(html, `<p>${body}</p>`);
+  assert.equal(textToHtml("- a\n- b \t "), "<ul><li>a</li><li>b</li></ul>");
+});
+
+test("cleanHtml keeps the text of 10,000 nested elements without overflowing the stack", () => {
+  const n = 10000;
+  assert.equal(cleanHtml("<div>".repeat(n) + "x" + "</div>".repeat(n)), "x");
+  assert.equal(cleanHtml("<p>" + "<span><b>".repeat(n / 2) + "x" + "</b></span>".repeat(n / 2) + "</p>"), "<p>" + "<strong>".repeat(n / 2) + "x" + "</strong>".repeat(n / 2) + "</p>");
+});

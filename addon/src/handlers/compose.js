@@ -183,7 +183,9 @@ const NUMBER = /^(\d{1,9})\. /;
 // item above it (joined with <br>); otherwise null. An <ol> starts at the
 // first item's number.
 function listHtml(p) {
-  const lines = p.replace(/^\n+|\s+$/g, "").split("\n");
+  // trimEnd, not /\s+$/: that regular expression is quadratic on a long
+  // run of white space that does not end the paragraph.
+  const lines = p.replace(/^\n+/, "").trimEnd().split("\n");
   const marker = BULLET.test(lines[0]) ? BULLET : NUMBER.test(lines[0]) ? NUMBER : null;
   if (!marker) return null;
   const items = [];
@@ -233,37 +235,64 @@ function attrValue(tag, name, v) {
   return /^\d{1,4}$/.test(v) ? v : null;
 }
 
-function cleanNode(node) {
-  if (node.nodeType === 3) return esc(stripInvisible(node.nodeValue));
-  if (node.nodeType !== 1) return "";
+// open gives the frame for an element whose contents are being cleaned:
+// its tag after RENAMED, its attributes when it is in ALLOWED, and its
+// children with the HTML of those already cleaned.
+function open(node) {
   const raw = node.localName.toLowerCase();
-  if (DROPPED.has(raw)) return "";
-  const inner = Array.from(node.childNodes, cleanNode).join("");
   const tag = RENAMED[raw] ?? raw;
-  if (!Object.hasOwn(ALLOWED, tag)) return inner;
-  let attrs = TABLE_STYLE[tag] ?? "";
-  for (const name of ALLOWED[tag]) {
-    const v = node.getAttribute(name);
-    const ok = v === null ? null : attrValue(tag, name, v);
-    if (ok !== null) attrs += ` ${name}="${esc(ok)}"`;
+  let attrs = null;
+  if (Object.hasOwn(ALLOWED, tag)) {
+    attrs = TABLE_STYLE[tag] ?? "";
+    for (const name of ALLOWED[tag]) {
+      const v = node.getAttribute(name);
+      const ok = v === null ? null : attrValue(tag, name, v);
+      if (ok !== null) attrs += ` ${name}="${esc(ok)}"`;
+    }
   }
-  return VOID.has(tag) ? `<${tag}${attrs}>` : `<${tag}${attrs}>${inner}</${tag}>`;
+  return { tag, attrs, kids: Array.from(node.childNodes), next: 0, out: [] };
+}
+
+// close gives the HTML of a frame whose children are all cleaned: the
+// element with its kept attributes around them, or only the children when
+// the element is not in ALLOWED.
+function close(f) {
+  const inner = f.out.join("");
+  if (f.attrs === null) return inner;
+  return VOID.has(f.tag) ? `<${f.tag}${f.attrs}>` : `<${f.tag}${f.attrs}>${inner}</${f.tag}>`;
 }
 
 // cleanHtml rebuilds an HTML body from the elements and attributes in
 // ALLOWED: text is escaped again and loses invisible characters, a link
 // keeps only an http, https or mailto address, and nothing else (styles,
 // classes, event handlers, images) is kept. The document is parsed inert
-// (see clean.js).
+// (see clean.js). The walk keeps its own stack of open elements, so deep
+// nesting cannot overflow the call stack.
 export function cleanHtml(src) {
   const doc = new globalThis.DOMParser().parseFromString(`<!DOCTYPE html><html><body>${src}</body></html>`, "text/html");
-  return Array.from(doc.body.childNodes, cleanNode).join("").trim();
+  const root = { tag: null, attrs: null, kids: Array.from(doc.body.childNodes), next: 0, out: [] };
+  const stack = [root];
+  while (stack.length > 0) {
+    const f = stack[stack.length - 1];
+    if (f.next === f.kids.length) {
+      stack.pop();
+      if (stack.length > 0) stack[stack.length - 1].out.push(close(f));
+      continue;
+    }
+    const node = f.kids[f.next++];
+    if (node.nodeType === 3) f.out.push(esc(stripInvisible(node.nodeValue)));
+    else if (node.nodeType === 1 && !DROPPED.has(node.localName.toLowerCase())) stack.push(open(node));
+  }
+  return root.out.join("").trim();
 }
 
 // bodyHtml is the HTML of the client's body: cleaned HTML or converted text.
 const bodyHtml = (a) => (a.html ? cleanHtml(a.body) : textToHtml(a.body));
 
-const quoteHtml = (text) => esc(text.replace(/\r\n?/g, "\n").replace(/\s+$/, "")).replace(/\n/g, "<br>");
+// quoteHtml is the original's text for the quote. trimEnd, not /\s+$/:
+// that regular expression is quadratic on a long run of white space inside
+// the text.
+const quoteHtml = (text) => esc(text.replace(/\r\n?/g, "\n").trimEnd()).replace(/\n/g, "<br>");
 
 const htmlDoc = (inner) =>
   '<!DOCTYPE html><html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"></head><body>' + inner + "</body></html>";
