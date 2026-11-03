@@ -15,9 +15,7 @@ set -eu
 
 [ $# -eq 1 ] || { echo "usage: reviewer-notes.sh <version>" >&2; exit 2; }
 version=$1
-case "$version" in
-  *[!0-9.]*|"") echo "reviewer-notes.sh: version must be X.Y.Z" >&2; exit 2 ;;
-esac
+printf '%s' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || { echo "reviewer-notes.sh: version must be X.Y.Z" >&2; exit 2; }
 release="https://github.com/wadejbeckett/mcp-for-thunderbird/releases/download/v$version"
 tree="https://github.com/wadejbeckett/mcp-for-thunderbird/tree/v$version"
 
@@ -38,11 +36,11 @@ $packages
 
 2. Register the host with the mail app: run "mcp-for-thunderbird setup --native-only" as your user. (The macOS package and the Windows installer run it for you.) It writes only the native-messaging manifest. Without --native-only, setup also adds the host to AI apps it finds on the computer, which the review does not need.
 
-3. Install the xpi. The add-on's setup page opens in a tab: tick an account, keep "Read and organise", click Finish. The toolbar button turns green ("MCP for Thunderbird: connected" in its tooltip). Without the host program it shows a red badge and "not connected", and every tool call is refused.
+3. Install the xpi. The add-on's setup page opens in a tab: tick an account, choose "Read, organise and draft" (the compose window below needs the draft group), click Finish. The red "!" badge on the toolbar button goes away and its tooltip reads "MCP for Thunderbird: connected"; the button's popup says Connected. Without the host program the badge stays, the popup says Not connected, and every tool call is refused.
 
-4. Call a tool without any AI app. "mcp-for-thunderbird connect" is a stdio MCP server that forwards to the running host, so JSON-RPC can be piped into it:
+4. Call a tool without any AI app. "mcp-for-thunderbird connect" is a stdio MCP server that forwards to the running host, so JSON-RPC can be piped into it. It stops as soon as its input closes, so the pipe is kept open for a few seconds to let the replies arrive:
 
-   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"review","version":"1"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_search","arguments":{"limit":3}}}' | mcp-for-thunderbird connect
+   (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"review","version":"1"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_search","arguments":{"limit":3}}}'; sleep 8) | mcp-for-thunderbird connect
 
    The free MCP Inspector works too: npx @modelcontextprotocol/inspector mcp-for-thunderbird connect. mail_search returns headers only; mail_read returns one message's text wrapped as untrusted content; mail_compose opens a compose window with the text at the top. The options page (Add-ons and Themes, then Options) shows the activity log of every call.
 
@@ -50,9 +48,9 @@ $packages
 
 PERMISSIONS AND WHERE EACH IS USED
 
-The handlers reach the add-on API through a small accessor, tb() in each handler (it returns globalThis.messenger, so the unit tests can replace it), which a static linter cannot follow. PRIVACY.md has the same table in the user's words.
+The handlers (src/handlers/read.js, organise.js, compose.js) reach the add-on API through a small accessor, tb() (it returns globalThis.messenger, so the unit tests can replace it), which a static linter cannot follow. PRIVACY.md has the same table in the user's words.
 
-- accountsRead: accounts.list and folders.query (src/rpc.js, src/ids.js, src/handlers/read.js, src/handlers/organise.js).
+- accountsRead: accounts.list, accounts.get and folders.query (src/rpc.js, src/ids.js, src/handlers/read.js, src/handlers/organise.js, src/handlers/compose.js, and the account and folder lists of ui/options.js and ui/setup.js).
 - messagesRead: messages.query, get, getFull, getRaw, listAttachments, getAttachmentFile (src/ids.js, src/handlers/read.js, src/handlers/compose.js).
 - messagesMove: messages.move, copy and archive (src/handlers/organise.js).
 - messagesUpdate: messages.update for read, flagged and tags (src/handlers/organise.js).
@@ -68,7 +66,7 @@ The handlers reach the add-on API through a small accessor, tb() in each handler
 
 OTHER POINTS A REVIEW MAY RAISE
 
-- Thunderbird 140 ESR: messages.saveMessage and sendMessage exist from version 153. src/features.js detects them at run time; on 140 the two tools that need them are not offered, and a call to either is refused with not_supported.
+- Thunderbird 140 ESR: messages.saveMessage and sendMessage exist from version 153. src/features.js detects them at run time; on 140 the two tools that need them are not in the tool list the host offers, so a call to either by name fails as an unknown tool (features.js also refuses them with not_supported if one ever reached the add-on).
 - ui/setup.html is opened by src/background.js on first install and by the options page's "Open the setup page" button, and loads ui/setup.js.
 - settings-seed.json is an empty object in every release build; the end-to-end test build fills it with test settings (packaging/build-xpi.mjs and packaging/check.sh enforce the empty object in releases).
 - Data over native messaging: the privacy policy in the listing says exactly what is exchanged. Neither the add-on nor the host sends anything off the computer; the user's own AI app sends what it reads to its vendor.

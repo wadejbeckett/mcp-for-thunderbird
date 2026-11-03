@@ -11,9 +11,12 @@
 # Docker, a throwaway profile under its own Xvfb, the real host) exactly as
 # run.sh does, opens the add-on's pages, and writes PNG files, each 4:3 and
 # at least 1000 by 750 pixels, into packaging/atn/screenshots (or out-dir):
-#   options.png   the options page
-#   setup.png     the setup page
-#   popup.png     the toolbar popup
+#   options.png          the options page
+#   options-folders.png  the options page from the excluded folders down
+#   setup.png            the setup page
+#   popup.png            the toolbar popup
+# A few tool calls are made first through the host's connect command, so
+# the activity log and the popup's recent activity have entries.
 # Needs what test/e2e/run.sh needs (Thunderbird, Docker, xvfb-run, curl,
 # python3, Go, Node) and ImageMagick's import and convert. Everything it
 # starts is torn down on exit.
@@ -137,6 +140,18 @@ export DISPLAY=$display XAUTHORITY=$auth
 
 mkdir -p "$out"
 
+# A few calls through connect, as a reviewer would make them, so the log
+# has entries. connect reads the throwaway home's connection file, and
+# stops when its input closes, so the pipe stays open for the replies.
+log "making a few tool calls for the activity log"
+(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Claude Desktop","version":"1"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mail_accounts","arguments":{}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mail_folders","arguments":{}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mail_search","arguments":{"limit":5}}}'; sleep 8) |
+  HOME="$MFT_E2E_DIR/home" XDG_CONFIG_HOME="$MFT_E2E_DIR/home/.config" "$MFT_E2E_DIR/bin/mcp-for-thunderbird" connect >"$MFT_E2E_DIR/calls.out" 2>/dev/null || true
+grep -c '"result"' "$MFT_E2E_DIR/calls.out" | sed 's/^/[screenshots] replies: /' >&2
+
 # open <page> opens one of the add-on's pages in a tab of the mail window
 # and makes it the current tab; the add-on's internal UUID comes from
 # Thunderbird's own record of it.
@@ -181,6 +196,9 @@ shot() {
 
 open "ui/options.html"
 shot "$out/options.png"
+# The fragment scrolls the page to the excluded folders when it loads.
+open "ui/options.html#excluded"
+shot "$out/options-folders.png"
 open "ui/setup.html"
 shot "$out/setup.png"
 case "$(popup)" in

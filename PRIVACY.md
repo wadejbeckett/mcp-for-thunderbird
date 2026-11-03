@@ -72,7 +72,7 @@ Thunderbird 140 ESR does not know `messages.save` or `messages.send` and ignores
 
 ## Changes to this policy
 
-Changes are published in this file in the project's repository, with a new date at the top. A change that sends any data somewhere new will be stated in the release notes of the version that makes it.
+Changes are published in PRIVACY.md in the project's repository (https://github.com/wadejbeckett/mcp-for-thunderbird/blob/main/PRIVACY.md), with a new date at the top. A change that sends any data somewhere new will be stated in the release notes of the version that makes it.
 
 ## Contact
 

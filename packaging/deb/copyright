@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mcp-for-thunderbird
-Upstream-Contact: Wade J. Beckett <25611855+wadejbeckett@users.noreply.github.com>
+Upstream-Contact: https://github.com/wadejbeckett/mcp-for-thunderbird/issues
 Source: https://github.com/wadejbeckett/mcp-for-thunderbird
 Comment: This package holds the host program of MCP for Thunderbird. The
  program statically links the Go standard library and runtime and the Go
