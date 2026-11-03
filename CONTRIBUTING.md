@@ -124,7 +124,7 @@ The end-to-end tests start a real Thunderbird. Run them so they can never touch 
 
 ## Rules for every change
 
-- **No Experiment APIs, ever.** Experiment APIs give an add-on unrestricted access to Thunderbird, and addons.thunderbird.net does not list new add-ons that use them. Use only Thunderbird's standard MailExtension APIs. `packaging/check.sh` fails a build whose XPI declares any.
+- **No Experiment APIs, ever.** Experiment APIs give an add-on unrestricted access to Thunderbird, which would undo the promise that the permission list says everything the add-on can touch; addons.thunderbird.net accepts them only under manual review of that privileged code, and refuses them where a built-in API does the same job. Use only Thunderbird's standard MailExtension APIs. `packaging/check.sh` fails a build whose XPI declares any.
 - **No remote code** and no runtime dependencies in the add-on. Everything it runs is in its package.
 - **Only the permissions actually used.** A new add-on permission needs a reason in [PRIVACY.md](PRIVACY.md).
 - **New Go modules need discussion first.** Open an issue before adding a dependency to the host.
