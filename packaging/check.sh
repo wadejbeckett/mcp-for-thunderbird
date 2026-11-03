@@ -8,8 +8,9 @@
 # Checks a GoReleaser build in dist/ (default) and prints OK, or names the
 # first problem and exits 1. It asserts that:
 #   - every expected artefact exists and SHA256SUMS lists and verifies it;
-#   - no artefact carries .superpowers, spikes/, tests, node_modules or
-#     e2e-settings.json (ruling R2);
+#   - no artefact carries .superpowers, spikes/, tests or node_modules, and
+#     the XPI's settings-seed.json is an empty object, so a release build
+#     carries no seeded settings (ruling R2);
 #   - the XPI's manifest has no experiment_apis, the add-on id, and the
 #     release version's X.Y.Z core, and the XPI carries LICENSE, NOTICE and
 #     every icon its manifest names (the .mcpb its icon.png too);
@@ -79,7 +80,7 @@ binaries=$(find "$dist" -mindepth 2 -maxdepth 2 -type f \( -name "$NAME" -o -nam
 python3 -I - "$dist" "$version" "$core" "$ADDON_ID" "$skip_deb" $want <<'EOF' || exit 1
 import io, json, re, subprocess, sys, tarfile, zipfile
 dist, version, core, addon_id, skip_deb, *files = sys.argv[1:]
-BAD = re.compile(r"(^|/)(\.superpowers|spikes|node_modules|test|tests|testdata)(/|$)|_test\.go$|\.test\.js$|(^|/)e2e-settings\.json$")
+BAD = re.compile(r"(^|/)(\.superpowers|spikes|node_modules|test|tests|testdata)(/|$)|_test\.go$|\.test\.js$")
 
 def fail(msg):
     print(f"check: {msg}", file=sys.stderr)
@@ -145,6 +146,14 @@ for f in files:
                 fail(f"{f} lacks {licence}")
         with zipfile.ZipFile(path) as z:
             m = json.loads(z.read("manifest.json"))
+            if "settings-seed.json" not in n:
+                fail(f"{f} lacks settings-seed.json")
+            try:
+                seed = json.loads(z.read("settings-seed.json"))
+            except ValueError:
+                fail(f"{f} settings-seed.json is not JSON")
+            if seed != {}:
+                fail(f"{f} settings-seed.json is not an empty object: a release build must carry no seeded settings")
         if "experiment_apis" in m:
             fail(f"{f} manifest has experiment_apis")
         if m.get("browser_specific_settings", {}).get("gecko", {}).get("id") != addon_id:

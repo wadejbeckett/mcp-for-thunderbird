@@ -15,9 +15,11 @@
 // refused. The XPI's manifest gets the X.Y.Z core, since Gecko add-on
 // versions are dotted integers; the file name carries the full version. Without --version the manifest's own version is used.
 //
-// --e2e-settings embeds <file> as e2e-settings.json, the initial settings
-// of an end-to-end test build (ruling R2). It cannot be combined with
-// --version, so a release build never carries it.
+// --e2e-settings puts <file> in the package as settings-seed.json, the
+// initial settings of an end-to-end test build (ruling R2). It cannot be
+// combined with --version, so a release build never carries seeded
+// settings: there addon/settings-seed.json, an empty object, is packed as
+// it is, and the build refuses a source file that is not empty.
 // Entries are sorted and dated 1980-01-01, so a build is reproducible.
 
 import { readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from "node:fs";
@@ -82,10 +84,17 @@ if (opts.version !== null) {
   const m = files.find((f) => f.name === "manifest.json");
   m.data = Buffer.from(JSON.stringify(manifest, null, 2) + "\n", "utf8");
 }
+const seed = files.find((f) => f.name === "settings-seed.json");
+if (!seed) usage("addon/settings-seed.json is missing");
 if (opts.e2e) {
   const data = readFileSync(opts.e2e);
   JSON.parse(data.toString("utf8")); // refuse a file that is not JSON
-  files.push({ name: "e2e-settings.json", data });
+  seed.data = data;
+} else {
+  const v = JSON.parse(seed.data.toString("utf8"));
+  if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).length > 0) {
+    usage("addon/settings-seed.json must be an empty object; only --e2e-settings may fill it");
+  }
 }
 files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 

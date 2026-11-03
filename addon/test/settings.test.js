@@ -71,8 +71,8 @@ test("save merges groups and send and keeps the instance", async () => {
   assert.deepEqual(await load(), s);
 });
 
-test("e2e-settings.json seeds empty storage only (R2)", async () => {
-  globalThis.fetch = fetchFrom({ "e2e-settings.json": { accounts: { acc1: true }, setupDone: true, attachmentDir: "/tmp/x" } });
+test("settings-seed.json seeds empty storage only (R2)", async () => {
+  globalThis.fetch = fetchFrom({ "settings-seed.json": { accounts: { acc1: true }, setupDone: true, attachmentDir: "/tmp/x" } });
   const s = await load();
   assert.deepEqual(s.accounts, { acc1: true });
   assert.equal(s.setupDone, true);
@@ -84,9 +84,9 @@ test("e2e-settings.json seeds empty storage only (R2)", async () => {
   assert.deepEqual((await load()).accounts, {});
 });
 
-test("e2e-settings.json is ignored when storage already has settings", async () => {
+test("settings-seed.json is ignored when storage already has settings", async () => {
   await mock.messenger.storage.local.set({ settings: { ...DEFAULTS, instance: "a".repeat(32) } });
-  globalThis.fetch = fetchFrom({ "e2e-settings.json": { accounts: { acc1: true } } });
+  globalThis.fetch = fetchFrom({ "settings-seed.json": { accounts: { acc1: true } } });
   assert.deepEqual((await load()).accounts, {});
 });
 

@@ -101,7 +101,7 @@ Download `mcp-for-thunderbird-<version>.xpi` from the [GitHub releases page](htt
 
 <!-- screenshot: docs/images/addon-permissions.png -->
 
-The `.xpi` is not signed. Thunderbird installs an unsigned add-on from a file, but does not update it by itself: install the newer `.xpi` from each release over the old one in the same way. A listing on addons.thunderbird.net, which would sign the add-on and update it automatically, is to follow and will be linked here when it is live.
+Thunderbird does not require add-ons to be signed, and installs the `.xpi` from a file without a warning, but it does not update an add-on installed that way: install the newer `.xpi` from each release over the old one in the same way. A listing on addons.thunderbird.net, which updates the add-on automatically, is to follow and will be linked here when it is live.
 
 ## 4. The setup page
 

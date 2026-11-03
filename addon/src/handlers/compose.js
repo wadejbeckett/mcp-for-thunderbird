@@ -634,8 +634,13 @@ async function intoOpenWindow(run, fn) {
 // insertAtTop runs in the compose window's document (scripting
 // executeScript) and puts the text's HTML at the top of the body, above
 // the signature or quote, leaving the elements already there as they are.
+// The HTML (cleanHtml or textToHtml output, with every text node escaped)
+// is parsed by DOMParser into a document of its own, and its nodes are
+// then moved in: nodes parsed that way run no script even if one were
+// present, unlike markup written into the live document.
 export function insertAtTop(html) {
-  document.body.insertAdjacentHTML("afterbegin", html);
+  const doc = new DOMParser().parseFromString(`<!DOCTYPE html><html><body>${html}</body></html>`, "text/html");
+  document.body.prepend(...Array.from(doc.body.childNodes, (n) => document.importNode(n, true)));
 }
 
 async function mailCompose(args, ctx) {

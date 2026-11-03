@@ -77,7 +77,7 @@ An AI app can send the body as HTML instead, with `html` set to true, when it ne
 - **One time budget per request.** A request that changes many messages at once (marking, tagging, moving) reports which messages were done and which failed if Thunderbird is slow.
 - **Reply and forward drafts** are saved to Drafts with their threading kept. When you send one, Thunderbird files the sent copy according to the account's own settings; this has not been tested on every account type.
 - **Direct sending accepts only simple addresses**: letters, digits and `. _ + -` before the `@`, and a plain domain. Write a draft for any other address. [SECURITY.md](SECURITY.md) explains why.
-- **The host is not code-signed yet**, so Windows and macOS warn when you install it. The add-on on the releases page is unsigned too; Thunderbird installs an unsigned add-on from a file, and it will be signed by addons.thunderbird.net once listed there.
+- **The host is not code-signed yet**, so Windows and macOS warn when you install it. Thunderbird does not require add-ons to be signed, so the add-on installs from the file without a warning; a listing on addons.thunderbird.net, to follow, will update it by itself.
 
 ## Links
 
