@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 
 const manifest = JSON.parse(
   readFileSync(new URL("../manifest.json", import.meta.url), "utf8"),
@@ -40,4 +40,15 @@ test("manifest is MV3 with a module event page and the agreed permissions", () =
   assert.deepEqual(manifest.optional_permissions, ["messages.send"]);
   assert.equal(JSON.stringify(manifest).includes("messagesDelete"), false);
   assert.ok(manifest.action);
+});
+
+test("the add-on, its toolbar button and its pages have an icon that exists", () => {
+  const icons = [...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon)];
+  assert.ok(manifest.icons["16"] && manifest.icons["128"] && manifest.action.default_icon["16"]);
+  for (const icon of icons) assert.ok(existsSync(new URL(`../${icon}`, import.meta.url)), icon);
+  for (const page of ["options", "setup", "popup"]) {
+    const html = readFileSync(new URL(`../ui/${page}.html`, import.meta.url), "utf8");
+    const href = /<link rel="icon" href="([^"]+)">/.exec(html)?.[1];
+    assert.ok(href && existsSync(new URL(`../ui/${href}`, import.meta.url)), `${page}.html icon ${href}`);
+  }
 });

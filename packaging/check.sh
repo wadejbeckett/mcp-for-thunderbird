@@ -11,7 +11,8 @@
 #   - no artefact carries .superpowers, spikes/, tests, node_modules or
 #     e2e-settings.json (ruling R2);
 #   - the XPI's manifest has no experiment_apis, the add-on id, and the
-#     release version's X.Y.Z core, and the XPI carries LICENSE and NOTICE;
+#     release version's X.Y.Z core, and the XPI carries LICENSE, NOTICE and
+#     every icon its manifest names (the .mcpb its icon.png too);
 #   - every host package carries THIRD_PARTY_LICENSES, the licences of the
 #     Go modules linked into the host, at its exact place: next to the binary
 #     in each archive's top directory, /usr/share/doc/mcp-for-thunderbird/ in
@@ -150,6 +151,12 @@ for f in files:
             fail(f"{f} manifest has the wrong add-on id")
         if m.get("version") != core:
             fail(f"{f} manifest version {m.get('version')} is not {core}")
+        icons = list(m.get("icons", {}).values()) + list(m.get("action", {}).get("default_icon", {}).values())
+        if not icons:
+            fail(f"{f} manifest names no icons")
+        for icon in icons:
+            if icon not in n:
+                fail(f"{f} lacks its icon {icon}")
     if f.endswith(".mcpb"):
         with zipfile.ZipFile(path) as z:
             m = json.loads(z.read("manifest.json"))
@@ -158,6 +165,8 @@ for f in files:
                 fail(f"{f} lacks its entry point {entry}")
             if (z.getinfo(entry).external_attr >> 16) & 0o111 == 0:
                 fail(f"{f} entry point is not executable")
+            if m.get("icon") not in z.namelist():
+                fail(f"{f} lacks its icon {m.get('icon')}")
         if m["server"]["type"] != "binary" or m["server"]["mcp_config"]["args"] != ["connect"]:
             fail(f"{f} manifest does not run the binary with connect")
         if m["display_name"] != "MCP for Thunderbird" or m["version"] != version:

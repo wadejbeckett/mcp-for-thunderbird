@@ -5,6 +5,7 @@
   "version": "0.0.0",
   "description": "Work with your Thunderbird mail through the MCP for Thunderbird add-on, within the limits you set in Thunderbird.",
   "long_description": "Connects to the MCP for Thunderbird add-on running in Thunderbird 140 ESR or later. Install the add-on, choose which accounts and tool groups to allow, and keep Thunderbird open while you use it.",
+  "icon": "icon.png",
   "author": {
     "name": "Wade J. Beckett",
     "url": "https://github.com/wadejbeckett"

@@ -124,6 +124,16 @@ for licence in LICENSE NOTICE; do
 done
 
 fresh
+python3 -I "$work/archive.py" drop "$work/d/$N-$version.xpi" icon-16.svg
+resign
+expect_fail "XPI without its toolbar icon"
+
+fresh
+python3 -I "$work/archive.py" drop "$work/d/$N-$version-darwin-all.mcpb" icon.png
+resign
+expect_fail "mcpb without its icon"
+
+fresh
 grep -v '\.xpi$' "$work/d/SHA256SUMS" >"$work/sums" && mv "$work/sums" "$work/d/SHA256SUMS"
 expect_fail "XPI missing from SHA256SUMS"
 
