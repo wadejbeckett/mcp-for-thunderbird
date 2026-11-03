@@ -582,14 +582,26 @@ test("mail_folders gives null counts and a note for folders Thunderbird did not 
     out.note,
     "Thunderbird did not give the counts of 1 folder in time; their unread, total, new, quota and lastUsed are null. Ask again, or for one account at a time.",
   );
-  // a folder whose info fails is unknown too
+  // a folder whose info fails is unknown too, and asking again will not help
   SEARCH.budgetMs = budget;
   mock.messenger.folders.getFolderInfo = async () => {
     throw new Error("broken");
   };
   const failed = await ok("mail_folders", { account: "a1" });
   assert.ok(failed.folders.every((f) => f.total === null));
-  assert.match(failed.note, /^Thunderbird did not give the counts of 2 folders in time;/);
+  assert.equal(failed.note, "Thunderbird could not read the counts of 2 folders; their unread, total, new, quota and lastUsed are null.");
+  // one of each: one note per cause
+  SEARCH.budgetMs = 150;
+  mock.messenger.folders.getFolderInfo = (id) =>
+    id.endsWith("/Archive")
+      ? new Promise(() => {})
+      : Promise.reject(new Error("broken"));
+  const both = await ok("mail_folders", { account: "a1" });
+  assert.equal(
+    both.note,
+    "Thunderbird could not read the counts of 1 folder; their unread, total, new, quota and lastUsed are null. " +
+      "Thunderbird did not give the counts of 1 folder in time; their unread, total, new, quota and lastUsed are null. Ask again, or for one account at a time.",
+  );
 });
 
 test("mail_folders gives up when Thunderbird does not answer", async () => {
@@ -763,12 +775,44 @@ test("mail_read with headers: true returns every header, cleaned, without Bcc", 
   assert.equal((await ok("mail_read", { id: idOf(m), headers: false })).allHeaders, undefined);
   assert.equal((await call("mail_read", { id: idOf(m), headers: "yes" })).error.code, "invalid_argument");
 
+  // every blind-recipient header is withheld, not only Bcc
+  const resent = mock.addMessage("a1", "INBOX", {
+    body: "hi",
+    headers: { "resent-bcc": ["blind1@example.org"], "x-original-bcc": ["blind2@example.org"], "resent-to": ["seen@example.org"] },
+  });
+  const rh = (await ok("mail_read", { id: idOf(resent), headers: true })).allHeaders;
+  assert.equal("resent-bcc" in rh, false);
+  assert.equal("x-original-bcc" in rh, false);
+  assert.deepEqual(rh["resent-to"], ["seen@example.org"]);
+  assert.doesNotMatch(JSON.stringify(rh), /blind\d@example\.org/);
+
   // at most 200 values in all
   const many = mock.addMessage("a1", "INBOX", { body: "hi", headers: { received: Array.from({ length: 250 }, (_, i) => `hop ${i}`) } });
   const cut = await ok("mail_read", { id: idOf(many), headers: true });
   const n = Object.values(cut.allHeaders).reduce((k, v) => k + v.length, 0);
   assert.equal(n, 200);
   assert.equal(cut.allHeadersTruncated, true);
+});
+
+test("mail_read with headers: true leaves out a header whose name is not a real header name", async () => {
+  // A look-alike name would clean to the real one's key and hide its values.
+  const m = mock.addMessage("a1", "INBOX", {
+    body: "hi",
+    headers: {
+      "authentication-results": ["mx.example; spf=fail dkim=fail dmarc=fail"],
+      "authentication-results\u00AD": ["mx.example; spf=pass dkim=pass dmarc=pass"],
+      "authentication-results\u200B": ["mx.example; spf=pass"],
+      "received\u200B": ["forged hop"],
+      "bcc\u200B": ["hidden@example.org"],
+      "x-sp ace": ["no"],
+    },
+  });
+  const h = (await ok("mail_read", { id: idOf(m), headers: true })).allHeaders;
+  assert.deepEqual(h["authentication-results"], ["mx.example; spf=fail dkim=fail dmarc=fail"]);
+  assert.equal("bcc" in h, false);
+  assert.equal("x-sp ace" in h, false);
+  assert.doesNotMatch(JSON.stringify(h), /hidden@example\.org|forged hop|pass/);
+  assert.ok(Object.keys(h).every((k) => /^[\x21-\x39\x3b-\x7e]+$/.test(k)));
 });
 
 test("headers in pointers and mail_read lose invisible characters and marker look-alikes", async () => {

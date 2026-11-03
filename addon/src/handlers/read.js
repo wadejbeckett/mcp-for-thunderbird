@@ -347,30 +347,38 @@ function dateOf(v) {
   return Number.isNaN(t.getTime()) ? null : t.toISOString();
 }
 
+const nFolders = (n) => `${n} folder${n === 1 ? "" : "s"}`;
+// A slow answer may come next time; an error (such as a folder's summary
+// file that cannot be read) comes again every time.
+const LATE_COUNTS = (n) =>
+  `Thunderbird did not give the counts of ${nFolders(n)} in time; their unread, total, new, quota and lastUsed are null. Ask again, or for one account at a time.`;
 const NO_COUNTS = (n) =>
-  `Thunderbird did not give the counts of ${n} folder${n === 1 ? "" : "s"} in time; their unread, total, new, quota and lastUsed are null. Ask again, or for one account at a time.`;
+  `Thunderbird could not read the counts of ${nFolders(n)}; their unread, total, new, quota and lastUsed are null.`;
 
 async function mailFolders(args, ctx) {
   const s = ctx.settings;
   const accounts = args.account ? [args.account] : enabledAccountIds(s);
   const run = newRun();
   const out = [];
-  let missing = 0;
+  let late = 0;
+  let broken = 0;
   for (const accountId of accounts) {
     const all = answered(await call(run, () => tb().folders.query({ accountId }))) || [];
     const keep = all.filter((f) => realFolder(f, accountId) && !isExcluded(accountId, f.path, s));
-    // A folder whose info did not come (timeout or error) gets null.
+    // A folder whose info did not come gets null, counted as late (timeout)
+    // or broken (an error, or no info).
     const infos = await Promise.all(
       keep.map((f) =>
         call(run, () => tb().folders.getFolderInfo(f.id)).then(
-          (i) => (i && i !== TIMEOUT && typeof i === "object" ? i : null),
+          (i) => (i === TIMEOUT ? TIMEOUT : i && typeof i === "object" ? i : null),
           () => null,
         ),
       ),
     );
     keep.forEach((f, i) => {
-      const info = infos[i];
-      if (!info) missing++;
+      const info = infos[i] === TIMEOUT ? null : infos[i];
+      if (infos[i] === TIMEOUT) late++;
+      else if (!info) broken++;
       const n = info || {};
       out.push({
         account: accountId,
@@ -387,7 +395,10 @@ async function mailFolders(args, ctx) {
     });
   }
   const result = { folders: out };
-  if (missing > 0) result.note = NO_COUNTS(missing);
+  const notes = [];
+  if (broken > 0) notes.push(NO_COUNTS(broken));
+  if (late > 0) notes.push(LATE_COUNTS(late));
+  if (notes.length > 0) result.note = notes.join(" ");
   return result;
 }
 
@@ -821,17 +832,30 @@ function listedAttachment(a) {
   return out;
 }
 
+// A real header name is printable ASCII other than the colon (RFC 5322
+// section 3.6.8). A name with anything else, such as an invisible
+// character after "Authentication-Results", is a look-alike: cleaned, it
+// would take the real header's key and hide its values, so it is left out.
+const HEADER_NAME = /^[\x21-\x39\x3b-\x7e]+$/;
+// Blind recipients: Bcc, Resent-Bcc and any other "-bcc" header.
+const BLIND = /(^|-)bcc$/;
+
 // allHeaders gives every header of a message (getFull, decoded), each
-// value cleaned like the other headers (clip), except Bcc, which mail_read
-// never returns. At most HEADER_LIST values in all; over says some were
-// left out. fromEntries keeps a header named __proto__ an ordinary key.
+// value cleaned like the other headers (clip), except the blind-recipient
+// headers (BLIND), which mail_read never returns, and names that are not
+// a real header name (HEADER_NAME). Names are lowercased; two raw names
+// that lowercase alike share one key, values in order. At most HEADER_LIST
+// values in all; over says some were left out. fromEntries keeps a header
+// named __proto__ an ordinary key.
 function allHeaders(full) {
   const h = full && full.headers && typeof full.headers === "object" ? full.headers : {};
-  const entries = [];
+  const entries = new Map();
   let left = HEADER_LIST;
   let over = false;
-  for (const [name, v] of Object.entries(h)) {
-    if (name.toLowerCase() === "bcc") continue;
+  for (const [raw, v] of Object.entries(h)) {
+    if (!HEADER_NAME.test(raw)) continue;
+    const name = raw.toLowerCase();
+    if (BLIND.test(name)) continue;
     const values = (Array.isArray(v) ? v : [v]).filter((x) => typeof x === "string");
     if (values.length === 0) continue;
     if (left === 0) {
@@ -841,7 +865,7 @@ function allHeaders(full) {
     const kept = values.slice(0, left);
     if (kept.length < values.length) over = true;
     left -= kept.length;
-    entries.push([clip(name).toLowerCase(), kept.map(clip)]);
+    entries.set(name, [...(entries.get(name) || []), ...kept.map(clip)]);
   }
   return { headers: Object.fromEntries(entries), over };
 }

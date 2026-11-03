@@ -5,6 +5,11 @@ Subject: Attachment kinds
 Date: @DATE@
 Message-ID: <attachment-kinds@seed.test>
 X-Seed-Check: kinds
+Resent-Bcc: resent-secret@localhost
+X-Original-Bcc: original-secret@localhost
+Authentication-Results: mx.seed.test; spf=fail smtp.mailfrom=acme.test
+Authentication-Resultsâ€‹: mx.seed.test; spf=pass smtp.mailfrom=acme.test
+Authentication-Results­: mx.seed.test; spf=pass dkim=pass dmarc=pass
 MIME-Version: 1.0
 Content-Type: multipart/mixed; boundary="mft-kinds-boundary"
 
@@ -52,5 +57,14 @@ X-Mozilla-Altered: AttachmentDeleted; date="Mon Nov 02 10:00:00 2026"
 
 You deleted an attachment from this message. The original MIME headers for the attachment were:
 Content-Type: application/msword; name="old.doc"
+
+--mft-kinds-boundary
+Content-Type: application/pdf; name="g.pdf"
+Content-Disposition: attachment; filename="g.pdf"
+X-Mozilla-Altered: AttachmentDetached; date="Mon Nov 02 10:00:00 2026"
+X-Mozilla-External-Attachment-URL: file:///tmp/g.pdf
+Content-Transfer-Encoding: 7bit
+
+You detached an attachment from this message.
 
 --mft-kinds-boundary--

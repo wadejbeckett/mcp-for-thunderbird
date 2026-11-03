@@ -533,7 +533,9 @@ func TestE2EAccountsAndFolders(t *testing.T) {
 
 // TestE2EAttachmentKinds reads the seeded message with one attachment of
 // each kind (fixtures/seed/attachment-kinds.eml): a windows-1252 text,
-// one with no file name, a FileLink, a linked file and a deleted one. The
+// one with no file name, a FileLink, a linked file, a deleted one and a
+// detached PDF. Its headers include Resent-Bcc, X-Original-Bcc and an
+// Authentication-Results look-alike, none of which allHeaders returns. The
 // type comes from the part's own headers, which Thunderbird gives from
 // 140; 153 also names the FileLink by its real name.
 func TestE2EAttachmentKinds(t *testing.T) {
@@ -565,6 +567,29 @@ func TestE2EAttachmentKinds(t *testing.T) {
 	if _, ok := read.AllHeaders["bcc"]; ok || strings.Contains(text, "secret-bcc") {
 		t.Fatalf("mail_read returned the Bcc header: %v", read.AllHeaders["bcc"])
 	}
+	// Every blind-recipient header is withheld, not only Bcc.
+	for _, h := range []string{"resent-bcc", "x-original-bcc"} {
+		if _, ok := read.AllHeaders[h]; ok {
+			t.Errorf("mail_read returned %s: %v", h, read.AllHeaders[h])
+		}
+	}
+	if strings.Contains(text, "resent-secret") || strings.Contains(text, "original-secret") {
+		t.Errorf("mail_read returned a blind recipient: %s", text)
+	}
+	// A look-alike name (raw bytes after it, which Thunderbird keeps as
+	// U+0080 to U+00FF; 0xAD is a soft hyphen that cleaning would strip)
+	// neither appears nor hides the real header's value.
+	if got := read.AllHeaders["authentication-results"]; len(got) != 1 || got[0] != "mx.seed.test; spf=fail smtp.mailfrom=acme.test" {
+		t.Errorf("allHeaders authentication-results = %q", got)
+	}
+	for k := range read.AllHeaders {
+		for _, c := range k {
+			if c < 0x21 || c > 0x7e || c == ':' {
+				t.Errorf("allHeaders has a name that is not a header name: %q", k)
+				break
+			}
+		}
+	}
 
 	current := backgroundSave(os.Getenv("MFT_E2E_TB_VERSION"))
 	byName := map[string]attachment{}
@@ -580,7 +605,9 @@ func TestE2EAttachmentKinds(t *testing.T) {
 	if !current {
 		cloud = "big.zip.html"
 	}
-	want := map[string]string{"menu.txt": "normal", "plan.odt": "linked", cloud: "cloudFile", "Deleted: old.doc": "deleted"}
+	// g.pdf keeps its real content type: only its headers say it was
+	// detached, and Thunderbird 153.6 itself calls it normal.
+	want := map[string]string{"menu.txt": "normal", "plan.odt": "linked", cloud: "cloudFile", "Deleted: old.doc": "deleted", "g.pdf": "detached"}
 	links := map[string]string{"plan.odt": "https://files.example.test/plan.odt", cloud: "https://cloud.example.test/f/big.zip"}
 	for name, typ := range want {
 		a, ok := byName[name]
@@ -616,7 +643,7 @@ func TestE2EAttachmentKinds(t *testing.T) {
 	}
 
 	// Placeholders are refused.
-	for _, name := range []string{"Deleted: old.doc", "plan.odt", cloud} {
+	for _, name := range []string{"Deleted: old.doc", "g.pdf", "plan.odt", cloud} {
 		text, isErr := call(t, cs, "mail_attachment", map[string]any{"id": id, "name": name, "part": byName[name].Part})
 		if !isErr || !strings.HasPrefix(text, "refused:") {
 			t.Errorf("mail_attachment %s: %v %s", name, isErr, text)

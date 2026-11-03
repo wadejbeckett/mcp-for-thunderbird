@@ -161,8 +161,18 @@ func TestReadFoldersAccountsDescriptions(t *testing.T) {
 			t.Errorf("mail_folders description must mention %q", w)
 		}
 	}
+	// lastUsed is Thunderbird's MRUTime, not only when the user opened the folder
+	f := byName(t, "mail_folders").Description
+	for _, w := range []string{"moved", "delivered", "could not read", "in time"} {
+		if !strings.Contains(f, w) {
+			t.Errorf("mail_folders description must mention %q", w)
+		}
+	}
+	if strings.Contains(f, "when the user last opened it") {
+		t.Error("mail_folders description must not say lastUsed is only when the user opened the folder")
+	}
 	r := byName(t, "mail_read").Description
-	for _, w := range []string{"normal", "linked", "cloudFile", "detached", "deleted", "link", "attachmentsTruncated", "allHeaders", "Bcc"} {
+	for _, w := range []string{"normal", "linked", "cloudFile", "detached", "deleted", "link", "attachmentsTruncated", "allHeaders", "Bcc", "Resent-Bcc", "-bcc"} {
 		if !strings.Contains(r, w) {
 			t.Errorf("mail_read description must mention %q", w)
 		}
