@@ -5,9 +5,9 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { install, fetchFrom } from "./mocks/messenger.js";
-import { DEFAULTS, LEVELS, GROUPS, load, save, enabledTools } from "../src/settings.js";
+import { DEFAULTS, LEVELS, GROUPS, load, save, update, enabledTools } from "../src/settings.js";
 
-const READ = ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"];
+const READ = ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"];
 const ORGANISE = ["mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"];
 const COMPOSE = ["mail_draft", "mail_compose"];
 
@@ -25,6 +25,7 @@ test("DEFAULTS match the Global Constraints", () => {
   assert.equal(DEFAULTS.setupDone, false);
   assert.equal(DEFAULTS.attachmentDir, "");
   assert.deepEqual(DEFAULTS.excludedFolders, []);
+  assert.deepEqual(DEFAULTS.knownFolders, {});
   assert.ok(Object.isFrozen(DEFAULTS));
 });
 
@@ -113,4 +114,17 @@ test("excluded folder paths are normalised; empty and root paths are refused", a
   }
   await assert.rejects(save({ excludedFolders: [{ accountId: "", path: "X" }] }), { code: "invalid_argument" });
   assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Private" }]);
+});
+
+test("update saves what its function returns from the settings of the same turn", async () => {
+  await save({ accounts: { a1: true } });
+  const [a, b] = await Promise.all([
+    update((cur) => ({ accounts: { ...cur.accounts, a2: true } })),
+    update((cur) => ({ accounts: { ...cur.accounts, a3: true } })),
+  ]);
+  assert.deepEqual(a.accounts, { a1: true, a2: true });
+  assert.deepEqual(b.accounts, { a1: true, a2: true, a3: true }, "the second sees the first");
+  const same = await update(() => null);
+  assert.deepEqual(same.accounts, { a1: true, a2: true, a3: true });
+  await assert.rejects(update(() => ({ excludedFolders: [{ accountId: "a1", path: "/" }] })), { code: "invalid_argument" });
 });

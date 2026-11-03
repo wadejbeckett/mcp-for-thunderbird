@@ -10,14 +10,23 @@ import { groupOf, sendEnabled } from "./settings.js";
 import { decodeId } from "./ids.js";
 
 export const PAUSED_MESSAGE = "Paused by the user in Thunderbird";
+export const UNSEEN_MESSAGE =
+  "This folder is hidden for now: it is new, or does not exist. In an account with excluded folders, a new folder stays hidden until the user checks the excluded folders in MCP for Thunderbird settings and saves.";
 
 const trimSlash = (p) => p.replace(/\/+$/, "");
 
 // isExcluded matches an excluded folder and its subfolders. Paths are
 // compared without trailing slashes; an entry that names the root (stored
-// by hand, since save refuses it) excludes the whole account.
+// by hand, since save refuses it) excludes the whole account. In an
+// account with exclusions, a folder the add-on has not seen yet is
+// excluded too (isUnseen, exclusions.js): it may be an excluded folder
+// renamed outside Thunderbird.
 export function isExcluded(accountId, folderPath, s) {
   const path = trimSlash(String(folderPath));
+  return isExcludedByPath(accountId, path, s) || isUnseen(accountId, path, s);
+}
+
+function isExcludedByPath(accountId, path, s) {
   return (s.excludedFolders || []).some((ex) => {
     if (!ex || ex.accountId !== accountId) return false;
     const ep = trimSlash(String(ex.path ?? ""));
@@ -25,8 +34,19 @@ export function isExcluded(accountId, folderPath, s) {
   });
 }
 
+// isUnseen says whether a folder of an account with a folders-seen list
+// (settings.knownFolders) is missing from it. The root is never unseen.
+export function isUnseen(accountId, folderPath, s) {
+  const known = s.knownFolders && s.knownFolders[accountId];
+  if (!known || typeof known !== "object") return false;
+  const path = trimSlash(String(folderPath));
+  return path !== "" && !Object.hasOwn(known, path);
+}
+
 export function assertFolderAllowed(accountId, folderPath, s) {
-  if (isExcluded(accountId, folderPath, s)) fail("excluded", "This folder is excluded in MCP for Thunderbird settings.");
+  const path = trimSlash(String(folderPath));
+  if (isExcludedByPath(accountId, path, s)) fail("excluded", "This folder is excluded in MCP for Thunderbird settings.");
+  if (isUnseen(accountId, path, s)) fail("excluded", UNSEEN_MESSAGE);
 }
 
 export function assertAccountEnabled(accountId, s) {
@@ -39,8 +59,24 @@ export function enabledAccountIds(s) {
 
 const CROSS_ACCOUNT = "Moving mail between accounts is not allowed.";
 
+// WRITES_FROM holds the tools whose `account` is the account to write
+// from: a reply or forward may be written from another enabled account
+// than the original's (compose.js, writer), so for them `account` need
+// not be the id's account. Nothing moves; both accounts are still checked.
+const WRITES_FROM = new Set(["mail_draft", "mail_compose"]);
+
+// NO_ACCOUNT holds the tools that take no account, with why. An account
+// sent to one of them (an older client may still send one) is refused
+// before it is checked, so the answer is not "enable this account".
+const NO_ACCOUNT = {
+  mail_contacts: "mail_contacts takes no account: address books belong to the whole profile, not to one account.",
+  mail_tags: "mail_tags takes no account: tags belong to the whole profile, not to one account.",
+};
+
 // check refuses a call the settings do not allow. Order: paused, tool
-// group, argument types, account, the ids, then the folder. Policy owns the
+// group, an account the tool does not take, argument types, account, the
+// ids (an id in another account than `account` is refused, except for a
+// reply or forward, WRITES_FROM), then the folder. Policy owns the
 // account and folder checks; handlers repeat assertFolderAllowed for every
 // message they reach.
 export function check(tool, args, s) {
@@ -54,6 +90,7 @@ export function check(tool, args, s) {
   }
 
   const has = (k) => Object.prototype.hasOwnProperty.call(args, k);
+  if (has("account") && Object.hasOwn(NO_ACCOUNT, tool)) fail("invalid_argument", NO_ACCOUNT[tool]);
   if (has("account") && typeof args.account !== "string") fail("invalid_argument", "account must be a string.");
   if (has("id") && typeof args.id !== "string") fail("invalid_argument", "id must be a string.");
   if (has("ids") && !(Array.isArray(args.ids) && args.ids.every((x) => typeof x === "string"))) {
@@ -71,7 +108,7 @@ export function check(tool, args, s) {
     const { accountId, folderPath } = decodeId(id);
     assertAccountEnabled(accountId, s);
     assertFolderAllowed(accountId, folderPath, s);
-    if (has("account") && accountId !== args.account) fail("refused", CROSS_ACCOUNT);
+    if (has("account") && accountId !== args.account && !WRITES_FROM.has(tool)) fail("refused", CROSS_ACCOUNT);
     idAccounts.add(accountId);
   }
 

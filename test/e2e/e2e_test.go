@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ const (
 )
 
 var (
-	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"}
+	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"}
 	organiseTools = []string{"mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"}
 	composeTools  = composeToolsOf(os.Getenv("MFT_E2E_TB_VERSION"))
 	contactsTools = []string{"mail_contacts"}
@@ -259,6 +260,7 @@ type pointer struct {
 	} `json:"from"`
 	HasAttachments *bool    `json:"hasAttachments"`
 	Tags           []string `json:"tags"`
+	Priority       *string  `json:"priority"`
 }
 
 type searchResult struct {
@@ -441,6 +443,109 @@ func TestE2EFolderSearch(t *testing.T) {
 	}
 }
 
+// TestE2ESearchAndThread follows a two-message conversation with
+// mail_thread (messages.getHeaders on 147 and later, the raw source on 140)
+// and searches it with the arguments Thunderbird matches itself (a whole
+// address, to_me and from_me true, junk) and those the add-on matches (part
+// of an address, to_me and from_me false, untagged). The reply is tagged
+// for the tag modes, so untagged and none must leave it out (Thunderbird
+// 153.6 ignores its own mode "none"); the tag is removed again. The root
+// carries X-Priority: 1. Thunderbird shows the
+// reply's subject without "Re: ", so the two are told apart by sender. Both
+// have the same date, so the root is seeded first (file name order) to come
+// first.
+func TestE2ESearchAndThread(t *testing.T) {
+	cs := httpSession(t)
+	const subj, carol, me = "Budget review", "carol@example.test", "test@localhost"
+	res, _ := searchUntil(t, cs, map[string]any{"subject": "Budget"}, subj)
+	var root, reply pointer
+	for _, m := range res.Messages {
+		switch m.From.Address {
+		case carol:
+			root = m
+		case me:
+			reply = m
+		}
+	}
+	if root.ID == "" || reply.ID == "" {
+		t.Fatalf("seeded conversation: %+v", res)
+	}
+	var major int
+	fmt.Sscanf(os.Getenv("MFT_E2E_TB_VERSION"), "%d", &major)
+	if major == 0 || major >= 148 {
+		if root.Priority == nil || *root.Priority != "highest" {
+			t.Errorf("root priority = %v, want highest", root.Priority)
+		}
+	} else if root.Priority != nil {
+		t.Errorf("priority before 148 = %q, want null", *root.Priority)
+	}
+
+	senders := func(r searchResult) string {
+		var got []string
+		for _, m := range r.Messages {
+			got = append(got, m.From.Address)
+		}
+		return strings.Join(got, "|")
+	}
+	for _, from := range []pointer{root, reply} {
+		var thread searchResult
+		callOK(t, cs, "mail_thread", map[string]any{"id": from.ID}, &thread)
+		if got := senders(thread); got != carol+"|"+me || thread.Truncated {
+			t.Fatalf("mail_thread from %s = %s (truncated %v)", from.From.Address, got, thread.Truncated)
+		}
+	}
+
+	only := func(args map[string]any, want ...string) {
+		t.Helper()
+		var r searchResult
+		callOK(t, cs, "mail_search", args, &r)
+		var got []string
+		for _, m := range r.Messages {
+			got = append(got, m.From.Address)
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("mail_search %v = %v, want %v", args, got, want)
+		}
+	}
+	only(map[string]any{"subject": "Budget", "from": "example.test"}, carol)
+	only(map[string]any{"subject": "Budget", "from": "CAROL"}, carol)
+	only(map[string]any{"subject": "Budget", "from": carol}, carol)
+	only(map[string]any{"subject": "Budget", "to": "example.test"}, me)
+	only(map[string]any{"subject": "Budget", "from_me": true}, me)
+	only(map[string]any{"subject": "Budget", "to_me": true}, carol)
+	// Thunderbird's search never ends on a false toMe or fromMe alone
+	only(map[string]any{"subject": "Budget", "from_me": false}, carol)
+	only(map[string]any{"subject": "Budget", "to_me": false}, me)
+	only(map[string]any{"subject": "Budget", "to_me": false, "from_me": false})
+	only(map[string]any{"subject": "Budget", "junk": false}, carol, me)
+
+	var o organised
+	callOK(t, cs, "mail_tag", map[string]any{"ids": []string{reply.ID}, "add": []string{"important"}}, &o)
+	o.only(t, "mail_tag", reply.ID)
+	t.Cleanup(func() {
+		if t.Failed() {
+			call(t, cs, "mail_tag", map[string]any{"ids": []string{reply.ID}, "remove": []string{"important"}})
+		}
+	})
+	searchUntil(t, cs, map[string]any{"subject": "Budget", "tag": "important"}, subj)
+	only(map[string]any{"subject": "Budget", "tag": "important", "tags_mode": "any"}, me)
+	only(map[string]any{"subject": "Budget", "tags_mode": "untagged"}, carol)
+	only(map[string]any{"subject": "Budget", "tags_mode": "none", "tag": "important"}, carol)
+	callOK(t, cs, "mail_tag", map[string]any{"ids": []string{reply.ID}, "remove": []string{"important"}}, &o)
+	o.only(t, "mail_tag", reply.ID)
+
+	var cut struct {
+		searchResult
+		Note string `json:"note"`
+	}
+	callOK(t, cs, "mail_search", map[string]any{"subject": "Budget", "limit": 1}, &cut)
+	if !cut.Truncated || len(cut.Messages) != 1 || !strings.Contains(cut.Note, "Narrow the search") {
+		t.Fatalf("a search cut at limit = %+v", cut)
+	}
+}
+
 // TestE2ENullOptionals sends explicit nulls for omitted optional arguments,
 // as some MCP clients do; they must count as absent.
 func TestE2ENullOptionals(t *testing.T) {
@@ -455,6 +560,283 @@ func TestE2ENullOptionals(t *testing.T) {
 	if len(folders.Folders) == 0 {
 		t.Fatal("mail_folders with account null listed no folders")
 	}
+}
+
+// TestE2EAccountsAndFolders checks what mail_accounts and mail_folders
+// take from Thunderbird: every identity, the default account
+// (accounts.getDefault, make-profile.sh sets account1), and each folder's
+// new count, quota, last-used date and favourite (folders.getFolderInfo).
+func TestE2EAccountsAndFolders(t *testing.T) {
+	cs := httpSession(t)
+	var accounts struct {
+		Accounts []struct {
+			ID         string `json:"id"`
+			Address    string `json:"address"`
+			Default    bool   `json:"default"`
+			Identities []struct {
+				ID, Email, Name string
+				Default         bool
+			} `json:"identities"`
+		} `json:"accounts"`
+	}
+	callOK(t, cs, "mail_accounts", map[string]any{}, &accounts)
+	byID := map[string]int{}
+	for i, a := range accounts.Accounts {
+		byID[a.ID] = i
+	}
+	a1, a3 := accounts.Accounts[byID["account1"]], accounts.Accounts[byID["account3"]]
+	if !a1.Default || a3.Default {
+		t.Fatalf("default account: account1 %v, account3 %v, want true, false", a1.Default, a3.Default)
+	}
+	if len(a1.Identities) != 1 || a1.Identities[0].ID != "id1" || a1.Identities[0].Email != "test@localhost" ||
+		a1.Identities[0].Name != "Test User" || !a1.Identities[0].Default {
+		t.Fatalf("account1 identities = %+v", a1.Identities)
+	}
+	if len(a3.Identities) != 1 || a3.Identities[0].Email != "other@localhost" {
+		t.Fatalf("account3 identities = %+v", a3.Identities)
+	}
+
+	var folders struct {
+		Folders []map[string]json.RawMessage `json:"folders"`
+		Note    string                       `json:"note"`
+	}
+	callOK(t, cs, "mail_folders", map[string]any{"account": "account1"}, &folders)
+	if folders.Note != "" {
+		t.Fatalf("mail_folders note: %s", folders.Note)
+	}
+	seen := false
+	for _, f := range folders.Folders {
+		var path string
+		json.Unmarshal(f["path"], &path)
+		for _, k := range []string{"new", "quota", "lastUsed", "favorite"} {
+			if _, ok := f[k]; !ok {
+				t.Fatalf("folder %s lacks %q: %v", path, k, f)
+			}
+		}
+		var n *int
+		var quota []map[string]any
+		var fav bool
+		if json.Unmarshal(f["new"], &n) != nil || n == nil || json.Unmarshal(f["quota"], &quota) != nil || quota == nil ||
+			json.Unmarshal(f["favorite"], &fav) != nil {
+			t.Fatalf("folder %s: new %s, quota %s, favorite %s", path, f["new"], f["quota"], f["favorite"])
+		}
+		if string(f["lastUsed"]) != "null" {
+			var when string
+			if json.Unmarshal(f["lastUsed"], &when) != nil {
+				t.Fatalf("folder %s lastUsed %s", path, f["lastUsed"])
+			}
+			if _, err := time.Parse(time.RFC3339, when); err != nil {
+				t.Fatalf("folder %s lastUsed %q: %v", path, when, err)
+			}
+		}
+		seen = true
+	}
+	if !seen {
+		t.Fatal("mail_folders listed no folders")
+	}
+}
+
+// TestE2EAttachmentKinds reads the seeded message with one attachment of
+// each kind (fixtures/seed/attachment-kinds.eml): a windows-1252 text,
+// one with no file name, a FileLink, a linked file, a deleted one and a
+// detached PDF. Its headers include Resent-Bcc, X-Original-Bcc and an
+// Authentication-Results look-alike, none of which allHeaders returns. The
+// type comes from the part's own headers, which Thunderbird gives from
+// 140; 153 also names the FileLink by its real name.
+func TestE2EAttachmentKinds(t *testing.T) {
+	cs := httpSession(t)
+	res, _ := searchUntil(t, cs, map[string]any{"subject": "Attachment kinds"}, "Attachment kinds")
+	id := find(res, "Attachment kinds").ID
+
+	type attachment struct {
+		Name, ContentType, Part, Type string
+		Link                          *string
+	}
+	var read struct {
+		Attachments []attachment        `json:"attachments"`
+		AllHeaders  map[string][]string `json:"allHeaders"`
+	}
+	text, isErr := call(t, cs, "mail_read", map[string]any{"id": id, "headers": true})
+	if isErr {
+		t.Fatalf("mail_read: %s", text)
+	}
+	if err := json.Unmarshal([]byte(text), &read); err != nil {
+		t.Fatal(err)
+	}
+	if got := read.AllHeaders["x-seed-check"]; len(got) != 1 || got[0] != "kinds" {
+		t.Fatalf("allHeaders x-seed-check = %v in %v", got, read.AllHeaders)
+	}
+	if got := read.AllHeaders["message-id"]; len(got) != 1 || got[0] != "<attachment-kinds@seed.test>" {
+		t.Fatalf("allHeaders message-id = %v", got)
+	}
+	if _, ok := read.AllHeaders["bcc"]; ok || strings.Contains(text, "secret-bcc") {
+		t.Fatalf("mail_read returned the Bcc header: %v", read.AllHeaders["bcc"])
+	}
+	// Every blind-recipient header is withheld, not only Bcc.
+	for _, h := range []string{"resent-bcc", "x-original-bcc"} {
+		if _, ok := read.AllHeaders[h]; ok {
+			t.Errorf("mail_read returned %s: %v", h, read.AllHeaders[h])
+		}
+	}
+	if strings.Contains(text, "resent-secret") || strings.Contains(text, "original-secret") {
+		t.Errorf("mail_read returned a blind recipient: %s", text)
+	}
+	// A look-alike name (raw bytes after it, which Thunderbird keeps as
+	// U+0080 to U+00FF; 0xAD is a soft hyphen that cleaning would strip)
+	// neither appears nor hides the real header's value.
+	if got := read.AllHeaders["authentication-results"]; len(got) != 1 || got[0] != "mx.seed.test; spf=fail smtp.mailfrom=acme.test" {
+		t.Errorf("allHeaders authentication-results = %q", got)
+	}
+	for k := range read.AllHeaders {
+		for _, c := range k {
+			if c < 0x21 || c > 0x7e || c == ':' {
+				t.Errorf("allHeaders has a name that is not a header name: %q", k)
+				break
+			}
+		}
+	}
+
+	current := backgroundSave(os.Getenv("MFT_E2E_TB_VERSION"))
+	byName := map[string]attachment{}
+	nameless := attachment{}
+	for _, a := range read.Attachments {
+		if a.Name == "" {
+			nameless = a
+		}
+		byName[a.Name] = a
+	}
+	// On 153 the FileLink is listed under its real name.
+	cloud := "big.zip"
+	if !current {
+		cloud = "big.zip.html"
+	}
+	// g.pdf keeps its real content type: only its headers say it was
+	// detached, and Thunderbird 153.6 itself calls it normal.
+	want := map[string]string{"menu.txt": "normal", "plan.odt": "linked", cloud: "cloudFile", "Deleted: old.doc": "deleted", "g.pdf": "detached"}
+	links := map[string]string{"plan.odt": "https://files.example.test/plan.odt", cloud: "https://cloud.example.test/f/big.zip"}
+	for name, typ := range want {
+		a, ok := byName[name]
+		if !ok {
+			t.Fatalf("no attachment %q in %+v", name, read.Attachments)
+		}
+		if a.Type != typ {
+			t.Errorf("%s: type %q, want %q", name, a.Type, typ)
+		}
+		if l, ok := links[name]; ok && (a.Link == nil || *a.Link != l) {
+			t.Errorf("%s: link %v, want %q", name, a.Link, l)
+		} else if !ok && a.Link != nil {
+			t.Errorf("%s: link %q, want none", name, *a.Link)
+		}
+	}
+	if nameless.Part == "" || nameless.Type != "normal" {
+		t.Fatalf("no nameless attachment in %+v", read.Attachments)
+	}
+
+	// The text is decoded in the charset of the attachment's own header.
+	var menu struct{ Text string }
+	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "name": "menu.txt"}, &menu)
+	if inner, ok := unwrap(menu.Text); !ok || strings.TrimSpace(inner) != "Menu: café 5€" {
+		t.Fatalf("menu.txt = %q", menu.Text)
+	}
+
+	// A part alone fetches the attachment with no name.
+	var saved struct{ Saved string }
+	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "part": nameless.Part}, &saved)
+	data, err := os.ReadFile(saved.Saved)
+	if err != nil || string(data) != "nameless-bytes" {
+		t.Fatalf("nameless attachment saved as %q: %v %q", saved.Saved, err, data)
+	}
+
+	// Placeholders are refused.
+	for _, name := range []string{"Deleted: old.doc", "g.pdf", "plan.odt", cloud} {
+		text, isErr := call(t, cs, "mail_attachment", map[string]any{"id": id, "name": name, "part": byName[name].Part})
+		if !isErr || !strings.HasPrefix(text, "refused:") {
+			t.Errorf("mail_attachment %s: %v %s", name, isErr, text)
+		}
+	}
+}
+
+// localFolderScript works on Local Folders in the e2e Thunderbird, as the
+// user does in the folder pane: "create" makes MftExcluded and MftArchive,
+// "rename" renames MftExcluded to MftExcluded2, and "move" moves
+// MftExcluded2 into MftArchive. It returns "ok" once the change is done.
+const localFolderScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const root = MailServices.accounts.localFoldersServer.rootFolder;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const child = (parent, name) => parent.subFolders.find((f) => f.name === name) || null;
+  const until = async (fn) => {
+    for (let i = 0; i < 40; i++) {
+      if (fn()) return "ok";
+      await sleep(250);
+    }
+    return "timed out";
+  };
+  const step = %q;
+  if (step === "create") {
+    for (const name of ["MftExcluded", "MftArchive"]) if (!child(root, name)) root.createSubfolder(name, null);
+    return until(() => child(root, "MftExcluded") && child(root, "MftArchive"));
+  }
+  if (step === "rename") {
+    child(root, "MftExcluded").rename("MftExcluded2", null);
+    return until(() => child(root, "MftExcluded2"));
+  }
+  if (step === "move") {
+    const archive = child(root, "MftArchive");
+    MailServices.copy.copyFolder(child(root, "MftExcluded2"), archive, true, null, null);
+    return until(() => child(archive, "MftExcluded2"));
+  }
+  return "unknown step";
+})().then(resolve, (e) => resolve("error: " + e));
+`
+
+// TestE2EExcludedLocalFolderFollows renames and then moves an excluded
+// folder of Local Folders in Thunderbird: its exclusion follows it, from
+// folders.onRenamed and onMoved, so the folder does not come back into
+// reach under a new path, and an exclusion whose name only starts the same
+// stays where it is. TestE2EExcludedFolderFollows does the same for an
+// IMAP folder, and for a rename made on the server.
+func TestE2EExcludedLocalFolderFollows(t *testing.T) {
+	before := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, before) })
+	folder := func(step string) {
+		t.Helper()
+		var got string
+		marionette(t, fmt.Sprintf(localFolderScript, step), &got)
+		if got != "ok" {
+			t.Fatalf("local folder %s: %s", step, got)
+		}
+	}
+	waitExcluded := func(want ...string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			got := excludedPaths(addonSettings(t, nil))
+			if strings.Join(got, ",") == strings.Join(want, ",") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("excluded folders = %v, want %v", got, want)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	folder("create")
+	next := map[string]any{}
+	for k, v := range before {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{
+		map[string]any{"accountId": "account2", "path": "/MftExcluded"},
+		map[string]any{"accountId": "account2", "path": "/MftExcludedNot"},
+	}
+	addonSettings(t, next)
+	folder("rename")
+	waitExcluded("account2:/MftExcluded2", "account2:/MftExcludedNot")
+	folder("move")
+	waitExcluded("account2:/MftArchive/MftExcluded2", "account2:/MftExcludedNot")
 }
 
 // TestE2EConnectStdio is the Claude Code check done by a go-sdk client:
@@ -649,12 +1031,59 @@ type organised struct {
 		ID   string `json:"id"`
 		Code string `json:"code"`
 	} `json:"failed"`
+	Moved  []movedID `json:"moved"`
+	Copied []movedID `json:"copied"`
+}
+
+// movedID is a message's id before (From) and after (To) a move or copy.
+type movedID struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 func (o organised) only(t *testing.T, tool, id string) {
 	t.Helper()
 	if len(o.Done) != 1 || o.Done[0] != id || len(o.Failed) != 0 {
 		t.Fatalf("%s = %+v, want only %s done", tool, o, id)
+	}
+}
+
+// movedTo returns the new id the result gives for id, checking that it
+// names the folder (with or without a leading slash) and the Message-ID.
+func (o organised) movedTo(t *testing.T, tool, id, folder, msgID string) string {
+	t.Helper()
+	for _, m := range append(o.Moved, o.Copied...) {
+		if m.From != id {
+			continue
+		}
+		f, mid := draftMessageID(t, m.To)
+		if strings.TrimPrefix(f, "/") != folder || mid != msgID {
+			t.Fatalf("%s new id names %s/%s, want %s/%s", tool, f, mid, folder, msgID)
+		}
+		return m.To
+	}
+	t.Fatalf("%s = %+v gives no new id for %s", tool, o, id)
+	return ""
+}
+
+// readUntil calls mail_read on id until it succeeds: on IMAP a moved
+// message may take a moment to appear in its new folder.
+func readUntil(t *testing.T, cs *mcp.ClientSession, id string) readResult {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		text, isErr := call(t, cs, "mail_read", map[string]any{"id": id})
+		if !isErr {
+			var r readResult
+			if err := json.Unmarshal([]byte(text), &r); err != nil {
+				t.Fatalf("mail_read: %v", err)
+			}
+			return r
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mail_read %s: %s", id, text)
+		}
+		time.Sleep(time.Second)
 	}
 }
 
@@ -697,12 +1126,23 @@ func TestE2EOrganise(t *testing.T) {
 		t.Fatalf("unknown tag: %v %s", isErr, text)
 	}
 
-	// move within the account; Trash is not a mail_move target.
+	// move within the account; Trash is not a mail_move target, and a copy
+	// into the message's own folder, which Thunderbird would skip, fails.
 	if text, isErr := call(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": "/Trash"}); !isErr || !strings.HasPrefix(text, "refused:") {
 		t.Fatalf("move to Trash: %v %s", isErr, text)
 	}
+	o = organised{}
+	callOK(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": one.Folder, "copy": true}, &o)
+	if len(o.Done) != 0 || len(o.Failed) != 1 || o.Failed[0].ID != one.ID || o.Failed[0].Code != "refused" {
+		t.Fatalf("copy into its own folder = %+v", o)
+	}
+	o = organised{}
 	callOK(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": "/Sorted"}, &o)
 	o.only(t, "mail_move", one.ID)
+	movedID := o.movedTo(t, "mail_move", one.ID, "Sorted", id1)
+	if r := readUntil(t, cs, movedID); r.Headers.Subject != subj1 {
+		t.Fatalf("mail_read of the moved id: %+v", r.Headers)
+	}
 	imapWait(t, "move", "Sorted", id1, func(found bool, _ string) bool { return found })
 	imapWait(t, "move", "INBOX", id1, func(found bool, _ string) bool { return !found })
 	moved, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Sorted"}, subj1)
@@ -712,8 +1152,10 @@ func TestE2EOrganise(t *testing.T) {
 	}
 
 	// trash: the message lands in Trash, flagged nothing, not expunged.
+	o = organised{}
 	callOK(t, cs, "mail_trash", map[string]any{"ids": []string{sorted.ID}}, &o)
 	o.only(t, "mail_trash", sorted.ID)
+	o.movedTo(t, "mail_trash", sorted.ID, "Trash", id1)
 	_, flags := imapWait(t, "trash", "Trash", id1, func(found bool, _ string) bool { return found })
 	if strings.Contains(flags, `\Deleted`) {
 		t.Fatalf("trashed message is marked deleted on the server: %q", flags)
@@ -727,19 +1169,51 @@ func TestE2EOrganise(t *testing.T) {
 
 // TestE2EArchive archives a message with mail_archive and checks the
 // server over IMAP: the message is in Archives, the folder identity id1
-// archives into (make-profile.sh), and no longer in INBOX.
+// archives into (make-profile.sh), and no longer in INBOX; the new id the
+// result gives reads the message there. With archiving turned off for the
+// identity, Thunderbird skips the message, and mail_archive reports it as
+// failed.
 func TestE2EArchive(t *testing.T) {
 	cs := httpSession(t)
 	const (
-		subj = "Archive me"
-		id   = "archive-one@seed.test"
+		subj     = "Archive me"
+		id       = "archive-one@seed.test"
+		keptSubj = "Archive me not"
+		keptID   = "archive-two@seed.test"
 	)
 	res, _ := searchUntil(t, cs, map[string]any{"text": "archive test"}, subj)
-	one := find(res, subj)
-	if one.ID == "" {
-		t.Fatalf("seed message: %+v", res)
+	res, _ = searchUntil(t, cs, map[string]any{"text": "archive test"}, keptSubj)
+	one, kept := find(res, subj), find(res, keptSubj)
+	if one.ID == "" || kept.ID == "" {
+		t.Fatalf("seed messages: %+v", res)
 	}
+
+	// archiving off for id1: nothing moves, and the message is failed.
+	var before bool
+	marionette(t, fmt.Sprintf(archiveEnabledScript, "false"), &before)
+	if !before {
+		t.Fatal("identity id1 does not archive (make-profile.sh)")
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			var was bool
+			marionette(t, fmt.Sprintf(archiveEnabledScript, "true"), &was)
+			restored = true
+		}
+	}
+	defer restore()
 	var o organised
+	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{kept.ID}}, &o)
+	if len(o.Done) != 0 || len(o.Failed) != 1 || o.Failed[0].ID != kept.ID || o.Failed[0].Code != "not_enabled" {
+		t.Fatalf("mail_archive with archiving off = %+v", o)
+	}
+	if found, _ := imapLookup(t, "INBOX", keptID); !found {
+		t.Fatal("the message Thunderbird did not archive left INBOX")
+	}
+	restore()
+
+	o = organised{}
 	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{one.ID}}, &o)
 	o.only(t, "mail_archive", one.ID)
 	_, flags := imapWait(t, "archive", "Archives", id, func(found bool, _ string) bool { return found })
@@ -747,9 +1221,168 @@ func TestE2EArchive(t *testing.T) {
 		t.Fatalf("archived message is marked deleted on the server: %q", flags)
 	}
 	imapWait(t, "archive", "INBOX", id, func(found bool, _ string) bool { return !found })
-	archived, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Archives"}, subj)
-	if p := find(archived, subj); p.Folder != "Archives" && p.Folder != "/Archives" {
-		t.Fatalf("archived message is in %q", p.Folder)
+	// The new id comes from Thunderbird's move event, which on IMAP waits
+	// until Thunderbird has the message in Archives, so it reads at once.
+	// That wait has been checked on 153 only: on 140 ESR a result without
+	// the new id falls back to finding the message in Archives by search.
+	if len(o.Moved) == 0 && !backgroundSave(os.Getenv("MFT_E2E_TB_VERSION")) {
+		t.Logf("mail_archive gave no new id on Thunderbird %s", os.Getenv("MFT_E2E_TB_VERSION"))
+		archived, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Archives"}, subj)
+		if p := find(archived, subj); p.Folder != "Archives" && p.Folder != "/Archives" {
+			t.Fatalf("archived message is in %q", p.Folder)
+		}
+		return
+	}
+	archived := o.movedTo(t, "mail_archive", one.ID, "Archives", id)
+	text, isErr := call(t, cs, "mail_read", map[string]any{"id": archived})
+	var r readResult
+	if isErr || json.Unmarshal([]byte(text), &r) != nil || r.Headers.Subject != subj {
+		t.Fatalf("mail_read of the archived id: %v %s", isErr, text)
+	}
+
+	// Archiving it again: Thunderbird leaves a message that is already in
+	// its archive folder where it is, with no event. It is done, and its id
+	// does not change.
+	o = organised{}
+	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{archived}}, &o)
+	o.only(t, "mail_archive again", archived)
+	if len(o.Moved) != 1 || o.Moved[0].From != archived || o.Moved[0].To != archived {
+		t.Fatalf("mail_archive of an archived message = %+v, want its id unchanged", o)
+	}
+	if found, _ := imapLookup(t, "Archives", id); !found {
+		t.Fatal("the archived message left Archives")
+	}
+}
+
+// archiveEnabledScript turns archiving on or off for identity id1 and
+// returns whether it was on.
+const archiveEnabledScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const id = MailServices.accounts.getIdentity("id1");
+const before = id.archiveEnabled;
+id.archiveEnabled = %s;
+return before;
+`
+
+// archiveGranularityScript sets identity id1's archive granularity (0 one
+// folder, 1 a folder per year, 2 per month) and returns the one it had.
+const archiveGranularityScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const id = MailServices.accounts.getIdentity("id1");
+const before = id.archiveGranularity;
+id.archiveGranularity = %d;
+return before;
+`
+
+// TestE2EArchiveNewYearFolder archives into a year folder that Thunderbird
+// makes at the archive, in an account with an excluded folder. Such a new
+// folder is hidden until the user checks the excluded folders in the
+// options, so the message is failed with refused and mayHaveCompleted, and
+// no new id into it is given; on the server it is in the year folder.
+func TestE2EArchiveNewYearFolder(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	delete(orig, "knownFolders")
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E yearly " + stamp
+	msgID := "yearly-" + stamp + "@e2e.test"
+	year := strconv.Itoa(time.Now().UTC().Year())
+
+	run, done := imapSession(t)
+	for _, c := range []string{`CREATE "E2E Hidden"`, `SUBSCRIBE "E2E Hidden"`} {
+		if lines, ok := run(c); !ok {
+			done()
+			t.Fatalf("imap %s: %v", c, lines)
+		}
+	}
+	done()
+	yearBox := "" // the server's name for Archives/<year>, once it exists
+	var granularity int
+	marionette(t, fmt.Sprintf(archiveGranularityScript, 1), &granularity)
+	t.Cleanup(func() {
+		var ignored int
+		marionette(t, fmt.Sprintf(archiveGranularityScript, granularity), &ignored)
+		addonSettings(t, orig)
+		run, done := imapSession(t)
+		defer done()
+		for _, name := range []string{"E2E Hidden", yearBox} {
+			if name == "" {
+				continue
+			}
+			run(`UNSUBSCRIBE %q`, name)
+			run(`DELETE %q`, name)
+		}
+		for _, p := range []string{"/Archives/" + year, "/E2E Hidden"} {
+			imapFolders(t, "drop", p, "")
+		}
+	})
+	imapFolders(t, "discover", "/E2E Hidden", "")
+
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{map[string]any{"accountId": "account1", "path": "/E2E Hidden"}}
+	addonSettings(t, next)
+	settingsUntil(t, "folders seen", func(s map[string]any) bool {
+		k, _ := s["knownFolders"].(map[string]any)
+		seen, _ := k["account1"].(map[string]any)
+		_, ok := seen["/Archives"]
+		return ok
+	})
+
+	msg := "From: Sender <sender@example.org>\r\nTo: test@localhost\r\nSubject: " + subj + "\r\n" +
+		"Message-ID: <" + msgID + ">\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nArchive me by year.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"subject": subj}, subj)
+	one := find(res, subj)
+
+	text, isErr := call(t, cs, "mail_archive", map[string]any{"ids": []string{one.ID}})
+	var o struct {
+		Done   []string `json:"done"`
+		Failed []struct {
+			ID               string `json:"id"`
+			Code             string `json:"code"`
+			MayHaveCompleted bool   `json:"mayHaveCompleted"`
+		} `json:"failed"`
+		Moved []movedID `json:"moved"`
+	}
+	if isErr || json.Unmarshal([]byte(text), &o) != nil {
+		t.Fatalf("mail_archive: %v %s", isErr, text)
+	}
+	if len(o.Done) != 0 || len(o.Moved) != 0 || len(o.Failed) != 1 || o.Failed[0].ID != one.ID || o.Failed[0].Code != "refused" || !o.Failed[0].MayHaveCompleted {
+		t.Fatalf("mail_archive into a new year folder = %s, want refused with mayHaveCompleted and no new id", text)
+	}
+	yearBox = serverMailbox(t, year)
+	imapWait(t, "archive", yearBox, msgID, func(found bool, _ string) bool { return found })
+	t.Logf("archived into Archives/%s, reported as %s", year, text)
+}
+
+// TestE2ETags lists Thunderbird's tags: a new profile has the five default
+// tags, and the one TestE2EOrganise adds by label is among them.
+func TestE2ETags(t *testing.T) {
+	cs := httpSession(t)
+	var out struct {
+		Tags []struct {
+			Key   string  `json:"key"`
+			Label string  `json:"label"`
+			Color *string `json:"color"`
+		} `json:"tags"`
+	}
+	callOK(t, cs, "mail_tags", map[string]any{}, &out)
+	found := false
+	for _, tg := range out.Tags {
+		if tg.Key == "$label1" {
+			found = true
+			if tg.Label != "Important" || tg.Color == nil || !regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`).MatchString(*tg.Color) {
+				t.Fatalf("$label1 = %+v", tg)
+			}
+		}
+	}
+	if !found || len(out.Tags) < 5 {
+		t.Fatalf("mail_tags = %+v", out)
 	}
 }
 
@@ -815,7 +1448,11 @@ func marionette(t *testing.T, script string, out any) {
 	cmd.Stdin = strings.NewReader(script)
 	b, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("marionette: %v: %s", err, b)
+		var stderr []byte
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = ee.Stderr
+		}
+		t.Fatalf("marionette: %v: %s%s", err, b, stderr)
 	}
 	if err := json.Unmarshal(b, out); err != nil {
 		t.Fatalf("marionette result %q: %v", b, err)
@@ -1009,10 +1646,18 @@ func TestE2EDraftAndSend(t *testing.T) {
 		return *d.DraftID, mid
 	}
 
-	// A new draft (messages.saveMessage, found again by its X-MFT-Draft header).
-	_, mid := draftIn(map[string]any{"account": "account1", "kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
-	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") {
+	// A new draft (messages.import into the account's Drafts, as replies),
+	// readable through the id it returns.
+	newID, mid := draftIn(map[string]any{"account": "account1", "kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
+	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") || !strings.Contains(h, "X-Identity-Key: id1") || strings.Contains(h, "In-Reply-To:") {
 		t.Fatalf("new draft header:\n%s", h)
+	}
+	var newRead struct {
+		Text string `json:"text"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": newID}, &newRead)
+	if !strings.Contains(newRead.Text, "Draft body") {
+		t.Fatalf("new draft text = %q", newRead.Text)
 	}
 
 	// A reply (messages.import): threaded, and readable through its id.
@@ -1637,6 +2282,165 @@ func TestE2EInjectionDefaults(t *testing.T) {
 	t.Logf("GreenMail SMTP received %d messages before and after; users %v", smtpAfter, usersAfter)
 }
 
+// contactsSeedScript adds (SEED true) or removes (SEED false) the contacts
+// TestE2EContacts looks up: in the Personal Address Book, Quinn with two
+// addresses, Rae, and the mailing list "Econtact board" holding both; in
+// Collected Addresses, a second copy of Quinn with only one of his
+// addresses in another case, as Thunderbird collects it. It returns the two books'
+// names and the number of seeded cards and lists it found afterwards.
+const contactsSeedScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const { VCardUtils } = ChromeUtils.importESModule("resource:///modules/VCardUtils.sys.mjs");
+  const seed = SEED;
+  const pab = MailServices.ab.getDirectory("jsaddrbook://abook.sqlite");
+  const history = MailServices.ab.getDirectory("jsaddrbook://history.sqlite");
+  const card = (fn, emails) =>
+    VCardUtils.vCardToAbCard(["BEGIN:VCARD", "VERSION:4.0", "FN:" + fn, ...emails.map((e) => "EMAIL:" + e), "END:VCARD", ""].join("\r\n"));
+  const ours = (dir) => dir.childCards.filter((c) => !c.isMailList && /e2econtact\.test/.test(c.primaryEmail));
+  const lists = () => pab.childNodes.filter((l) => l.dirName === "Econtact board");
+  for (const l of lists()) pab.deleteDirectory(l);
+  for (const dir of [pab, history]) {
+    const old = ours(dir);
+    if (old.length) dir.deleteCards(old);
+  }
+  if (seed) {
+    const quinn = pab.addCard(card("Quinn Econtact", ["quinn@e2econtact.test", "quinn@work.e2econtact.test"]));
+    const rae = pab.addCard(card("Rae Econtact", ["rae@e2econtact.test"]));
+    history.addCard(card("Quinn E.", ["QUINN@e2econtact.test"]));
+    const ml = Cc["@mozilla.org/addressbook/directoryproperty;1"].createInstance(Ci.nsIAbDirectory);
+    ml.isMailList = true;
+    ml.dirName = "Econtact board";
+    ml.listNickName = "ecboard";
+    ml.description = "";
+    const list = pab.addMailList(ml);
+    list.addCard(quinn);
+    list.addCard(rae);
+  }
+  return { pab: pab.dirName, history: history.dirName, cards: ours(pab).length + ours(history).length, lists: lists().length };
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+type contactsSeed struct {
+	PAB     string `json:"pab"`
+	History string `json:"history"`
+	Cards   int    `json:"cards"`
+	Lists   int    `json:"lists"`
+	Error   string `json:"error"`
+}
+
+type contactResult struct {
+	Contacts []struct {
+		Name   string   `json:"name"`
+		Emails []string `json:"emails"`
+		Books  []string `json:"books"`
+	} `json:"contacts"`
+	Lists []struct {
+		Name     string `json:"name"`
+		NickName string `json:"nickName"`
+		Book     string `json:"book"`
+		Members  []struct {
+			Name   string   `json:"name"`
+			Emails []string `json:"emails"`
+		} `json:"members"`
+		MembersTruncated bool `json:"membersTruncated"`
+	} `json:"lists"`
+	Truncated bool `json:"truncated"`
+}
+
+// TestE2EContacts looks people up with mail_contacts in Thunderbird's own
+// address books: a person in the Personal Address Book and in Collected
+// Addresses (holding one of his addresses) comes back once with both book
+// names, truncated says when more people matched than the limit, book
+// limits the search to one book, include_lists returns the mailing list
+// with its members, also for a quoted phrase, and an account is refused,
+// whether it is enabled or not.
+func TestE2EContacts(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	origTools := toolNames(t, cs)
+	t.Cleanup(func() {
+		var ignored contactsSeed
+		marionette(t, strings.Replace(contactsSeedScript, "SEED", "false", 1), &ignored)
+		addonSettings(t, orig)
+		waitTools(t, cs, origTools)
+	})
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	groups := map[string]any{}
+	for k, v := range orig["groups"].(map[string]any) {
+		groups[k] = v
+	}
+	groups["contacts"] = true
+	next["groups"] = groups
+	addonSettings(t, next)
+	waitTools(t, cs, append(append([]string{}, origTools...), contactsTools...))
+
+	var seed contactsSeed
+	marionette(t, strings.Replace(contactsSeedScript, "SEED", "true", 1), &seed)
+	if seed.Error != "" || seed.Cards != 3 || seed.Lists != 1 {
+		t.Fatalf("seeding contacts: %+v", seed)
+	}
+
+	var r contactResult
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact"}, &r)
+	if len(r.Contacts) != 2 || r.Truncated || r.Lists != nil {
+		t.Fatalf("mail_contacts econtact: %+v", r)
+	}
+	quinn, rae := r.Contacts[0], r.Contacts[1]
+	if quinn.Name != "Quinn Econtact" || strings.Join(quinn.Books, "|") != seed.PAB+"|"+seed.History || len(quinn.Emails) != 2 {
+		t.Fatalf("Quinn: %+v, want one entry in %q and %q", quinn, seed.PAB, seed.History)
+	}
+	if rae.Name != "Rae Econtact" || strings.Join(rae.Books, "|") != seed.PAB {
+		t.Fatalf("Rae: %+v", rae)
+	}
+
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact", "limit": 1}, &r)
+	if len(r.Contacts) != 1 || !r.Truncated {
+		t.Fatalf("mail_contacts limit 1: %+v", r)
+	}
+
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact", "book": seed.History}, &r)
+	if len(r.Contacts) != 1 || r.Contacts[0].Name != "Quinn E." || strings.Join(r.Contacts[0].Books, "|") != seed.History {
+		t.Fatalf("mail_contacts book %q: %+v", seed.History, r)
+	}
+
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact board", "include_lists": true}, &r)
+	if len(r.Contacts) != 0 || len(r.Lists) != 1 {
+		t.Fatalf("mail_contacts include_lists: %+v", r)
+	}
+	l := r.Lists[0]
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": `"Econtact board"`, "include_lists": true}, &r)
+	if len(r.Contacts) != 0 || len(r.Lists) != 1 || r.Lists[0].Name != "Econtact board" {
+		t.Fatalf("mail_contacts quoted phrase with include_lists: %+v", r)
+	}
+	var members []string
+	for _, m := range l.Members {
+		members = append(members, m.Name)
+	}
+	sort.Strings(members)
+	if l.Name != "Econtact board" || l.NickName != "ecboard" || l.Book != seed.PAB || l.MembersTruncated ||
+		strings.Join(members, "|") != "Quinn Econtact|Rae Econtact" {
+		t.Fatalf("mailing list: %+v", l)
+	}
+
+	for _, account := range []string{"account1", "account99", ""} {
+		if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "account": account}); !isErr || !strings.HasPrefix(text, "invalid_argument:") {
+			t.Fatalf("mail_contacts with account %q: %v %s", account, isErr, text)
+		}
+	}
+	if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "book": "No such book"}); !isErr || !strings.HasPrefix(text, "not_found:") {
+		t.Fatalf("mail_contacts unknown book: %v %s", isErr, text)
+	}
+}
+
 // TestE2EConnectRestart checks that one connect-mode session survives
 // sigImagePNG is a 1x1 PNG the signature image test serves.
 const sigImagePNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
@@ -1878,6 +2682,352 @@ func TestE2EComposeHTMLReply(t *testing.T) {
 	t.Logf("compose window: cells %q, list %q, border %q", got.Cells, got.LI, got.Border)
 }
 
+// aliasIdentityScript adds ("add") a second identity, alias@localhost, to
+// account1, with id1's Drafts and Sent folders, and returns its key; with
+// "remove" it removes it again and returns "".
+const aliasIdentityScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const acct = MailServices.accounts.getAccount("account1");
+const old = [...acct.identities].find((i) => i.email === "alias@localhost");
+if (%q === "remove") {
+  if (old) acct.removeIdentity(old);
+  return "";
+}
+if (old) return old.key;
+const id = MailServices.accounts.createIdentity();
+id.email = "alias@localhost";
+id.fullName = "Alias User";
+id.smtpServerKey = "smtp1";
+id.draftsFolderURI = "imap://test@127.0.0.1/Drafts";
+id.fccFolderURI = "imap://test@127.0.0.1/Sent";
+acct.addIdentity(id);
+return id.key;
+`
+
+// composeIdentityScript finds the compose window with subject WANT, reads
+// its identity, To recipients and attachment names, and closes it.
+const composeIdentityScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let win = null;
+  for (let i = 0; i < 40 && !win; i++) {
+    win = [...Services.wm.getEnumerator("msgcompose")].find((w) =>
+      w.document.getElementById("msgSubject").value === WANT && w.gCurrentIdentity);
+    if (!win) await sleep(250);
+  }
+  if (!win) return { error: "no compose window with subject " + WANT };
+  await sleep(500);
+  const out = {
+    identity: win.gCurrentIdentity.key,
+    to: win.GetComposeDetails().to,
+    attachments: [...win.document.getElementById("attachmentBucket").itemChildren].map((i) => i.attachment.name),
+  };
+  win.close();
+  return out;
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// composeIdentity is one compose window as composeIdentityScript reads it.
+type composeIdentity struct {
+	Identity    string   `json:"identity"`
+	To          string   `json:"to"`
+	Attachments []string `json:"attachments"`
+	Error       string   `json:"error"`
+}
+
+func readComposeIdentity(t *testing.T, subject string) composeIdentity {
+	t.Helper()
+	var got composeIdentity
+	marionette(t, strings.Replace(composeIdentityScript, "WANT", fmt.Sprintf("%q", subject), -1), &got)
+	if got.Error != "" {
+		t.Fatalf("reading the compose window: %s", got.Error)
+	}
+	return got
+}
+
+// TestE2EComposeIdentity gives account1 a second identity, alias@localhost,
+// and delivers a message from a mailing list addressed to it. A reply and
+// a forward in a compose window and a reply draft go out from the alias;
+// from picks the alias for a new draft; reply_list answers the list from
+// its List-Post header; and forward_as attachment attaches the whole
+// original. mail_compose returns the ids of the window it opened.
+func TestE2EComposeIdentity(t *testing.T) {
+	cs := httpSession(t)
+	var alias string
+	marionette(t, fmt.Sprintf(aliasIdentityScript, "add"), &alias)
+	t.Cleanup(func() {
+		var ignored string
+		marionette(t, fmt.Sprintf(aliasIdentityScript, "remove"), &ignored)
+	})
+	if alias == "" || alias == "id1" {
+		t.Fatalf("alias identity key %q", alias)
+	}
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E to the alias " + stamp
+	msg := "From: Hosting List <hosting-owner@example.org>\r\nTo: Alias User <alias@localhost>\r\n" +
+		"Subject: " + subj + "\r\nMessage-ID: <alias-" + stamp + "@e2e.test>\r\n" +
+		"List-Post: <mailto:hosting@lists.example.org>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nA list message for the alias.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "hosting-owner@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"subject": subj}, subj)
+	orig := find(res, subj)
+
+	type opened struct {
+		Opened   bool `json:"opened"`
+		TabID    *int `json:"tabId"`
+		WindowID *int `json:"windowId"`
+	}
+	var o opened
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": orig.ID, "body": "Reply from the alias."}, &o)
+	if !o.Opened || o.TabID == nil || o.WindowID == nil {
+		t.Fatalf("mail_compose reply = %+v, want opened with a tab and window id", o)
+	}
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != alias || !strings.Contains(w.To, "hosting-owner@example.org") {
+		t.Fatalf("reply window: identity %q to %q, want %q to the sender", w.Identity, w.To, alias)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply_list", "id": orig.ID, "body": "To the list."}, &o)
+	if w := readComposeIdentity(t, "Re: "+subj); !strings.Contains(w.To, "hosting@lists.example.org") {
+		t.Fatalf("reply_list window To %q, want the list", w.To)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "forward", "id": orig.ID, "forward_as": "attachment", "to": []string{"someone@example.org"}, "body": "Have a look."}, &o)
+	if w := readComposeIdentity(t, "Fwd: "+subj); w.Identity != alias || len(w.Attachments) != 1 || !strings.HasSuffix(w.Attachments[0], ".eml") {
+		t.Fatalf("forward window: identity %q attachments %q, want %q with the original attached", w.Identity, w.Attachments, alias)
+	}
+	t.Logf("compose windows from %s; window ids %d/%d", alias, *o.TabID, *o.WindowID)
+
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Logf("Thunderbird %s: no mail_draft, compose windows checked only", version)
+		return
+	}
+	type drafted struct {
+		DraftID *string `json:"draftId"`
+	}
+	draft := func(args map[string]any) (string, string) {
+		t.Helper()
+		var d drafted
+		callOK(t, cs, "mail_draft", args, &d)
+		if d.DraftID == nil {
+			t.Fatalf("mail_draft %v: no draft id", args)
+		}
+		_, mid := draftMessageID(t, *d.DraftID)
+		imapWait(t, "draft", "Drafts", mid, func(found bool, _ string) bool { return found })
+		return *d.DraftID, imapHeader(t, "Drafts", mid)
+	}
+	fromAlias := regexp.MustCompile(`(?m)^From: .*alias@localhost`)
+	_, h := draft(map[string]any{"kind": "reply", "id": orig.ID, "body": "Reply draft from the alias."})
+	if !strings.Contains(h, "X-Identity-Key: "+alias) || !fromAlias.MatchString(h) {
+		t.Fatalf("reply draft is not from the alias:\n%s", h)
+	}
+	_, h = draft(map[string]any{"kind": "reply_list", "id": orig.ID, "body": "Draft to the list."})
+	if !regexp.MustCompile(`(?m)^To: .*hosting@lists\.example\.org`).MatchString(h) || !strings.Contains(h, "In-Reply-To: <alias-"+stamp+"@e2e.test>") {
+		t.Fatalf("reply_list draft:\n%s", h)
+	}
+	_, h = draft(map[string]any{"account": "account1", "kind": "new", "from": "alias@localhost", "to": []string{"someone@example.org"}, "subject": "E2E new from the alias " + stamp, "body": "New draft."})
+	if !fromAlias.MatchString(h) {
+		t.Fatalf("new draft with from is not from the alias:\n%s", h)
+	}
+	id, _ := draft(map[string]any{"kind": "forward", "id": orig.ID, "forward_as": "attachment", "to": []string{"someone@example.org"}, "body": "Forwarded whole."})
+	var fwd struct {
+		Attachments []struct {
+			Name        string `json:"name"`
+			ContentType string `json:"contentType"`
+		} `json:"attachments"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": id}, &fwd)
+	if len(fwd.Attachments) != 1 || fwd.Attachments[0].Name != subj+".eml" || fwd.Attachments[0].ContentType != "message/rfc822" {
+		t.Fatalf("forward_as attachment draft attachments = %+v", fwd.Attachments)
+	}
+	t.Logf("drafts from %s: reply, reply_list, new with from, forward as attachment %+v", alias, fwd.Attachments)
+}
+
+// TestE2EComposeOtherAccount enables account3 beside account1 and delivers
+// to account1's INBOX a message addressed to account3's identity
+// (other@localhost). A reply window goes out from that identity, as
+// Thunderbird picks it. account3 has no Drafts folder and Local Folders is
+// not enabled, so a reply draft is refused rather than saved in account1's
+// Drafts on the same server. Naming account account3 with its identity is
+// no move of mail and is not refused for that; naming account1 writes the
+// reply from account1's identity into account1's Drafts.
+func TestE2EComposeOtherAccount(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, orig) })
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["accounts"] = map[string]any{"account1": true, "account3": true}
+	addonSettings(t, next)
+
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E to the other account " + stamp
+	msg := "From: Sender <sender@example.org>\r\nTo: Other User <other@localhost>\r\n" +
+		"Subject: " + subj + "\r\nMessage-ID: <other-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nFor the other account.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"account": "account1", "subject": subj}, subj)
+	o := find(res, subj)
+
+	var opened struct {
+		Opened bool `json:"opened"`
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "body": "From the other account."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id2" || !strings.Contains(w.To, "sender@example.org") {
+		t.Fatalf("reply window: identity %q to %q, want id2 to the sender", w.Identity, w.To)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "account": "account3", "from": "other@localhost", "body": "Named account3."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id2" {
+		t.Fatalf("reply window with account account3: identity %q, want id2", w.Identity)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "account": "account1", "body": "Named account1."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id1" {
+		t.Fatalf("reply window with account account1: identity %q, want id1", w.Identity)
+	}
+
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Logf("Thunderbird %s: no mail_draft, compose windows checked only", version)
+		return
+	}
+	text, isErr := call(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "body": "Must not reach account1's Drafts."})
+	if !isErr || !strings.Contains(text, "no Drafts folder of its own") {
+		t.Fatalf("reply draft from account3's identity: %v %s, want refused for no Drafts folder", isErr, text)
+	}
+	text, isErr = call(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "account": "account3", "from": "other@localhost", "body": "Must not reach account1's Drafts."})
+	if !isErr || !strings.Contains(text, "no Drafts folder of its own") {
+		t.Fatalf("reply draft with account account3: %v %s, want refused for no Drafts folder", isErr, text)
+	}
+	for _, at := range greenmailFind(t, "Re: "+subj) {
+		t.Fatalf("a reply draft was saved in %s", at)
+	}
+	var d struct {
+		DraftID *string `json:"draftId"`
+	}
+	callOK(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "account": "account1", "body": "From account1."}, &d)
+	if d.DraftID == nil {
+		t.Fatal("reply draft with account account1: no draft id")
+	}
+	_, mid := draftMessageID(t, *d.DraftID)
+	imapWait(t, "draft", "Drafts", mid, func(found bool, _ string) bool { return found })
+	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "X-Identity-Key: id1") {
+		t.Fatalf("reply draft with account account1 is not from id1:\n%s", h)
+	}
+	t.Logf("reply windows from id2 and, with account account1, id1; drafts from account3 refused: %s", text)
+}
+
+// TestE2EForwardPlaceholder delivers a message whose attachment is a
+// FileLink placeholder (an X-Mozilla-Cloud-Part header): Thunderbird 153
+// lists it with type cloudFile, so a forward draft is refused, and one with
+// forward_as attachment, which forwards the message whole, is saved. A
+// second message holds a detached placeholder, which Thunderbird 153.6
+// lists as normal: its headers make the forward refused all the same.
+func TestE2EForwardPlaceholder(t *testing.T) {
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Skipf("Thunderbird %s has no mail_draft", version)
+	}
+	cs := httpSession(t)
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E FileLink " + stamp
+	msg := "From: Sender <sender@example.org>\r\nTo: test@localhost\r\nSubject: " + subj + "\r\n" +
+		"Message-ID: <filelink-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
+		"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nThe report is linked.\r\n" +
+		"--b1\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\n" +
+		"X-Mozilla-Cloud-Part: cloudFile; url=https://files.example.org/report.pdf; name=report.pdf\r\n\r\nplaceholder\r\n--b1--\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"subject": subj}, subj)
+	orig := find(res, subj)
+	text, isErr := call(t, cs, "mail_draft", map[string]any{"kind": "forward", "id": orig.ID, "to": []string{"someone@example.org"}, "body": "FYI"})
+	const want = "refused: The attachment report.pdf is a FileLink, stored online, so the message holds only a placeholder for it and it cannot be forwarded as a file. Forward the whole message with forward_as attachment instead."
+	if !isErr || text != want {
+		t.Fatalf("forward of a FileLink: %v %q, want %q", isErr, text, want)
+	}
+	var d struct {
+		DraftID *string `json:"draftId"`
+	}
+	callOK(t, cs, "mail_draft", map[string]any{"kind": "forward", "id": orig.ID, "forward_as": "attachment", "to": []string{"someone@example.org"}, "body": "FYI"}, &d)
+	if d.DraftID == nil {
+		t.Fatal("forward_as attachment: no draft id")
+	}
+	t.Logf("FileLink forward refused: %s", text)
+
+	dsubj := "E2E detached " + stamp
+	msg = "From: Sender <sender@example.org>\r\nTo: test@localhost\r\nSubject: " + dsubj + "\r\n" +
+		"Message-ID: <detached-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
+		"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nThe report was detached.\r\n" +
+		"--b1\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\n" +
+		"X-Mozilla-Altered: AttachmentDetached; date=\"Mon Nov 02 10:00:00 2026\"\r\nX-Mozilla-External-Attachment-URL: file:///tmp/report.pdf\r\n\r\n" +
+		"You detached an attachment from this message.\r\n--b1--\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ = searchUntil(t, cs, map[string]any{"subject": dsubj}, dsubj)
+	det := find(res, dsubj)
+	text, isErr = call(t, cs, "mail_draft", map[string]any{"kind": "forward", "id": det.ID, "to": []string{"someone@example.org"}, "body": "FYI"})
+	const wantDetached = "refused: The attachment report.pdf is detached and saved outside the message, so the message holds only a placeholder for it and it cannot be forwarded as a file. Forward the whole message with forward_as attachment instead."
+	if !isErr || text != wantDetached {
+		t.Fatalf("forward of a detached placeholder: %v %q, want %q", isErr, text, wantDetached)
+	}
+	t.Logf("detached forward refused: %s", text)
+}
+
+// offlineScript sets Thunderbird's Work Offline state (Services.io.offline)
+// to the given value and returns the one it had.
+const offlineScript = `
+const before = Services.io.offline;
+Services.io.manageOfflineStatus = false;
+Services.io.offline = %v;
+return before;
+`
+
+// TestE2ESendOffline grants messages.send and sends while Thunderbird is
+// set to Work Offline: mail_send says Thunderbird is offline, and nothing
+// reaches GreenMail.
+func TestE2ESendOffline(t *testing.T) {
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Skipf("Thunderbird %s has no mail_send", version)
+	}
+	cs := httpSession(t)
+	had := sendPermission(t, "get")
+	if !had && !sendPermission(t, "add") {
+		t.Fatal("granting messages.send: not granted")
+	}
+	t.Cleanup(func() {
+		if !had {
+			sendPermission(t, "remove")
+		}
+	})
+	deadline := time.Now().Add(30 * time.Second)
+	for !contains(toolNames(t, cs), "mail_send") {
+		if time.Now().After(deadline) {
+			t.Fatalf("mail_send not listed after the grant: %v", toolNames(t, cs))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	var wasOffline bool
+	marionette(t, fmt.Sprintf(offlineScript, true), &wasOffline)
+	t.Cleanup(func() {
+		var ignored bool
+		marionette(t, fmt.Sprintf(offlineScript, wasOffline), &ignored)
+	})
+	subj := "E2E offline send " + time.Now().Format("150405.000")
+	text, isErr := call(t, cs, "mail_send", map[string]any{"account": "account1", "to": []string{"test@localhost"}, "subject": subj, "body": "Must not be sent."})
+	const want = "thunderbird_error: Thunderbird is offline, so the message was not sent. Turn off Work Offline in Thunderbird and try again, or save it with mail_draft."
+	if !isErr || text != want {
+		t.Fatalf("mail_send offline: %v %q, want %q", isErr, text, want)
+	}
+	time.Sleep(3 * time.Second)
+	if where := greenmailFind(t, subj); len(where) != 0 {
+		t.Fatalf("an offline send reached GreenMail: %v", where)
+	}
+	t.Logf("offline send refused: %s", text)
+}
+
 // Thunderbird restarts: a plain restart (new token, R33), a removed
 // connection file, and a new port; and a quick restart the proxy's 5 s
 // poll may not notice. A clean stop clears the port and token in the file.
@@ -1958,4 +3108,405 @@ func TestE2EConnectRestart(t *testing.T) {
 		t.Fatal("want a new token")
 	}
 	restart("quick restart, same file, no call while closed", false, func(connFile, string) {})
+}
+
+// imapFoldersScript changes account1's folders in Thunderbird and returns
+// every folder path under its root. "rename" renames folder a to b,
+// "move" moves folder a into folder b, both as the folder pane does;
+// "discover" asks the server for its folders, as Thunderbird does when it
+// connects, and waits until folder a is there and folder b is not ("" for
+// either means no wait); "drop" removes folder a as discovery does when the
+// server no longer has it, which a discovery started from here does not
+// get to within the test's time; any other action only lists them.
+const imapFoldersScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+  const root = MailServices.accounts.getAccount("account1").incomingServer.rootFolder;
+  const pathOf = (f) => decodeURIComponent(f.URI.slice(root.URI.length));
+  const all = () => root.descendants.map(pathOf);
+  const has = (p) => all().includes(p);
+  const wait = async (ok) => {
+    for (let i = 0; i < 250 && !ok(); i++) await new Promise((r) => setTimeout(r, 100));
+    if (!ok()) throw new Error("timed out; folders now " + JSON.stringify(all()));
+  };
+  const [action, a, b] = %s;
+  const byPath = (p) => root.descendants.find((f) => pathOf(f) === p);
+  if (action === "rename") {
+    byPath(a).rename(b.split("/").pop(), null);
+    await wait(() => has(b) && !has(a));
+  } else if (action === "move") {
+    const src = byPath(a);
+    MailServices.copy.copyFolder(src, byPath(b), true, null, null);
+    await wait(() => has(b + "/" + src.name) && !has(a));
+  } else if (action === "drop") {
+    // What folder discovery does with a local folder the server no longer
+    // has (nsImapIncomingServer::DeleteNonVerifiedFolders).
+    const f = byPath(a);
+    if (f) f.parent.propagateDelete(f, true);
+    await wait(() => !has(a));
+  } else if (action === "discover") {
+    MailServices.imap.discoverAllFolders(root, null, null);
+    const done = () => (a === "" || has(a)) && (b === "" || !has(b));
+    for (let j = 0; j < 50 && !done(); j++) await new Promise((r) => setTimeout(r, 100));
+  }
+  return all();
+})().then(resolve, (e) => resolve(["error: " + e]));
+`
+
+// imapFolders runs imapFoldersScript; "discover" is repeated for up to a
+// minute.
+func imapFolders(t *testing.T, action, a, b string) []string {
+	t.Helper()
+	if action == "discover" {
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			got := imapFoldersOnce(t, action, a, b)
+			if (a == "" || contains(got, a)) && (b == "" || !contains(got, b)) {
+				return got
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("discover: want %q and not %q, Thunderbird has %v", a, b, got)
+			}
+		}
+	}
+	return imapFoldersOnce(t, action, a, b)
+}
+
+func imapFoldersOnce(t *testing.T, action, a, b string) []string {
+	t.Helper()
+	arg, _ := json.Marshal([]string{action, a, b})
+	cmd := exec.Command(os.Getenv("MFT_E2E_TB"), "marionette", "-")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(imapFoldersScript, arg))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	b2, err := cmd.Output()
+	var out []string
+	if err != nil || json.Unmarshal(b2, &out) != nil {
+		t.Fatalf("%s %q %q: marionette: %v: %s %s", action, a, b, err, b2, stderr.String())
+	}
+	for _, p := range out {
+		if strings.HasPrefix(p, "error: ") {
+			t.Fatalf("%s %q %q: %s", action, a, b, p)
+		}
+	}
+	return out
+}
+
+// serverMailbox returns GreenMail's name for the mailbox whose last level
+// is leaf (the server's hierarchy separator may not be "/").
+func serverMailbox(t *testing.T, leaf string) string {
+	t.Helper()
+	run, done := imapSession(t)
+	defer done()
+	lines, ok := run(`LIST "" "*"`)
+	if !ok {
+		t.Fatalf("imap list failed: %v", lines)
+	}
+	for _, l := range lines {
+		if strings.HasSuffix(l, `"`+leaf+`"`) || strings.HasSuffix(l, `.`+leaf+`"`) || strings.HasSuffix(l, `/`+leaf+`"`) {
+			i := strings.LastIndex(l[:len(l)-1], ` "`)
+			return l[i+2 : len(l)-1]
+		}
+	}
+	t.Fatalf("no mailbox %q on the server: %v", leaf, lines)
+	return ""
+}
+
+// folderHidden checks that mail_folders leaves path out of account1 and
+// that mail_search in it is refused as excluded.
+func folderHidden(t *testing.T, cs *mcp.ClientSession, path string) {
+	t.Helper()
+	var folders struct {
+		Folders []struct{ Account, Path string } `json:"folders"`
+	}
+	callOK(t, cs, "mail_folders", map[string]any{"account": "account1"}, &folders)
+	inbox := false
+	for _, f := range folders.Folders {
+		if f.Path == path {
+			t.Fatalf("mail_folders lists the excluded folder %s: %+v", path, folders)
+		}
+		inbox = inbox || f.Path == "/INBOX"
+	}
+	if !inbox {
+		t.Fatalf("mail_folders lost the inbox: %+v", folders)
+	}
+	text, isErr := call(t, cs, "mail_search", map[string]any{"account": "account1", "folder": path})
+	if !isErr || !strings.HasPrefix(text, "excluded:") {
+		t.Fatalf("mail_search in %s: %v %s", path, isErr, text)
+	}
+}
+
+// settingsUntil polls the add-on's settings until ok accepts them.
+func settingsUntil(t *testing.T, what string, ok func(map[string]any) bool) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		s := addonSettings(t, nil)
+		if ok(s) {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: settings now %v", what, s)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// excludedPaths gives the excluded folders in settings s as account:path.
+func excludedPaths(s map[string]any) []string {
+	var out []string
+	list, _ := s["excludedFolders"].([]any)
+	for _, e := range list {
+		if m, ok := e.(map[string]any); ok {
+			out = append(out, fmt.Sprintf("%v:%v", m["accountId"], m["path"]))
+		}
+	}
+	return out
+}
+
+// TestE2EExcludedFolderFollows excludes an IMAP folder and checks that it
+// stays hidden from AI apps when it is renamed in Thunderbird, moved in
+// Thunderbird, and renamed on the server as webmail does, which reaches
+// Thunderbird as a new folder and a deleted one; that last case is also
+// flagged in the toolbar.
+func TestE2EExcludedFolderFollows(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	delete(orig, "knownFolders")
+
+	run, done := imapSession(t)
+	for _, c := range []string{`CREATE "E2E Private"`, `SUBSCRIBE "E2E Private"`} {
+		if lines, ok := run(c); !ok {
+			done()
+			t.Fatalf("imap %s: %v", c, lines)
+		}
+	}
+	done()
+	t.Cleanup(func() {
+		run, done := imapSession(t)
+		defer done()
+		lines, _ := run(`LIST "" "*"`)
+		for _, l := range lines {
+			if strings.Contains(l, "E2E ") {
+				i := strings.LastIndex(l[:len(l)-1], ` "`)
+				name := l[i+2 : len(l)-1]
+				run(`UNSUBSCRIBE %q`, name)
+				run(`DELETE %q`, name)
+			}
+		}
+		for _, p := range []string{"/Sorted/E2E Webmail", "/Sorted/E2E Renamed", "/Sorted/E2E Private", "/E2E Renamed", "/E2E Private"} {
+			imapFolders(t, "drop", p, "")
+		}
+		addonSettings(t, orig)
+		// The toolbar goes back to connected once nothing is missing.
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			st := toolbarState(t)
+			if st.Title == "MCP for Thunderbird: connected" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("toolbar after cleanup = %+v", st)
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	})
+	imapFolders(t, "discover", "/E2E Private", "")
+
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{map[string]any{"accountId": "account1", "path": "/E2E Private"}}
+	addonSettings(t, next)
+	settingsUntil(t, "folders seen", func(s map[string]any) bool {
+		k, _ := s["knownFolders"].(map[string]any)
+		seen, _ := k["account1"].(map[string]any)
+		_, ok := seen["/INBOX"]
+		return ok
+	})
+	folderHidden(t, cs, "/E2E Private")
+
+	// Renamed in Thunderbird: the exclusion moves to the new name.
+	imapFolders(t, "rename", "/E2E Private", "/E2E Renamed")
+	settingsUntil(t, "rename followed", func(s map[string]any) bool {
+		return strings.Join(excludedPaths(s), ",") == "account1:/E2E Renamed"
+	})
+	folderHidden(t, cs, "/E2E Renamed")
+
+	// Moved in Thunderbird into another folder: it follows again.
+	imapFolders(t, "move", "/E2E Renamed", "/Sorted")
+	settingsUntil(t, "move followed", func(s map[string]any) bool {
+		return strings.Join(excludedPaths(s), ",") == "account1:/Sorted/E2E Renamed"
+	})
+	folderHidden(t, cs, "/Sorted/E2E Renamed")
+
+	// Renamed on the server, as webmail does: Thunderbird sees a new folder
+	// and, later, the excluded one gone. The new one stays hidden while the
+	// old one is still listed, past the half minute an earlier version
+	// waited before showing a new folder, and after the old one goes; the
+	// toolbar first says a new folder is hidden, then that an excluded
+	// folder is missing. The new name stays under Sorted: GreenMail keeps a
+	// renamed mailbox under its parent whatever name it is given.
+	old := serverMailbox(t, "E2E Renamed")
+	renamed := strings.TrimSuffix(old, "E2E Renamed") + "E2E Webmail"
+	run, done = imapSession(t)
+	if lines, ok := run("RENAME %q %q", old, renamed); !ok {
+		done()
+		t.Fatalf("imap rename: %v", lines)
+	}
+	// GreenMail may move the subscription with the mailbox, and then
+	// refuses these; either way only the new name is subscribed.
+	run("SUBSCRIBE %q", renamed)
+	run("UNSUBSCRIBE %q", old)
+	lsub, _ := run(`LSUB "" "*"`)
+	t.Logf("renamed %q to %q on the server; subscribed: %v", old, renamed, lsub)
+	done()
+	// Discovery started from Marionette adds the new folder and keeps the
+	// old one, as the real ordering can for minutes; the old one is dropped
+	// only after the wait, with the call discovery itself uses.
+	imapFolders(t, "discover", "/Sorted/E2E Webmail", "")
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	time.Sleep(35 * time.Second)
+	if got := imapFoldersOnce(t, "list", "", ""); !contains(got, "/Sorted/E2E Renamed") {
+		t.Fatalf("the old folder went before the wait was over, so the test proves nothing: %v", got)
+	}
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	if st := toolbarState(t); !strings.Contains(st.Title, "new folder is hidden") || st.Badge != "!" {
+		t.Fatalf("toolbar with a new folder = %+v", st)
+	}
+	imapFolders(t, "drop", "/Sorted/E2E Renamed", "")
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	if got := strings.Join(excludedPaths(addonSettings(t, nil)), ","); got != "account1:/Sorted/E2E Renamed" {
+		t.Fatalf("the exclusion of the missing folder was not kept: %s", got)
+	}
+	if st := toolbarState(t); !strings.Contains(st.Title, "excluded folder was not found") || st.Badge != "!" {
+		t.Fatalf("toolbar = %+v", st)
+	}
+}
+
+type toolbar struct{ Title, Badge, Error string }
+
+// toolbarState reads the toolbar button with toolbarScript.
+func toolbarState(t *testing.T) toolbar {
+	t.Helper()
+	var st toolbar
+	marionette(t, toolbarScript, &st)
+	if st.Error != "" {
+		t.Fatalf("toolbar state: %s", st.Error)
+	}
+	return st
+}
+
+// missingHostScript starts a native host no manifest names, with the
+// add-on's background context, through Thunderbird's own NativeApp (what
+// runtime.connectNative uses), and returns the error it closes the port
+// with; the add-on receives that error's message as port.error.
+const missingHostScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { NativeApp } = ChromeUtils.importESModule("resource://gre/modules/NativeMessaging.sys.mjs");
+  const ext = WebExtensionPolicy.getByID("mcp-for-thunderbird@wadejbeckett.github.io").extension;
+  const ctx = [...ext.views].find((v) => v.viewType === "background");
+  return await new Promise((done) => {
+    const app = new NativeApp(ctx, "mcp_for_thunderbird_e2e_missing");
+    app.once("disconnect", (_, err) => done({ message: String(err && err.message) }));
+  });
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2EMissingHostText checks the words Thunderbird uses when no native
+// messaging manifest names a host: the background matches them to show
+// "host program not installed" (addon/src/background.js, NO_HOST). A
+// manifest whose program is missing is TestE2EBrokenHostText.
+func TestE2EMissingHostText(t *testing.T) {
+	var got struct{ Message, Error string }
+	marionette(t, missingHostScript, &got)
+	if got.Error != "" {
+		t.Fatalf("missing host: %s", got.Error)
+	}
+	if !regexp.MustCompile(`No such native application`).MatchString(got.Message) {
+		t.Fatalf("port error for a missing host = %q", got.Message)
+	}
+}
+
+// brokenHostScript writes a native messaging manifest whose path names a
+// program that does not exist into the user's manifest folder, starts
+// that host as missingHostScript does, removes the manifest again and
+// returns the error the port closes with. On Windows manifests are found
+// through the registry, so it says skip there.
+const brokenHostScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  if (Services.appinfo.OS === "WINNT") return { skip: true };
+  const { NativeApp } = ChromeUtils.importESModule("resource://gre/modules/NativeMessaging.sys.mjs");
+  const id = "mcp-for-thunderbird@wadejbeckett.github.io";
+  const name = "mcp_for_thunderbird_e2e_broken";
+  const dir = PathUtils.join(Services.dirsvc.get("XREUserNativeManifests", Ci.nsIFile).path, Services.appinfo.OS === "Darwin" ? "NativeMessagingHosts" : "native-messaging-hosts");
+  const file = PathUtils.join(dir, name + ".json");
+  const missing = PathUtils.join(PathUtils.tempDir, "mcp-for-thunderbird-e2e-no-such-program");
+  await IOUtils.makeDirectory(dir, { ignoreExisting: true });
+  await IOUtils.writeJSON(file, { name, description: "e2e: a host whose program is missing", path: missing, type: "stdio", allowed_extensions: [id] });
+  try {
+    const ctx = [...WebExtensionPolicy.getByID(id).extension.views].find((v) => v.viewType === "background");
+    return await new Promise((done) => {
+      const app = new NativeApp(ctx, name);
+      app.once("disconnect", (_, err) => done({ message: String(err && err.message) }));
+    });
+  } finally {
+    await IOUtils.remove(file);
+  }
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2EBrokenHostText checks what Thunderbird says when the manifest is
+// there but its program is not, as after the host was deleted or moved:
+// not "No such native application" but words the background matches to
+// show "host program could not be started" (BROKEN_HOST).
+func TestE2EBrokenHostText(t *testing.T) {
+	var got struct {
+		Message, Error string
+		Skip           bool
+	}
+	marionette(t, brokenHostScript, &got)
+	if got.Skip {
+		t.Skip("native messaging manifests are found through the registry on Windows")
+	}
+	if got.Error != "" {
+		t.Fatalf("broken host: %s", got.Error)
+	}
+	t.Logf("port error for a host whose program is missing: %q", got.Message)
+	if regexp.MustCompile(`No such native application`).MatchString(got.Message) || !regexp.MustCompile(`does not exist, or is not executable`).MatchString(got.Message) {
+		t.Fatalf("port error for a host whose program is missing = %q", got.Message)
+	}
+}
+
+// hostLogScript returns the host's log lines that Thunderbird has put in
+// its error console (NativeMessaging.sys.mjs logs each stderr line).
+const hostLogScript = `
+return Services.console.getMessageArray()
+  .map((m) => m.message || "")
+  .filter((m) => m.startsWith("stderr output from native app mcp_for_thunderbird: "));
+`
+
+// TestE2EHostLogsThunderbirdVersion checks that the hello tells the host
+// Thunderbird's version (runtime.getBrowserInfo), which the host writes
+// to its log for diagnostics.
+func TestE2EHostLogsThunderbirdVersion(t *testing.T) {
+	version := strings.TrimSuffix(os.Getenv("MFT_E2E_TB_VERSION"), "esr")
+	if version == "" {
+		t.Skip("MFT_E2E_TB_VERSION not set")
+	}
+	var lines []string
+	marionette(t, hostLogScript, &lines)
+	want := regexp.MustCompile(`started, add-on \S+, Thunderbird ` + regexp.QuoteMeta(version) + `\S*, protocol 1$`)
+	for _, l := range lines {
+		if want.MatchString(l) {
+			return
+		}
+	}
+	t.Fatalf("no host start line naming Thunderbird %s in the console: %q", version, lines)
 }

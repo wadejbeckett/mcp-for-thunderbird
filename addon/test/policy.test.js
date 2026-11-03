@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULTS } from "../src/settings.js";
-import { check, assertFolderAllowed, isExcluded } from "../src/policy.js";
+import { check, assertFolderAllowed, isExcluded, UNSEEN_MESSAGE } from "../src/policy.js";
 import { encodeId } from "../src/ids.js";
 
 const base = {
@@ -26,6 +26,21 @@ test("paused beats everything", () => {
   ]) {
     assert.throws(() => check(tool, args, paused), { code: "paused", message: "Paused by the user in Thunderbird" });
   }
+});
+
+test("an account sent to mail_contacts is refused before it is checked", () => {
+  const on = s({ groups: { ...DEFAULTS.groups, contacts: true } });
+  for (const account of ["a1", "off", "unknown", "", 5]) {
+    assert.throws(() => check("mail_contacts", { query: "x", account }, on), { code: "invalid_argument", message: /whole profile/ });
+  }
+  check("mail_contacts", { query: "x" }, on);
+});
+
+test("an account sent to mail_tags is refused before it is checked", () => {
+  for (const account of ["a1", "off", "unknown", "", 5]) {
+    assert.throws(() => check("mail_tags", { account }, s()), { code: "invalid_argument", message: "mail_tags takes no account: tags belong to the whole profile, not to one account." });
+  }
+  check("mail_tags", {}, s());
 });
 
 test("a disabled account gives not_enabled", () => {
@@ -82,6 +97,18 @@ test("an account that differs from an id's account is refused", () => {
   check("mail_move", { account: "a1", ids: [encodeId("a1", "INBOX", "x@y")], folder: "Archive" }, s());
 });
 
+test("a reply or forward may name another account to write from than the id's", () => {
+  const on = s({ groups: { ...DEFAULTS.groups, compose: true } });
+  const id = encodeId("a1", "INBOX", "x@y");
+  for (const tool of ["mail_draft", "mail_compose"]) {
+    check(tool, { kind: "reply", id, account: "a2" }, on);
+    // both accounts must still be enabled, and the id's folder allowed
+    assert.throws(() => check(tool, { kind: "reply", id, account: "off" }, on), { code: "not_enabled" });
+    assert.throws(() => check(tool, { kind: "reply", id: encodeId("off", "INBOX", "x@y"), account: "a2" }, on), { code: "not_enabled" });
+    assert.throws(() => check(tool, { kind: "forward", id: encodeId("a1", "Private", "x@y"), account: "a2" }, on), { code: "excluded" });
+  }
+});
+
 test("a target folder is checked against the ids' account even with no account given", () => {
   assert.throws(() => check("mail_move", { ids: [encodeId("a1", "INBOX", "x@y")], folder: "Private/Sub" }, s()), { code: "excluded" });
   check("mail_move", { ids: [encodeId("a2", "INBOX", "x@y")], folder: "Private" }, s());
@@ -127,4 +154,16 @@ test("mail_send needs direct send on and a non-empty allowlist", () => {
 test("a forged id is invalid_argument", () => {
   assert.throws(() => check("mail_read", { id: "m2.abc" }, s()), { code: "invalid_argument" });
   assert.throws(() => check("mail_mark", { ids: ["m1.!!"] }, s()), { code: "invalid_argument" });
+});
+
+test("in an account with a folders-seen list, a folder not in it is excluded with its own message", () => {
+  const seen = s({ knownFolders: { a1: { INBOX: 0, Private: 0 } } });
+  assert.equal(isExcluded("a1", "Legal 2026", seen), true);
+  assert.equal(isExcluded("a1", "INBOX", seen), false);
+  assert.equal(isExcluded("a2", "Legal 2026", seen), false, "an account without a list");
+  assert.throws(() => assertFolderAllowed("a1", "Legal 2026", seen), { code: "excluded", message: UNSEEN_MESSAGE });
+  assert.throws(() => assertFolderAllowed("a1", "Private", seen), { code: "excluded", message: "This folder is excluded in MCP for Thunderbird settings." });
+  assert.throws(() => check("mail_read", { id: encodeId("a1", "Legal 2026", "x@y") }, seen), { code: "excluded" });
+  assert.throws(() => check("mail_search", { account: "a1", folder: "Legal 2026" }, seen), { code: "excluded" });
+  check("mail_search", { account: "a1", folder: "INBOX" }, seen);
 });

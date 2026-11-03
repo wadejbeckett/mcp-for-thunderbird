@@ -12,7 +12,10 @@
 // Every message a handler returns passes `visible`: its account is enabled
 // and its folder is not excluded (Review Focus 2). Search and thread
 // results carry Pointers only; message text comes only from mail_read and
-// mail_attachment, cleaned and wrapped as untrusted content.
+// mail_attachment, cleaned and wrapped as untrusted content. An
+// attachment the message holds only a placeholder for (a FileLink, a link,
+// or one detached or deleted; the part's headers say so) is listed by
+// mail_read with its type and link, and refused by mail_attachment.
 //
 // Search (ruling R9, docs/SPIKES.md §3): Thunderbird returns matches
 // oldest first, and some queries never settle. So the search walks date
@@ -24,12 +27,30 @@
 // are found without draining a large window (ruling R19).
 //
 // Every query asks for its list id (returnMessageListId) and reads pages
-// with continueList, so every list can be aborted: on a split, when
-// enough is found, on timeout, on error, and when an answer arrives after
-// its timeout.
+// with continueList, so every list can be ended (endList, ids.js): on a
+// split, when enough is found, on timeout, on error, and when an answer
+// arrives after its timeout.
+//
+// Thunderbird matches a sender or recipient against a whole address only,
+// or against part of the name. So `from` and `to` go to Thunderbird only
+// when they are a whole address; any other text is matched here, against
+// name and address. tags_mode untagged is matched here too, because
+// Thunderbird 153.6's query ignores its own tag mode "none". So are to_me
+// and from_me, except a true value when every account with an address is
+// enabled: Thunderbird compares them with every identity in the profile,
+// and a false value given without a true one stops its search with an
+// error (153.6), so the list never ends. A search with
+// a match of its own cannot tell from a page's size how many of it match,
+// so it reads each window to its end, in large pages, instead of splitting
+// it, and keeps the newest matches.
+//
+// Thread (mail_thread): the message's References and In-Reply-To are read
+// with messages.getHeaders where Thunderbird has it (147 and later), which
+// reads the headers only, else from the head of getRaw (140 ESR). The
+// thread is cut at fixed limits, and truncated says when one was reached.
 
 import { HANDLERS, withSave } from "../rpc.js";
-import { encodeId, resolveId } from "../ids.js";
+import { encodeId, resolveId, endList } from "../ids.js";
 import { isExcluded, enabledAccountIds, assertFolderAllowed } from "../policy.js";
 import { fail } from "../errors.js";
 import { buildThreadIds, normalizeSubject, stripAngleBrackets, createLimiter } from "../thread-utils.js";
@@ -51,11 +72,14 @@ const MIN_SPAN = 4000;
 // Without `since`, the window that would start before this has no lower
 // bound and is the last.
 const FLOOR = Date.UTC(1980, 0, 1);
+// Page size of a search with a match of its own (see above).
+const LOCAL_PAGE = 250;
 const HEAD_BYTES = 65_536;
 const THREAD_MAX = 200;
 const THREAD_IDS_MAX = 100;
-const THREAD_CANDIDATES = 50;
-const ABORT_WAIT_MS = 1000;
+const THREAD_CANDIDATES = LOCAL_PAGE;
+const THREAD_CANDIDATES_MAX = 200;
+const THREAD_HEADERS = ["Message-ID", "References", "In-Reply-To"];
 
 // At most 4 Thunderbird calls in flight, across all calls.
 const limiter = createLimiter(4);
@@ -97,7 +121,7 @@ export function call(run, fn, { list = false } = {}) {
             work.then(
               (late) => {
                 const id = listIdOf(late);
-                if (id) abort(id);
+                if (id) endList(id);
               },
               () => {},
             );
@@ -109,25 +133,9 @@ export function call(run, fn, { list = false } = {}) {
   });
 }
 
-async function abort(listId) {
-  let timer;
-  try {
-    await Promise.race([
-      Promise.resolve().then(() => tb().messages.abortList(listId)),
-      new Promise((resolve) => {
-        timer = setTimeout(resolve, ABORT_WAIT_MS);
-      }),
-    ]);
-  } catch {
-    // the list is gone already
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function closeList(run, listId) {
   run.open.delete(listId);
-  await abort(listId);
+  await endList(listId);
 }
 
 async function closeAll(run) {
@@ -237,6 +245,9 @@ function iso(d) {
   return Number.isNaN(t.getTime()) ? new Date(0).toISOString() : t.toISOString();
 }
 
+// MessageHeader.priority came in Thunderbird 148; before it, priority is null.
+const PRIORITIES = ["none", "lowest", "low", "normal", "high", "highest"];
+
 // Sender and subject are the sender's own text, shown outside any wrapper:
 // they are cleaned like mail_read's headers (clip).
 function pointer(h, hasAttachments) {
@@ -250,6 +261,7 @@ function pointer(h, hasAttachments) {
     read: Boolean(h.read),
     flagged: Boolean(h.flagged),
     tags: Array.isArray(h.tags) ? h.tags.map(String) : [],
+    priority: PRIORITIES.includes(h.priority) ? h.priority : null,
     hasAttachments,
   };
 }
@@ -280,18 +292,45 @@ const newestFirst = (a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id
 
 // ---- mail_accounts ----
 
+// identityOf gives one identity of an account; the first is the account's
+// default identity (accounts schema).
+const identityOf = (i, n) => ({
+  id: String((i && i.id) ?? ""),
+  email: String((i && i.email) ?? ""),
+  name: String((i && i.name) ?? ""),
+  label: String((i && i.label) ?? ""),
+  default: n === 0,
+});
+
+// defaultAccountId is the id of Thunderbird's default account, or null
+// when there is none or Thunderbird does not say: the list still answers.
+async function defaultAccountId() {
+  try {
+    const a = await tb().accounts.getDefault(false);
+    return a && typeof a.id === "string" ? a.id : null;
+  } catch {
+    return null;
+  }
+}
+
 async function mailAccounts(args, ctx) {
   const s = ctx.settings;
-  const accounts = (await tb().accounts.list(false)) || [];
+  const [list, defaultId] = await Promise.all([tb().accounts.list(false), defaultAccountId()]);
+  const accounts = list || [];
   return {
     accounts: accounts
       .filter((a) => a && s.accounts && s.accounts[a.id] === true)
-      .map((a) => ({
-        id: a.id,
-        name: String(a.name ?? ""),
-        address: String((Array.isArray(a.identities) && a.identities[0] && a.identities[0].email) || ""),
-        type: String(a.type ?? ""),
-      })),
+      .map((a) => {
+        const ids = Array.isArray(a.identities) ? a.identities.filter((i) => i && typeof i === "object") : [];
+        return {
+          id: a.id,
+          name: String(a.name ?? ""),
+          address: String((ids[0] && ids[0].email) || ""),
+          type: String(a.type ?? ""),
+          default: a.id === defaultId,
+          identities: ids.map(identityOf),
+        };
+      }),
   };
 }
 
@@ -302,45 +341,97 @@ export const realFolder = (f, accountId) =>
 
 const countOf = (v) => (Number.isInteger(v) ? v : null);
 
+// quotaOf gives a folder's quota as Thunderbird reports it (STORAGE in
+// bytes, MESSAGE in messages); [] when the server reports none.
+function quotaOf(v) {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((q) => q && (q.type === "STORAGE" || q.type === "MESSAGE"))
+    .map((q) => ({ type: q.type, limit: countOf(q.limit), used: countOf(q.used), unused: countOf(q.unused) }));
+}
+
+function dateOf(v) {
+  if (v == null) return null;
+  const t = new Date(v);
+  return Number.isNaN(t.getTime()) ? null : t.toISOString();
+}
+
+const nFolders = (n) => `${n} folder${n === 1 ? "" : "s"}`;
+// A slow answer may come next time; an error (such as a folder's summary
+// file that cannot be read) comes again every time.
+const LATE_COUNTS = (n) =>
+  `Thunderbird did not give the counts of ${nFolders(n)} in time; their unread, total, new, quota and lastUsed are null. Ask again, or for one account at a time.`;
+const NO_COUNTS = (n) =>
+  `Thunderbird could not read the counts of ${nFolders(n)}; their unread, total, new, quota and lastUsed are null.`;
+
 async function mailFolders(args, ctx) {
   const s = ctx.settings;
   const accounts = args.account ? [args.account] : enabledAccountIds(s);
   const run = newRun();
   const out = [];
+  let late = 0;
+  let broken = 0;
   for (const accountId of accounts) {
     const all = answered(await call(run, () => tb().folders.query({ accountId }))) || [];
     const keep = all.filter((f) => realFolder(f, accountId) && !isExcluded(accountId, f.path, s));
+    // A folder whose info did not come gets null, counted as late (timeout)
+    // or broken (an error, or no info).
     const infos = await Promise.all(
       keep.map((f) =>
         call(run, () => tb().folders.getFolderInfo(f.id)).then(
-          (i) => (i && i !== TIMEOUT ? i : {}),
-          () => ({}),
+          (i) => (i === TIMEOUT ? TIMEOUT : i && typeof i === "object" ? i : null),
+          () => null,
         ),
       ),
     );
     keep.forEach((f, i) => {
+      const info = infos[i] === TIMEOUT ? null : infos[i];
+      if (infos[i] === TIMEOUT) late++;
+      else if (!info) broken++;
+      const n = info || {};
       out.push({
         account: accountId,
         path: f.path,
         name: String(f.name ?? ""),
-        unread: countOf(infos[i].unreadMessageCount),
-        total: countOf(infos[i].totalMessageCount),
+        unread: countOf(n.unreadMessageCount),
+        total: countOf(n.totalMessageCount),
+        new: countOf(n.newMessageCount),
+        quota: info ? quotaOf(info.quota) : null,
+        lastUsed: dateOf(n.lastUsed),
+        favorite: f.isFavorite === true,
         specialUse: Array.isArray(f.specialUse) ? f.specialUse.map(String) : [],
       });
     });
   }
-  return { folders: out };
+  const result = { folders: out };
+  const notes = [];
+  if (broken > 0) notes.push(NO_COUNTS(broken));
+  if (late > 0) notes.push(LATE_COUNTS(late));
+  if (notes.length > 0) result.note = notes.join(" ");
+  return result;
 }
 
 // ---- mail_search ----
 
 // searchScope finds up to `limit` visible messages for one query scope
-// (an account, or a folder with its subfolders), newest windows first.
-// truncated is true unless every window was searched to its end.
-async function searchScope(base, { limit, untilMs, sinceMs, run, s }) {
+// (an account, or a folder with or without its subfolders), newest
+// windows first. truncated is true unless every window was searched to its
+// end. `keep` is the search's own match, or null (see the file header).
+// untilMs null leaves the newest window open at the top.
+async function searchScope(base, { limit, untilMs, sinceMs, run, s, keep }) {
   const found = new Map();
   const full = () => found.size >= limit;
-  const anchor = Math.min(untilMs, Date.now());
+  // trim keeps the newest `limit` matches of a search with its own match.
+  let dropped = false;
+  const trim = () => {
+    if (found.size <= limit) return;
+    const newest = [...found.values()].sort(newestFirst).slice(0, limit);
+    found.clear();
+    for (const h of newest) found.set(h.id, h);
+    dropped = true;
+  };
+  const result = (truncated) => ({ headers: [...found.values()], truncated: truncated || dropped });
+  const anchor = untilMs == null ? Date.now() : Math.min(untilMs, Date.now());
   let prevFrom = null;
   for (let k = 0; ; k++) {
     let from = anchor - FIRST_SPAN * 2 ** k;
@@ -355,41 +446,45 @@ async function searchScope(base, { limit, untilMs, sinceMs, run, s }) {
     }
     const stack = [[from, to]];
     while (stack.length > 0) {
-      if (full() || run.failed) return { headers: [...found.values()], truncated: true };
+      if (full() || run.failed) return result(true);
       const [f, t] = stack.pop();
-      const per = limit - found.size;
-      const q = { ...base, toDate: new Date(t), messagesPerPage: per, autoPaginationTimeout: 0 };
+      const per = keep ? LOCAL_PAGE : limit - found.size;
+      const q = { ...base, messagesPerPage: per, autoPaginationTimeout: 0 };
       if (f != null) q.fromDate = new Date(f);
+      if (t != null) q.toDate = new Date(t);
       let page = await openList(run, q);
-      if (page === TIMEOUT) return { headers: [...found.values()], truncated: true };
+      if (page === TIMEOUT) return result(true);
       let msgs = page.messages || [];
       const low = f == null ? FLOOR : f;
-      if (page.id && msgs.length >= per && t - low > MIN_SPAN) {
+      // An open top is split as if it were a day from now.
+      const high = t == null ? Date.now() + DAY : t;
+      if (!keep && page.id && msgs.length >= per && high - low > MIN_SPAN) {
         // Full first page with more behind it: these are the window's
         // oldest. Search the newer half first instead.
         await closeList(run, page.id);
-        const mid = Math.floor((low + t) / 2);
+        const mid = Math.floor((low + high) / 2);
         stack.push([f, mid + OVERLAP]);
         stack.push([mid, t]);
         continue;
       }
       for (;;) {
         for (const h of msgs) {
-          if (full()) break;
-          if (visible(h, s) && !found.has(h.id)) found.set(h.id, h);
+          if (!keep && full()) break;
+          if (visible(h, s) && (!keep || keep(h)) && !found.has(h.id)) found.set(h.id, h);
         }
+        if (keep) trim();
         if (!page.id) break;
         const listId = page.id;
-        if (full() || run.failed) {
+        if ((!keep && full()) || run.failed) {
           await closeList(run, listId);
-          return { headers: [...found.values()], truncated: true };
+          return result(true);
         }
         page = await nextPage(run, listId);
-        if (page === TIMEOUT) return { headers: [...found.values()], truncated: true };
+        if (page === TIMEOUT) return result(true);
         msgs = page.messages || [];
       }
     }
-    if (last) return { headers: [...found.values()], truncated: false };
+    if (last) return result(false);
     prevFrom = from;
   }
 }
@@ -401,21 +496,96 @@ export async function folderByPath(run, accountId, path) {
   return f;
 }
 
+// A whole address (bob@acme.com) is what Thunderbird's author and
+// recipients matches can find in full; other text is matched here.
+const WHOLE_ADDRESS = /^[^\s@<>,;"]+@[^\s@<>,;"]+$/;
+const ANGLE_ADDRESS = /<([^<>\s]+@[^<>\s]+)>/g;
+const BARE_ADDRESS = /[^\s@<>,;"]+@[^\s@<>,;"]+/g;
+
+const recipientsOf = (h) => [h.recipients, h.ccList, h.bccList].flatMap((l) => (Array.isArray(l) ? l : []));
+
+// emailsOf returns the addresses in header values ("Ann" <ann@x>, ann@x),
+// in lower case: the one in angle brackets where there is one, so an
+// address in a display name does not count.
+function emailsOf(values) {
+  const out = [];
+  for (const v of values) {
+    const text = String(v ?? "");
+    const angle = [...text.matchAll(ANGLE_ADDRESS)].map((m) => m[1]);
+    for (const e of angle.length > 0 ? angle : text.match(BARE_ADDRESS) || []) out.push(e.toLowerCase());
+  }
+  return out;
+}
+
+// ownAddresses returns the addresses of the enabled accounts' identities,
+// in lower case, and whether every account with an address is enabled.
+async function ownAddresses(run, s) {
+  const accounts = answered(await call(run, () => tb().accounts.list(false))) || [];
+  const on = new Set(enabledAccountIds(s));
+  const mine = new Set();
+  let every = true;
+  for (const a of accounts) {
+    const emails = (Array.isArray(a.identities) ? a.identities : []).map((i) => String((i && i.email) || "").trim().toLowerCase()).filter(Boolean);
+    if (!on.has(a.id)) {
+      if (emails.length > 0) every = false;
+      continue;
+    }
+    for (const e of emails) mine.add(e);
+  }
+  return { mine, every };
+}
+
+const TAGS_MODES = ["all", "any", "none", "untagged"];
+
+// searchNote says how to narrow a search that was cut off. A whole
+// address is suggested only when a from or to was matched here.
+function searchNote(run, limit, partial) {
+  if (run.timedOut) {
+    const how = partial ? "since and until, a folder, or a whole address in from or to" : "since and until, or a folder";
+    return `Thunderbird did not finish the search in time, so some matching messages may be missing. Narrow it with ${how}.`;
+  }
+  const raise = limit < MAX_LIMIT ? `, or raise limit (at most ${MAX_LIMIT})` : "";
+  return `More messages match than were returned. Narrow the search with since and until, a folder or more criteria${raise}.`;
+}
+
 async function mailSearch(args, ctx) {
   const s = ctx.settings;
   const limit = limitArg(args.limit, DEFAULT_LIMIT, MAX_LIMIT);
   const base = {};
-  const map = { text: "fullText", from: "author", to: "recipients", subject: "subject" };
+  const keeps = [];
+  const map = { text: "fullText", subject: "subject" };
   for (const [k, q] of Object.entries(map)) {
     const v = optString(args, k);
     if (v !== undefined) base[q] = v;
   }
+  // from and to: a whole address goes to Thunderbird; other text must be
+  // in the name or address, in any case.
+  let partial = false;
+  const addressArg = (k, q, of) => {
+    const v = optString(args, k);
+    if (v === undefined) return;
+    const want = v.trim();
+    if (want === "") return;
+    if (WHOLE_ADDRESS.test(want)) {
+      base[q] = want;
+      return;
+    }
+    const low = want.toLowerCase();
+    partial = true;
+    keeps.push((h) => of(h).some((x) => String(x ?? "").toLowerCase().includes(low)));
+  };
+  addressArg("from", "author", (h) => [h.author]);
+  addressArg("to", "recipients", recipientsOf);
   const unread = optBool(args, "unread");
   if (unread !== undefined) base.read = !unread;
   const flagged = optBool(args, "flagged");
   if (flagged !== undefined) base.flagged = flagged;
   const attachment = optBool(args, "has_attachment");
   if (attachment !== undefined) base.attachment = attachment;
+  const junk = optBool(args, "junk");
+  if (junk !== undefined) base.junk = junk;
+  const toMe = optBool(args, "to_me");
+  const fromMe = optBool(args, "from_me");
   const tags = [];
   const tag = optString(args, "tag");
   if (tag !== undefined) tags.push(tag);
@@ -423,31 +593,61 @@ async function mailSearch(args, ctx) {
     if (!Array.isArray(args.tags) || !args.tags.every((x) => typeof x === "string")) fail("invalid_argument", "tags must be a list of strings.");
     tags.push(...args.tags);
   }
+  const tagsMode = optString(args, "tags_mode");
+  if (tagsMode !== undefined && !TAGS_MODES.includes(tagsMode)) fail("invalid_argument", "tags_mode must be all, any, none or untagged.");
+  if (tagsMode === "untagged") {
+    if (tags.length > 0) fail("invalid_argument", "tags_mode untagged takes no tag or tags.");
+    keeps.push((h) => !Array.isArray(h.tags) || h.tags.length === 0);
+  } else if (tagsMode !== undefined && tags.length === 0) {
+    fail("invalid_argument", "tags_mode needs tag or tags.");
+  }
+  const subfolders = optBool(args, "subfolders");
+  const folder = optString(args, "folder");
+  if (subfolders !== undefined && folder === undefined) fail("invalid_argument", "subfolders needs folder.");
   const sinceMs = optDay(args, "since");
-  const untilArg = optDay(args, "until", true);
-  const untilMs = untilArg ?? Date.now() + DAY;
-  if (sinceMs != null && sinceMs >= untilMs) return { messages: [], truncated: false };
+  // Without until the search has no upper date, so mail dated ahead of
+  // the clock is found too.
+  const untilMs = optDay(args, "until", true);
+  if (sinceMs != null && untilMs != null && sinceMs >= untilMs) return { messages: [], truncated: false };
 
   const run = newRun();
+  if (toMe !== undefined || fromMe !== undefined) {
+    // See the file header: only true values, and only when Thunderbird's
+    // identities are the enabled accounts' addresses, go to Thunderbird.
+    const { mine, every } = await ownAddresses(run, s);
+    const native = every && toMe !== false && fromMe !== false;
+    for (const [v, q, of] of [
+      [toMe, "toMe", recipientsOf],
+      [fromMe, "fromMe", (h) => [h.author]],
+    ]) {
+      if (v === undefined) continue;
+      if (native) base[q] = true;
+      else keeps.push((h) => emailsOf(of(h)).some((e) => mine.has(e)) === v);
+    }
+  }
   if (tags.length > 0) {
     const list = await tagList(run);
-    base.tags = { tags: Object.fromEntries(tags.map((t) => [tagKeyOf(list, t), true])), mode: "all" };
+    const keys = tags.map((t) => tagKeyOf(list, t));
+    // none: Thunderbird leaves out a message with any of the tags set to
+    // false when the mode is any.
+    const want = tagsMode !== "none";
+    base.tags = { tags: Object.fromEntries(keys.map((k) => [k, want])), mode: tagsMode === "all" || tagsMode === undefined ? "all" : "any" };
   }
   let scopes;
-  const folder = optString(args, "folder");
   if (folder !== undefined) {
     // policy has checked the folder and that the account is known
     const accountId = args.account || enabledAccountIds(s)[0];
     assertFolderAllowed(accountId, folder, s);
     const f = await folderByPath(run, accountId, folder);
-    scopes = [{ accountId, folderId: f.id, includeSubFolders: true }];
+    scopes = [{ accountId, folderId: f.id, includeSubFolders: subfolders !== false }];
   } else {
     scopes = (args.account ? [args.account] : enabledAccountIds(s)).map((accountId) => ({ accountId }));
   }
+  const keep = keeps.length > 0 ? (h) => keeps.every((fn) => fn(h)) : null;
 
   let results;
   try {
-    results = await Promise.all(scopes.map((scope) => searchScope({ ...base, ...scope }, { limit, untilMs, sinceMs, run, s })));
+    results = await Promise.all(scopes.map((scope) => searchScope({ ...base, ...scope }, { limit, untilMs, sinceMs, run, s, keep })));
   } catch (e) {
     run.failed = true;
     await closeAll(run);
@@ -456,15 +656,32 @@ async function mailSearch(args, ctx) {
   const all = results.flatMap((r) => r.headers).sort(newestFirst);
   const truncated = results.some((r) => r.truncated) || all.length > limit;
   const top = all.slice(0, limit);
-  return { messages: await pointers(top, attachment, run), truncated };
+  // The note is chosen before the attachment checks, which may run out of
+  // time without cutting the search short.
+  const note = truncated ? searchNote(run, limit, partial) : null;
+  const out = { messages: await pointers(top, attachment, run), truncated };
+  if (note) out.note = note;
+  return out;
 }
 
 // ---- mail_thread ----
 
-// headOf reads the first 64 KiB of a message's raw source: enough for the
-// headers, never the whole of a large message.
+// headOf returns the thread headers of a message (Message-ID, References,
+// In-Reply-To) as header text. messages.getHeaders (147 and later) reads
+// the headers alone; on 140 ESR the first 64 KiB of the raw source stand
+// in, enough for the headers and never the whole of a large message.
 async function headOf(run, id) {
   try {
+    if (typeof tb().messages.getHeaders === "function") {
+      const dict = await call(run, () => tb().messages.getHeaders(id));
+      if (dict === TIMEOUT || !dict || typeof dict !== "object") return "";
+      const lines = [];
+      for (const name of THREAD_HEADERS) {
+        const v = dict[name.toLowerCase()];
+        for (const x of Array.isArray(v) ? v : []) lines.push(`${name}: ${String(x).replace(/[\r\n]+/g, " ")}`);
+      }
+      return lines.join("\r\n") + "\r\n\r\n";
+    }
     const raw = await call(run, () => tb().messages.getRaw(id, { data_format: "File" }));
     if (raw === TIMEOUT || raw == null) return "";
     if (typeof raw === "string") return raw.slice(0, HEAD_BYTES);
@@ -474,17 +691,37 @@ async function headOf(run, id) {
   }
 }
 
-// firstPage returns a query's first page and closes its list. A thread is
-// best effort: a failed query adds nothing.
-async function firstPage(run, query) {
+// readList returns the messages of a query that pass `keep`, page by page,
+// and closes the list. It keeps the first `max`, or with `newest` reads the
+// list to its end (or the time budget) and keeps the last `max`, which are
+// the newest, as Thunderbird returns them oldest first. more is true when
+// matching messages were left out. A thread is best effort: a failed query
+// adds nothing more.
+async function readList(run, query, max, keep = () => true, newest = false) {
+  const out = [];
+  let more = false;
   try {
-    const page = await openList(run, { ...query, autoPaginationTimeout: 0 });
-    if (page === TIMEOUT) return [];
-    if (page.id) await closeList(run, page.id);
-    return page.messages || [];
+    let page = await openList(run, { ...query, autoPaginationTimeout: 0 });
+    while (page !== TIMEOUT) {
+      for (const h of page.messages || []) {
+        if (!keep(h)) continue;
+        if (out.length >= max) {
+          more = true;
+          if (!newest) {
+            if (page.id) await closeList(run, page.id);
+            return { messages: out, more };
+          }
+          out.shift();
+        }
+        out.push(h);
+      }
+      if (!page.id) break;
+      page = await nextPage(run, page.id);
+    }
   } catch {
-    return [];
+    // keep what was found
   }
+  return { messages: out, more };
 }
 
 // A thread holds each message once, keyed by its Message-ID (as message
@@ -501,7 +738,9 @@ async function mailThread(args, ctx) {
   const own = stripAngleBrackets(msg.headerMessageId);
   const ids = buildThreadIds(await headOf(run, msg.id));
   ids.delete(own);
-  const upstream = [...ids].slice(0, THREAD_IDS_MAX);
+  // References lists the oldest first; the nearest ones are kept.
+  let cut = ids.size > THREAD_IDS_MAX;
+  const upstream = [...ids].slice(-THREAD_IDS_MAX);
   const inAccount = (h) => h && h.folder && h.folder.accountId === accountId;
 
   const found = new Map([[threadKey(msg), msg]]);
@@ -509,20 +748,29 @@ async function mailThread(args, ctx) {
     const had = found.get(threadKey(h));
     if (!had || (!visible(had, s) && visible(h, s))) found.set(threadKey(h), h);
   };
-  const pages = await Promise.all(upstream.map((headerMessageId) => firstPage(run, { accountId, headerMessageId, messagesPerPage: 20 })));
+  const pages = await Promise.all(
+    upstream.map((headerMessageId) => readList(run, { accountId, headerMessageId, messagesPerPage: 20 }, 20).then((r) => r.messages)),
+  );
   for (const h of pages.flat()) if (inAccount(h)) add(h);
 
   // Replies: later messages of the same subject whose References or
   // In-Reply-To name a message of the thread. Only visible candidates are
-  // read, so no raw source is opened in an excluded folder.
+  // read, so no headers are read in an excluded folder. Thunderbird
+  // returns them oldest first, so the list is read to its end and the
+  // newest THREAD_CANDIDATES_MAX are kept.
   const norm = normalizeSubject(msg.subject || "");
   if (norm) {
     const query = { accountId, subject: norm, messagesPerPage: THREAD_CANDIDATES };
     const since = new Date(msg.date);
     if (!Number.isNaN(since.getTime())) query.fromDate = since;
-    const candidates = (await firstPage(run, query)).filter(
+    const { messages: candidates, more } = await readList(
+      run,
+      query,
+      THREAD_CANDIDATES_MAX,
       (h) => inAccount(h) && visible(h, s) && !found.has(threadKey(h)) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
+      true,
     );
+    if (more) cut = true;
     const heads = await Promise.all(candidates.map(async (h) => [h, buildThreadIds(await headOf(run, h.id))]));
     const known = new Set([own, ...upstream, ...[...found.values()].map((h) => stripAngleBrackets(h.headerMessageId))]);
     for (let changed = true; changed; ) {
@@ -540,11 +788,13 @@ async function mailThread(args, ctx) {
   }
   await closeAll(run);
 
-  const truncated = run.timedOut;
-  const thread = [...found.values()]
+  // A thread longer than THREAD_MAX keeps its newest messages.
+  const all = [...found.values()]
     .filter((h) => inAccount(h) && visible(h, s))
-    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id)
-    .slice(0, THREAD_MAX);
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+  if (all.length > THREAD_MAX) cut = true;
+  const thread = all.slice(-THREAD_MAX);
+  const truncated = run.timedOut || cut;
   const out = { messages: await pointers(thread, undefined, run) };
   if (truncated) out.truncated = true;
   return out;
@@ -696,6 +946,110 @@ const HEADROOM = 512;
 export const clip = (v) => truncate(cleanLine(truncate(String(v ?? ""), HEADER_CHARS + HEADROOM).text), HEADER_CHARS).text;
 export const clipList = (v) => (Array.isArray(v) ? v.slice(0, HEADER_LIST).map(clip) : []);
 
+// attachmentType says where an attachment's content is: "normal" when it
+// is in the message; "linked" or "cloudFile" when it is at a remote link;
+// "detached" or "deleted" when the message keeps only a placeholder.
+// Thunderbird gives the type from 153, but 153.6 misses the placeholders
+// it writes itself ("X-Mozilla-Altered: AttachmentDeleted; date=…" is not
+// matched, and a detached file's file:// link is skipped), and 140 gives
+// no type. So the part's own headers decide first, the same headers
+// Thunderbird reads (getAttachmentTypeEntries in ext-messages.js), then
+// Thunderbird's type, then the text/x-moz-deleted placeholder type. A
+// type this add-on does not know is passed on as it is, so
+// mail_attachment refuses it.
+const partHeader = (a, name) => {
+  const v = a && a.headers && typeof a.headers === "object" ? a.headers[name] : undefined;
+  const x = Array.isArray(v) ? v[0] : v;
+  return typeof x === "string" ? x.trim() : "";
+};
+
+// headerKind reads the type and link from the part's headers, or null.
+function headerKind(a) {
+  const altered = partHeader(a, "x-mozilla-altered").split(";")[0].trim().toLowerCase();
+  if (altered === "attachmentdeleted") return { type: "deleted", link: null };
+  if (altered === "attachmentdetached") return { type: "detached", link: null };
+  const external = partHeader(a, "x-mozilla-external-attachment-url");
+  if (external !== "") return /^file:/i.test(external) ? { type: "detached", link: null } : { type: "linked", link: external };
+  const cloud = partHeader(a, "x-mozilla-cloud-part");
+  if (/^cloudFile\s*(;|$)/i.test(cloud)) {
+    const m = /;\s*url\s*=\s*"?([^";\s]+)/i.exec(cloud);
+    return { type: "cloudFile", link: m ? m[1] : null };
+  }
+  return null;
+}
+
+export function attachmentType(a) {
+  const h = headerKind(a);
+  if (h) return h.type;
+  if (a && typeof a.type === "string" && a.type !== "" && a.type !== "normal") return clip(a.type);
+  if (a && /^\s*text\/x-moz-deleted\b/i.test(String(a.contentType ?? ""))) return "deleted";
+  return "normal";
+}
+
+// attachmentLink is the remote link of a linked or cloudFile attachment:
+// Thunderbird's own (153), else the one in the part's headers (140).
+function attachmentLink(a) {
+  const type = attachmentType(a);
+  const tbLink = a && a.type === "linked" ? a.linkUrl : a && a.type === "cloudFile" ? a.cloudFileUrl : undefined;
+  const h = headerKind(a);
+  const v = type === "linked" || type === "cloudFile" ? (typeof tbLink === "string" && tbLink !== "" ? tbLink : h && h.link) : null;
+  return typeof v === "string" && v !== "" ? clip(v) : null;
+}
+
+// listedAttachment is one attachment as mail_read lists it.
+function listedAttachment(a) {
+  const out = {
+    name: clip(a && a.name),
+    size: a && Number.isFinite(a.size) ? a.size : null,
+    contentType: clip(a && a.contentType),
+    // Thunderbird's part name: mail_attachment's part picks this one
+    // among attachments that share a name, or one with no name
+    part: a && typeof a.partName === "string" ? clip(a.partName) : null,
+    type: attachmentType(a),
+  };
+  const link = attachmentLink(a);
+  if (link !== null) out.link = link;
+  return out;
+}
+
+// A real header name is printable ASCII other than the colon (RFC 5322
+// section 3.6.8). A name with anything else, such as an invisible
+// character after "Authentication-Results", is a look-alike: cleaned, it
+// would take the real header's key and hide its values, so it is left out.
+const HEADER_NAME = /^[\x21-\x39\x3b-\x7e]+$/;
+// Blind recipients: Bcc, Resent-Bcc and any other "-bcc" header.
+const BLIND = /(^|-)bcc$/;
+
+// allHeaders gives every header of a message (getFull, decoded), each
+// value cleaned like the other headers (clip), except the blind-recipient
+// headers (BLIND), which mail_read never returns, and names that are not
+// a real header name (HEADER_NAME). Names are lowercased; two raw names
+// that lowercase alike share one key, values in order. At most HEADER_LIST
+// values in all; over says some were left out. fromEntries keeps a header
+// named __proto__ an ordinary key.
+function allHeaders(full) {
+  const h = full && full.headers && typeof full.headers === "object" ? full.headers : {};
+  const entries = new Map();
+  let left = HEADER_LIST;
+  let over = false;
+  for (const [raw, v] of Object.entries(h)) {
+    if (!HEADER_NAME.test(raw)) continue;
+    const name = raw.toLowerCase();
+    if (BLIND.test(name)) continue;
+    const values = (Array.isArray(v) ? v : [v]).filter((x) => typeof x === "string");
+    if (values.length === 0) continue;
+    if (left === 0) {
+      over = true;
+      break;
+    }
+    const kept = values.slice(0, left);
+    if (kept.length < values.length) over = true;
+    left -= kept.length;
+    entries.set(name, [...(entries.get(name) || []), ...kept.map(clip)]);
+  }
+  return { headers: Object.fromEntries(entries), over };
+}
+
 function firstHeader(full, name) {
   const v = full && full.headers ? full.headers[name] : undefined;
   const x = Array.isArray(v) ? v[0] : v;
@@ -730,6 +1084,7 @@ export function plainDiffers(plain, shown) {
 async function mailRead(args, ctx) {
   const s = ctx.settings;
   const maxChars = limitArg(args.max_chars, DEFAULT_MAX_CHARS, MAX_CHARS, "max_chars");
+  const wantHeaders = optBool(args, "headers") === true;
   const run = newRun();
   const msg = await message(run, args.id, s);
   const [full, atts] = await Promise.all([
@@ -738,6 +1093,7 @@ async function mailRead(args, ctx) {
   ]);
   answered(full);
   answered(atts);
+  const list = Array.isArray(atts) ? atts : [];
 
   // The text is what a reader sees (shownBody): in each alternative group
   // the HTML part through htmlToText (a plain alternative can hold text
@@ -760,27 +1116,41 @@ async function mailRead(args, ctx) {
     auth: authResults(full && full.headers),
     text: wrapUntrusted(text),
     truncated: cut || over,
-    attachments: (Array.isArray(atts) ? atts : []).slice(0, ATTACHMENT_LIST).map((a) => ({
-      name: clip(a && a.name),
-      size: a && Number.isFinite(a.size) ? a.size : null,
-      contentType: clip(a && a.contentType),
-      // Thunderbird's part name: mail_attachment's part picks this one
-      // among attachments that share a name
-      part: a && typeof a.partName === "string" ? clip(a.partName) : null,
-    })),
+    attachments: list.slice(0, ATTACHMENT_LIST).map(listedAttachment),
   };
+  if (list.length > ATTACHMENT_LIST) out.attachmentsTruncated = true;
   if (body.differs) out.plainTextDiffers = true;
+  if (wantHeaders) {
+    const all = allHeaders(full);
+    out.allHeaders = all.headers;
+    if (all.over) out.allHeadersTruncated = true;
+  }
   return out;
 }
 
 // ---- mail_attachment ----
 
 // ATTACHMENT.maxBytes is the largest attachment returned (Review Focus 4).
-export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024 };
+// ATTACHMENT.budgetMs is mail_attachment's own time budget: a large
+// attachment of an IMAP message not stored offline comes from the server,
+// which takes longer than a search's budget. It stays under the host's 60 s
+// call timeout, with time left to pass the bytes on. Exported so tests can
+// shorten it.
+export const ATTACHMENT = { maxBytes: 50 * 1024 * 1024, budgetMs: 45_000 };
 const ATTACHMENT_TEXT = 20_000;
 const NO_DIR = "Choose an attachment folder in MCP for Thunderbird's options first.";
 const TOO_LARGE = "The attachment is larger than 50 MiB.";
 const AMBIGUOUS = 'Several attachments in this message have that name; give the attachment\'s "part" from mail_read to pick one.';
+const NO_NAME = 'Give the attachment\'s name, or its "part" from mail_read.';
+// What a message holds for an attachment that is not normal: a
+// placeholder, never the file (attachmentType).
+const NOT_IN_MESSAGE = {
+  linked: "This attachment is not in the message: the message only links to it, at the link mail_read lists.",
+  cloudFile: "This attachment is not in the message: it was sent as a link to a file stored online, at the link mail_read lists.",
+  detached: "This attachment was detached from the message and saved outside it; the message holds only a placeholder.",
+  deleted: "This attachment was deleted from the message; the message holds only a placeholder.",
+};
+const NOT_NORMAL = "This attachment is not stored in the message; the message holds only a placeholder.";
 // base64 is built in pieces of whole 3-byte groups.
 const B64_PIECE = 3 * 16_384;
 
@@ -791,6 +1161,15 @@ export function base64(buf) {
     out.push(btoa(String.fromCharCode.apply(null, bytes.subarray(i, i + B64_PIECE))));
   }
   return out.join("");
+}
+
+// charsetSource is the text that names an attachment's charset: its own
+// Content-Type header (Thunderbird 153 gives contentType without
+// parameters), else contentType.
+function charsetSource(att) {
+  const h = att.headers && typeof att.headers === "object" ? att.headers["content-type"] : undefined;
+  const v = Array.isArray(h) ? h[0] : h;
+  return typeof v === "string" && /charset\s*=/i.test(v) ? v : String(att.contentType || "");
 }
 
 function decoderFor(contentType) {
@@ -805,13 +1184,15 @@ function decoderFor(contentType) {
 // mailAttachment returns a text attachment's text inline, or asks the
 // host to save any other attachment in the user's attachment folder. The
 // size Thunderbird lists is checked before any byte is read, and the
-// file's own size again before it is read.
+// file's own size again before it is read. An attachment that is not in
+// the message (attachmentType other than normal) is refused before any
+// byte is read: the message holds only a placeholder.
 async function mailAttachment(args, ctx) {
   const s = ctx.settings;
   const name = optString(args, "name");
-  if (name === undefined) fail("invalid_argument", "name is required.");
   const part = optString(args, "part");
-  const run = newRun();
+  if (name === undefined && part === undefined) fail("invalid_argument", NO_NAME);
+  const run = newRun(ATTACHMENT.budgetMs);
   const msg = await message(run, args.id, s);
   const list = answered(await call(run, () => tb().messages.listAttachments(msg.id)));
   // Match the name exactly as Thunderbird has it first, else as mail_read
@@ -819,18 +1200,24 @@ async function mailAttachment(args, ctx) {
   // defused, at most 2000 characters). An exact name always wins, so an
   // attachment whose name differs only by invisible characters cannot
   // stand in for it. A part (from mail_read) picks one attachment of
-  // the message, which must also have that name; without a part, a name
+  // the message, which must also have the name when one is given; a part
+  // alone fetches an attachment with no name. Without a part, a name
   // that fits several attachments is refused.
   let atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.name === "string");
   if (part !== undefined) {
     atts = atts.filter((a) => a.partName === part);
     if (atts.length === 0) fail("not_found", "No attachment with that part in this message.");
   }
-  let found = atts.filter((a) => a.name === name);
-  if (found.length === 0) found = atts.filter((a) => clip(a.name) === name);
-  if (found.length === 0) fail("not_found", "No attachment of that name in this message.");
+  let found = atts;
+  if (name !== undefined) {
+    found = atts.filter((a) => a.name === name);
+    if (found.length === 0) found = atts.filter((a) => clip(a.name) === name);
+    if (found.length === 0) fail("not_found", "No attachment of that name in this message.");
+  }
   if (found.length > 1) fail("invalid_argument", AMBIGUOUS);
   const att = found[0];
+  const type = attachmentType(att);
+  if (type !== "normal") fail("refused", Object.prototype.hasOwnProperty.call(NOT_IN_MESSAGE, type) ? NOT_IN_MESSAGE[type] : NOT_NORMAL);
   const contentType = String(att.contentType || "application/octet-stream");
   const isText = /^\s*text\//i.test(contentType);
   const isHtml = /^\s*text\/html\b/i.test(contentType);
@@ -851,7 +1238,7 @@ async function mailAttachment(args, ctx) {
     // BODY_CAP bytes.
     const sliceBytes = isHtml ? BODY_CAP : ATTACHMENT_TEXT * 4;
     const buf = answered(await call(run, () => file.slice(0, sliceBytes).arrayBuffer()));
-    let text = decoderFor(contentType).decode(buf);
+    let text = decoderFor(charsetSource(att)).decode(buf);
     const partial = file.size > sliceBytes;
     if (partial) text = text.replace(/\uFFFD$/, "");
     if (isHtml) text = htmlToText(text);

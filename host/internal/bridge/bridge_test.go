@@ -64,7 +64,7 @@ func (f *fakeAddon) recv() map[string]any {
 
 func (f *fakeAddon) hello(protocol int) {
 	f.send(map[string]any{"type": "hello", "protocol": protocol, "version": "1.2.3",
-		"instance": "inst-1", "tools": []string{"mail_search"}, "attachmentDir": "/tmp/att"})
+		"instance": "inst-1", "tools": []string{"mail_search"}, "attachmentDir": "/tmp/att", "thunderbird": "153.6.0"})
 }
 
 func TestHelloWelcome(t *testing.T) {
@@ -77,7 +77,7 @@ func TestHelloWelcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	if h.Protocol != 1 || h.Version != "1.2.3" || h.Instance != "inst-1" ||
-		len(h.Tools) != 1 || h.Tools[0] != "mail_search" || h.AttachmentDir != "/tmp/att" {
+		len(h.Tools) != 1 || h.Tools[0] != "mail_search" || h.AttachmentDir != "/tmp/att" || h.Thunderbird != "153.6.0" {
 		t.Fatalf("hello = %+v", h)
 	}
 	go func() { _ = b.SendWelcome(47110, "") }()

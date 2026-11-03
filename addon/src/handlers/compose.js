@@ -4,18 +4,28 @@
 
 // Compose handlers: mail_draft, mail_compose and mail_send.
 //
-// mail_draft never sends. A new draft goes through messages.saveMessage.
-// Replies and forwards are built here as an RFC 5322 message and imported
-// into the account's Drafts folder with messages.import, because
-// saveMessage drops In-Reply-To and References (ruling R8, recipe C in
-// docs/SPIKES.md §2). mail_compose opens a compose window for the user
-// and never sends.
+// mail_draft never sends. Every draft is built here as an RFC 5322
+// message and imported with messages.import into the Drafts folder the
+// policy checked: the account's own, else an enabled Local Folders'
+// (draftsFolder). messages.saveMessage drops In-Reply-To and References
+// (ruling R8, recipe C in docs/SPIKES.md §2), and it saves where the
+// identity's settings say, which add-ons cannot see. mail_compose opens a
+// compose window for the user and never sends, and returns the window's
+// tab and window ids.
+//
+// Every tool writes from one identity of an enabled account: the one
+// `from` names (an identity id or address), else for a reply or forward
+// the one the original was addressed to, in any enabled account or in the
+// one `account` names (writer), else the account's default identity. kind reply_list answers the list in the original's
+// List-Post header; forward_as attachment forwards the whole original as
+// an attached message.
 //
 // mail_send sends only when every recipient in to, cc and bcc passes the
 // user's allowlist (Review Focus 5). Each entry is parsed with
 // Thunderbird's own header parser and only the addr-spec counts; the
 // addresses Thunderbird is given are exactly the ones checked. The
-// optional messages.send permission is checked before any send (ruling R7).
+// optional messages.send permission is checked before any send (ruling R7),
+// and nothing is sent while Thunderbird is offline.
 //
 // The body is plain text from the client; it becomes minimal HTML, with
 // "- ", "* " and "1. " paragraphs as lists (textToHtml). With html: true
@@ -32,31 +42,25 @@ import { HANDLERS } from "../rpc.js";
 import { encodeId } from "../ids.js";
 import { isPlainAddress } from "../address.js";
 import { assertFolderAllowed, enabledAccountIds } from "../policy.js";
-import { fail, ToolError } from "../errors.js";
+import { fail, isToolError, ToolError } from "../errors.js";
 import { htmlToText, stripInvisible } from "../clean.js";
-import { call, newRun, answered, message, bodyParts, base64, realFolder, ATTACHMENT, TIMEOUT } from "./read.js";
+import { call, newRun, answered, message, bodyParts, base64, realFolder, attachmentType, ATTACHMENT, TIMEOUT } from "./read.js";
 
 // COMPOSE.budgetMs is the time budget of one compose tool call. Exported
 // so tests can shorten it.
 export const COMPOSE = { budgetMs: 30_000 };
 
-const KINDS = ["new", "reply", "reply_all", "forward"];
+const KINDS = ["new", "reply", "reply_all", "reply_list", "forward"];
 const MAX_RECIPIENTS = 100;
 const MAX_FIELD = 998;
 const MAX_NAME = 255;
 const MAX_REFERENCES = 50;
 const TOO_LARGE = "The attachments are larger than 50 MiB in total.";
 const NO_SEND = "Thunderbird has not granted MCP for Thunderbird permission to send mail. Turn on direct send in the add-on's options.";
-// A new draft is looked up in Drafts among the messages dated from a
-// minute before the call, newest first, a few at a time.
-const LOOKUP_SLACK_MS = 60_000;
-const LOOKUP_CANDIDATES = 25;
-const POLL_MS = 500;
-// The lookup uses at most this much of the call's budget.
-export const LOOKUP = { maxMs: 10_000 };
+export const OFFLINE = "Thunderbird is offline, so the message was not sent. Turn off Work Offline in Thunderbird and try again, or save it with mail_draft.";
+const NO_DRAFTS = "This account has no Drafts folder of its own. Drafts of such an account are saved only in Local Folders, on this computer: enable Local Folders in MCP for Thunderbird, or save the draft in Thunderbird.";
 
 const tb = () => globalThis.messenger;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- allowlist ----
 
@@ -113,10 +117,28 @@ function textArg(args, k, required) {
 
 function kindArg(args) {
   const kind = args.kind;
-  if (!KINDS.includes(kind)) fail("invalid_argument", "kind must be new, reply, reply_all or forward.");
-  if (kind === "new" && args.id !== undefined) fail("invalid_argument", "id is only for reply, reply_all and forward.");
+  if (!KINDS.includes(kind)) fail("invalid_argument", "kind must be new, reply, reply_all, reply_list or forward.");
+  if (kind === "new" && args.id !== undefined) fail("invalid_argument", "id is only for reply, reply_all, reply_list and forward.");
   if (kind !== "new" && args.id === undefined) fail("invalid_argument", `kind ${kind} needs the id of the original message.`);
   return kind;
+}
+
+// forwardAsArg is how a forward carries the original: inline (quoted in
+// the body, the default) or attachment (the whole message attached).
+function forwardAsArg(args, kind) {
+  const v = args.forward_as;
+  if (v === undefined) return "inline";
+  if (v !== "inline" && v !== "attachment") fail("invalid_argument", "forward_as must be inline or attachment.");
+  if (kind !== "forward") fail("invalid_argument", "forward_as is only for kind forward.");
+  return v;
+}
+
+// fromArg is the identity to write from: an identity id or address.
+function fromArg(args) {
+  const v = args.from;
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || oneLine(v) === "") fail("invalid_argument", "from must be an identity id or address.");
+  return oneLine(v).slice(0, MAX_FIELD);
 }
 
 // baseName keeps the last path segment of an attachment name, at most
@@ -167,6 +189,7 @@ function common(args, { needTo = false } = {}) {
     subject: textArg(args, "subject", needTo),
     body: textArg(args, "body", true),
     html: htmlArg(args),
+    from: fromArg(args),
     attachments: attachmentsArg(args),
   };
 }
@@ -272,31 +295,141 @@ const files = (atts) => atts.map((a) => ({ file: new File([a.data], a.name, { ty
 
 // ---- Thunderbird lookups ----
 
-// accountFor picks the account to write from: the original message's, the
-// `account` argument (policy has checked it is enabled), or the only
-// enabled account.
-function accountFor(args, s, original) {
-  if (original) return original.folder.accountId;
+const emailOf = (i) => oneLine(i && i.email).toLowerCase();
+
+const identitiesIn = (a) => (a && Array.isArray(a.identities) ? a.identities : []).filter((i) => i && typeof i.id === "string");
+
+// named finds the identity `from` names among ids: by id, else by address.
+const named = (ids, from) => ids.find((i) => i.id === from) || ids.find((i) => emailOf(i) !== "" && emailOf(i) === from.toLowerCase());
+
+// enabledAccounts lists the enabled accounts, with their identities, in
+// Thunderbird's order.
+async function enabledAccounts(run, s) {
+  const enabled = new Set(enabledAccountIds(s));
+  const list = answered(await call(run, () => tb().accounts.list(false)));
+  return (Array.isArray(list) ? list : []).filter((a) => a && enabled.has(a.id));
+}
+
+// accountOf finds the enabled account, among accounts, that has the
+// identity `from` names. `name` says how to settle a tie.
+function accountOf(accounts, from, name) {
+  const hits = accounts.filter((a) => named(identitiesIn(a), from));
+  if (hits.length === 0) fail("invalid_argument", `No enabled account has the identity ${from}.`);
+  if (hits.length > 1) fail("invalid_argument", `Several enabled accounts have the identity ${from}. ${name}`);
+  return hits[0];
+}
+
+// accountFor picks the account a new message is written from: the
+// `account` argument (policy has checked it is enabled), the enabled
+// account with the identity `from` names, or the only enabled account.
+async function accountFor(run, args, s, from) {
   if (args.account !== undefined) return args.account;
+  if (from !== undefined) return accountOf(await enabledAccounts(run, s), from, "Name the account to write from.").id;
   const enabled = enabledAccountIds(s);
   if (enabled.length !== 1) fail("invalid_argument", "Name the account to write from.");
   return enabled[0];
 }
 
-// identityOf returns the account's default identity (listed first) and the
-// addresses of all its identities.
-async function identityOf(run, accountId) {
-  const a = answered(await call(run, () => tb().accounts.get(accountId, false)));
-  const ids = a && Array.isArray(a.identities) ? a.identities : [];
-  if (!ids[0] || typeof ids[0].id !== "string") fail("refused", "This account has no identity to write from.");
-  return { identity: ids[0], own: new Set(ids.map((i) => String(i.email || "").toLowerCase()).filter(Boolean)) };
+// addressedTo returns the first identity among ids whose address is in
+// the address entries, in their order.
+async function addressedTo(run, ids, entries) {
+  const list = entries.filter((x) => typeof x === "string").map(oneLine).filter(Boolean);
+  for (const m of await mailboxes(run, list)) {
+    const e = m.email.toLowerCase();
+    const hit = e && ids.find((i) => emailOf(i) === e);
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
+// ownAddresses are the addresses of every identity in accounts.
+const ownAddresses = (accounts) => new Set(accounts.flatMap((a) => identitiesIn(a).map(emailOf)).filter(Boolean));
+
+// writer returns the account and identity to write from, and `own`, the
+// user's own addresses. The identity is always passed to Thunderbird:
+// given none, it would write from the default account's identity, which
+// can be another account's.
+//
+// A new message is written from the account accountFor picks: from the
+// identity `from` names, which must be one of that account's, else from
+// its default identity (listed first).
+//
+// A reply or forward may go out from any enabled account's identity, as
+// in Thunderbird (MailUtils.getIdentityForHeader), and is then saved in
+// that identity's account: `from` names it, else it is the first identity
+// whose address is in the original's To or Cc, else, for mail the user
+// sent, the identity that sent it, looked for first in the original's
+// account and then in every enabled account; else the original account's
+// default identity. With `account` (policy has checked it is enabled), the
+// identity is looked for in that account only, ending with its default
+// identity, and `from` must be one of its identities. `own` holds every
+// enabled account's identities.
+async function writer(run, args, s, h, from) {
+  if (!h) {
+    const accountId = await accountFor(run, args, s, from);
+    const a = answered(await call(run, () => tb().accounts.get(accountId, false)));
+    const ids = identitiesIn(a);
+    if (ids.length === 0) fail("refused", "This account has no identity to write from.");
+    const identity = from === undefined ? ids[0] : named(ids, from);
+    if (!identity) fail("invalid_argument", `from is not an identity of this account: ${from}`);
+    return { accountId, identity, own: ownAddresses([a]) };
+  }
+  const accounts = await enabledAccounts(run, s);
+  const own = ownAddresses(accounts);
+  if (args.account !== undefined) {
+    const a = accounts.find((x) => x.id === args.account);
+    const ids = identitiesIn(a);
+    if (ids.length === 0) fail("refused", "This account has no identity to write from.");
+    if (from === undefined) return { accountId: a.id, identity: (await addressedIn(run, [a], h))?.identity || ids[0], own };
+    const identity = named(ids, from);
+    if (!identity) fail("invalid_argument", `from is not an identity of this account: ${from}`);
+    return { accountId: a.id, identity, own };
+  }
+  const home = accounts.find((a) => a.id === h.folder.accountId);
+  const order = home ? [home, ...accounts.filter((a) => a !== home)] : accounts;
+  if (from !== undefined) {
+    const a = home && named(identitiesIn(home), from) ? home : accountOf(accounts, from, "Name the account to write from, or the identity by its id.");
+    return { accountId: a.id, identity: named(identitiesIn(a), from), own };
+  }
+  const hit = await addressedIn(run, order, h);
+  if (hit) return { ...hit, own };
+  const ids = identitiesIn(home);
+  if (ids.length === 0) fail("refused", "This account has no identity to write from. Name an identity of another enabled account with from.");
+  return { accountId: home.id, identity: ids[0], own };
+}
+
+// addressedIn returns the account and identity, among the accounts in
+// their order, the original was addressed to: in its To or Cc, else, for
+// mail the user sent, as its author.
+async function addressedIn(run, accounts, h) {
+  const list = (v) => (Array.isArray(v) ? v : []);
+  for (const entries of [[...list(h.recipients), ...list(h.ccList)], [h.author]]) {
+    for (const a of accounts) {
+      const identity = await addressedTo(run, identitiesIn(a), entries);
+      if (identity) return { accountId: a.id, identity };
+    }
+  }
+  return undefined;
+}
+
+const isDrafts = (f) => f && realFolder(f, f.accountId) && Array.isArray(f.specialUse) && f.specialUse.includes("drafts");
+
+// draftsFolder finds the Drafts folder a draft of the account goes to: the
+// account's own, else the Drafts folder of an enabled Local Folders, which
+// is on this computer. Thunderbird does not tell add-ons which folder an
+// identity saves drafts in, so the draft never goes to another server
+// account on a guess: it would copy the mail it quotes or forwards onto
+// that account's server. An excluded Drafts folder refuses the draft.
 async function draftsFolder(run, accountId, s) {
-  const list = answered(await call(run, () => tb().folders.query({ accountId, specialUse: ["drafts"] })));
-  const f = (Array.isArray(list) ? list : []).find((x) => realFolder(x, accountId) && Array.isArray(x.specialUse) && x.specialUse.includes("drafts"));
-  if (!f) fail("refused", "This account has no Drafts folder.");
-  assertFolderAllowed(accountId, f.path, s);
+  const list = answered(await call(run, () => tb().folders.query({ specialUse: ["drafts"] })));
+  const all = (Array.isArray(list) ? list : []).filter(isDrafts);
+  let f = all.find((x) => x.accountId === accountId);
+  if (!f) {
+    const local = new Set((await enabledAccounts(run, s)).filter((a) => a.type === "local").map((a) => a.id));
+    f = all.find((x) => local.has(x.accountId));
+    if (!f) fail("refused", NO_DRAFTS);
+  }
+  assertFolderAllowed(f.accountId, f.path, s);
   return f;
 }
 
@@ -341,24 +474,61 @@ async function changing(run, fn, what) {
   return done(started ? v : answered(v), what);
 }
 
-function headerValues(full, name) {
-  const v = full && full.headers ? full.headers[name] : undefined;
+// headerValues lists the values of one header in a headers dictionary
+// (lower-case names, each with a list of values).
+function headerValues(headers, name) {
+  const v = headers ? headers[name] : undefined;
   return (Array.isArray(v) ? v : v === undefined ? [] : [v]).filter((x) => typeof x === "string");
 }
 
-// original reads what a reply or forward needs from the message.
+// headersOf reads a message's headers: with messages.getHeaders where this
+// Thunderbird has it (147 and later), which reads no body, else from
+// getFull. It answers TIMEOUT when the budget ran out.
+async function headersOf(run, id) {
+  const m = tb().messages;
+  if (typeof m.getHeaders === "function") return call(run, () => m.getHeaders(id));
+  const full = await call(run, () => m.getFull(id));
+  return full === TIMEOUT ? TIMEOUT : full && full.headers;
+}
+
+// listPost returns the address in a List-Post header ("<mailto:list@x>",
+// RFC 2369), or "" when there is none, as for a list that takes no posts
+// ("NO").
+export function listPost(values) {
+  for (const v of values) {
+    const m = /<\s*mailto:([^>?\s]+)/i.exec(v);
+    if (!m) continue;
+    try {
+      const addr = oneLine(decodeURIComponent(m[1]));
+      if (addr) return addr;
+    } catch {
+      // not a valid percent-encoding; try the next value
+    }
+  }
+  return "";
+}
+
+// listAddress returns the list address a reply_list goes to, from the
+// original's headers; a message without one has no list to reply to.
+async function listAddress(run, headers) {
+  const addr = listPost(headerValues(headers, "list-post"));
+  const boxes = addr ? (await mailboxes(run, [addr])).filter((m) => m.email) : [];
+  if (boxes.length !== 1) fail("invalid_argument", "This message has no List-Post header, so there is no list to reply to. Use kind reply or reply_all.");
+  return formatMailbox(boxes[0]);
+}
+
+// original reads what a reply or forward needs from the message. getFull
+// gives headers already decoded (RFC 2047), so Reply-To is used as it
+// comes: decoding it again could turn text in a display name into an
+// address.
 async function original(run, h) {
   const full = answered(await call(run, () => tb().messages.getFull(h.id)));
   const parts = bodyParts(full);
   const text = stripInvisible(parts.plain.trim() !== "" ? parts.plain : htmlToText(parts.html));
-  let replyTo = "";
-  const raw = headerValues(full, "reply-to")[0];
-  if (raw) {
-    const dec = answered(await call(run, () => tb().messengerUtilities.decodeMimeHeader("reply-to", raw)));
-    replyTo = oneLine(Array.isArray(dec) ? dec[0] : dec);
-  }
-  const references = headerValues(full, "references").join(" ").match(/<[^<>\s]+>/g) || [];
-  return { full, text, replyTo, references };
+  const headers = full && full.headers;
+  const replyTo = oneLine(headerValues(headers, "reply-to")[0] || "");
+  const references = headerValues(headers, "references").join(" ").match(/<[^<>\s]+>/g) || [];
+  return { full, headers, text, replyTo, references };
 }
 
 const stripRe = (s) => String(s ?? "").replace(/^\s*re:\s*/i, "");
@@ -402,9 +572,48 @@ function b64lines(bytes) {
 
 const utf8 = (s) => new TextEncoder().encode(s);
 
-// buildMessage returns the parts of an RFC 5322 message (strings, ready
-// for new File([...])): headers, then an HTML body in base64, and a
-// multipart/mixed with base64 attachments when there are any.
+// asMessage returns an attached message's bytes as RFC 2046 section 5.2.1
+// allows them in a message/rfc822 part, unencoded: lines end in CRLF, and
+// the transfer encoding is 7bit or 8bit. It returns null for bytes only
+// binary could carry (a NUL, a lone CR or a line over 998 bytes); such a
+// message is attached as a plain .eml file in base64 instead.
+export function asMessage(bytes) {
+  let bare = 0;
+  let line = 0;
+  let high = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === 0 || (b === 13 && bytes[i + 1] !== 10)) return null;
+    if (b === 13) continue;
+    if (b === 10) {
+      if (bytes[i - 1] !== 13) bare++;
+      line = 0;
+      continue;
+    }
+    if (++line > 998) return null;
+    if (b > 127) high = true;
+  }
+  const out = new Uint8Array(bytes.length + bare + (line > 0 ? 2 : 0));
+  let j = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 10 && bytes[i - 1] !== 13) out[j++] = 13;
+    out[j++] = bytes[i];
+  }
+  if (line > 0) {
+    out[j++] = 13;
+    out[j++] = 10;
+  }
+  return { data: out, encoding: high ? "8bit" : "7bit" };
+}
+
+const latin1 = (bytes) => new TextDecoder("latin1").decode(bytes);
+
+// buildMessage returns the parts of an RFC 5322 message (strings and
+// bytes, ready for new File([...])): headers, then an HTML body in base64,
+// and a multipart/mixed with the attachments when there are any. An
+// attached message (message/rfc822) is written unencoded (asMessage);
+// every other attachment in base64. The boundary is one no unencoded part
+// contains.
 function buildMessage(headerLines, html, atts) {
   const out = [];
   const bodyHeaders = "Content-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n";
@@ -412,15 +621,21 @@ function buildMessage(headerLines, html, atts) {
     out.push(headerLines.join("\r\n") + "\r\n" + bodyHeaders + "\r\n", b64lines(utf8(html)));
     return out;
   }
-  const boundary = "------------mft" + globalThis.crypto.randomUUID().replaceAll("-", "");
+  const parts = atts.map((a) => {
+    const type = mimeType(a.contentType);
+    const msg = type.toLowerCase() === "message/rfc822" ? asMessage(a.data) : null;
+    return { a, msg, type: msg ? "message/rfc822" : type.toLowerCase() === "message/rfc822" ? "application/octet-stream" : type };
+  });
+  const plain = parts.filter((p) => p.msg).map((p) => latin1(p.msg.data));
+  let boundary;
+  do boundary = "------------mft" + globalThis.crypto.randomUUID().replaceAll("-", "");
+  while (plain.some((t) => t.includes(boundary)));
   out.push(headerLines.join("\r\n") + "\r\n" + `Content-Type: multipart/mixed; boundary="${boundary}"\r\n\r\nThis is a multi-part message in MIME format.\r\n`);
   out.push(`--${boundary}\r\n${bodyHeaders}\r\n`, b64lines(utf8(html)));
-  for (const a of atts) {
-    out.push(
-      `--${boundary}\r\nContent-Type: ${mimeType(a.contentType)}; ${param("name", a.name)}\r\n` +
-        `Content-Disposition: attachment; ${param("filename", a.name)}\r\nContent-Transfer-Encoding: base64\r\n\r\n`,
-      b64lines(a.data),
-    );
+  for (const { a, msg, type } of parts) {
+    const head = `--${boundary}\r\nContent-Type: ${type}; ${param("name", a.name)}\r\nContent-Disposition: attachment; ${param("filename", a.name)}\r\n`;
+    if (msg) out.push(head + `Content-Transfer-Encoding: ${msg.encoding}\r\n\r\n`, msg.data);
+    else out.push(head + "Content-Transfer-Encoding: base64\r\n\r\n", b64lines(a.data));
   }
   out.push(`--${boundary}--\r\n`);
   return out;
@@ -428,11 +643,32 @@ function buildMessage(headerLines, html, atts) {
 
 // ---- mail_draft ----
 
+// PLACEHOLDER says why an attachment that is not of type normal holds
+// only a placeholder in the message. The type is read.js's attachmentType,
+// the rule mail_read and mail_attachment use: the part's own headers
+// first, since Thunderbird 153.6's MessageAttachment.type misses the
+// deleted and detached placeholders it writes itself.
+const PLACEHOLDER = {
+  cloudFile: "a FileLink, stored online",
+  linked: "linked to a file online",
+  detached: "detached and saved outside the message",
+  deleted: "deleted from the message",
+};
+
 // forwardedAttachments reads the original's attachments, refusing before
-// any byte is read when the listed sizes are over the limit.
+// any byte is read when the listed sizes are over the limit, or when an
+// attachment's file is not in the message, so its bytes are only a
+// placeholder.
 async function forwardedAttachments(run, h, already) {
   const list = answered(await call(run, () => tb().messages.listAttachments(h.id)));
   const atts = (Array.isArray(list) ? list : []).filter((a) => a && typeof a.partName === "string");
+  for (const a of atts) {
+    const type = attachmentType(a);
+    if (type !== "normal") {
+      const why = PLACEHOLDER[type] ?? "not stored in the message";
+      fail("refused", `The attachment ${baseName(a.name)} is ${why}, so the message holds only a placeholder for it and it cannot be forwarded as a file. Forward the whole message with forward_as attachment instead.`);
+    }
+  }
   let total = already + atts.reduce((n, a) => n + (Number.isFinite(a.size) ? a.size : 0), 0);
   if (total > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
   total = already;
@@ -448,34 +684,60 @@ async function forwardedAttachments(run, h, already) {
   return out;
 }
 
-// replyDraft builds a reply, reply-all or forward and imports it into
-// Drafts (recipe C, docs/SPIKES.md §2).
-async function replyDraft(run, kind, h, a, who, drafts) {
+// attachedOriginal reads the whole original message for a forward as an
+// attachment, named after its subject as Thunderbird names it.
+async function attachedOriginal(run, h, already) {
+  if (already + (Number.isFinite(h.size) ? h.size : 0) > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
+  const raw = answered(await call(run, () => tb().messages.getRaw(h.id)));
+  if (!raw || typeof raw.size !== "number" || typeof raw.arrayBuffer !== "function") fail("thunderbird_error", "Thunderbird did not return the message.");
+  if (already + raw.size > ATTACHMENT.maxBytes) fail("too_large", TOO_LARGE);
+  const buf = answered(await call(run, () => raw.arrayBuffer()));
+  const name = baseName((oneLine(h.subject) || "Forwarded message").replace(/[/\\]/g, "_") + ".eml");
+  return { name, data: new Uint8Array(buf), contentType: "message/rfc822" };
+}
+
+// replyRecipients works out To and Cc of a reply the client gave none
+// for. A reply goes to the original's Reply-To, else its author; a reply
+// to mail the user sent goes to that mail's recipients, as in Thunderbird.
+// A reply_all adds the original's To and Cc to Cc, without the user's
+// own addresses (every enabled account's) and those already in To. A
+// reply_list goes to the list.
+async function replyRecipients(run, kind, h, o, own) {
+  const listOf = (v) => (Array.isArray(v) ? v : []).filter((x) => typeof x === "string").map(oneLine);
+  if (kind === "reply_list") return { to: [await listAddress(run, o.headers)], cc: [] };
+  const fromMe = (await mailboxes(run, [oneLine(h.author)])).some((m) => own.has(m.email.toLowerCase()));
+  let to;
+  if (fromMe) {
+    const boxes = (await mailboxes(run, listOf(h.recipients))).filter((m) => m.email);
+    const others = boxes.filter((m) => !own.has(m.email.toLowerCase()));
+    to = (others.length ? others : boxes).map(formatMailbox);
+  } else {
+    to = (await mailboxes(run, [o.replyTo || h.author])).filter((m) => m.email).map(formatMailbox);
+  }
+  if (kind !== "reply_all") return { to, cc: [] };
+  const toSet = new Set((await mailboxes(run, to)).map((m) => m.email.toLowerCase()));
+  const seen = new Set();
+  const cc = (await mailboxes(run, [...listOf(h.recipients), ...listOf(h.ccList)]))
+    .filter((m) => {
+      const e = m.email.toLowerCase();
+      if (!e || own.has(e) || toSet.has(e) || seen.has(e)) return false;
+      seen.add(e);
+      return true;
+    })
+    .map(formatMailbox);
+  return { to, cc };
+}
+
+// replyDraft builds a reply, reply-all, reply to the list or forward and
+// imports it into Drafts (recipe C, docs/SPIKES.md §2).
+async function replyDraft(run, kind, h, a, who, drafts, forwardAs) {
   const { identity, own } = who;
   const o = await original(run, h);
-  const domain = oneLine(identity.email).split("@").pop().replace(/[^A-Za-z0-9.-]/g, "");
-  const mid = `${globalThis.crypto.randomUUID()}@${domain || "mcp-for-thunderbird.invalid"}`;
-  const tag = globalThis.crypto.randomUUID();
   const origMid = oneLine(h.headerMessageId).replace(/[<>\s]/g, "");
 
-  let to = a.to;
-  let cc = a.cc;
-  if (kind !== "forward") {
-    if (to === undefined) to = (await mailboxes(run, [o.replyTo || h.author])).filter((m) => m.email).map(formatMailbox);
-    if (cc === undefined && kind === "reply_all") {
-      const toSet = new Set((await mailboxes(run, to)).map((m) => m.email.toLowerCase()));
-      const seen = new Set();
-      const others = [...(Array.isArray(h.recipients) ? h.recipients : []), ...(Array.isArray(h.ccList) ? h.ccList : [])].map(oneLine);
-      cc = (await mailboxes(run, others))
-        .filter((m) => {
-          const e = m.email.toLowerCase();
-          if (!e || own.has(e) || toSet.has(e) || seen.has(e)) return false;
-          seen.add(e);
-          return true;
-        })
-        .map(formatMailbox);
-    }
-  }
+  // A reply_list without a list is refused even when the client gave
+  // recipients, as mail_compose refuses it.
+  const defaults = kind === "forward" ? { to: [], cc: [] } : await replyRecipients(run, kind, h, o, own);
   // Recipients the client gave are parsed and written back in one form;
   // an entry that yields no address is refused rather than dropped.
   const norm = async (list, k) => {
@@ -484,8 +746,8 @@ async function replyDraft(run, kind, h, a, who, drafts) {
     if (bad) fail("invalid_argument", `Not an address in ${k}: ${bad.raw}`);
     return boxes.map(formatMailbox);
   };
-  to = a.to !== undefined ? await norm(a.to, "to") : to || [];
-  cc = a.cc !== undefined ? await norm(a.cc, "cc") : cc || [];
+  const to = a.to !== undefined ? await norm(a.to, "to") : defaults.to;
+  const cc = a.cc !== undefined ? await norm(a.cc, "cc") : defaults.cc;
   const bcc = await norm(a.bcc, "bcc");
 
   const subject = a.subject !== undefined ? oneLine(a.subject) : kind === "forward" ? `Fwd: ${oneLine(h.subject)}` : `Re: ${stripRe(oneLine(h.subject))}`;
@@ -494,7 +756,9 @@ async function replyDraft(run, kind, h, a, who, drafts) {
   const whenText = Number.isNaN(when.getTime()) ? "" : when.toUTCString();
 
   let quoted;
-  if (kind === "forward") {
+  if (kind === "forward" && forwardAs === "attachment") {
+    quoted = "";
+  } else if (kind === "forward") {
     const row = (k, v) => `<tr><th valign="BASELINE" nowrap="nowrap" align="RIGHT">${k}: </th><td>${esc(v)}</td></tr>`;
     const recips = (Array.isArray(h.recipients) ? h.recipients : []).map(oneLine).join(", ");
     quoted =
@@ -513,8 +777,27 @@ async function replyDraft(run, kind, h, a, who, drafts) {
   }
   const html = htmlDoc(bodyHtml(a) + quoted);
 
-  const atts = kind === "forward" ? [...a.attachments, ...(await forwardedAttachments(run, h, a.attachments.reduce((n, x) => n + x.data.byteLength, 0)))] : a.attachments;
+  const given = a.attachments.reduce((n, x) => n + x.data.byteLength, 0);
+  let atts = a.attachments;
+  if (kind === "forward") atts = [...atts, ...(forwardAs === "attachment" ? [await attachedOriginal(run, h, given)] : await forwardedAttachments(run, h, given))];
 
+  const threading = [];
+  if (kind !== "forward" && origMid) {
+    const refs = [...o.references.filter((r) => r !== `<${origMid}>`), `<${origMid}>`].slice(-MAX_REFERENCES);
+    threading.push(`In-Reply-To: <${origMid}>`, `References: ${refs.join("\r\n ")}`);
+  }
+  return importDraft(run, { identity, to, cc, bcc, subject, html, atts, threading }, drafts);
+}
+
+// importDraft writes a draft as an RFC 5322 message from the identity and
+// imports it into the Drafts folder draftsFolder checked, so the draft
+// lands exactly there, and its id is known from the Message-ID set here.
+// X-Identity-Key tells Thunderbird which identity to send it from when the
+// user opens it.
+async function importDraft(run, { identity, to, cc, bcc, subject, html, atts, threading = [] }, drafts) {
+  const domain = oneLine(identity.email).split("@").pop().replace(/[^A-Za-z0-9.-]/g, "");
+  const mid = `${globalThis.crypto.randomUUID()}@${domain || "mcp-for-thunderbird.invalid"}`;
+  const tag = globalThis.crypto.randomUUID();
   const enc = (name, value) => encodeHeader(run, name, value);
   const lines = [
     `Message-ID: <${mid}>`,
@@ -526,11 +809,7 @@ async function replyDraft(run, kind, h, a, who, drafts) {
   if (to.length) lines.push(`To: ${await enc("To", to.join(", "))}`);
   if (cc.length) lines.push(`Cc: ${await enc("Cc", cc.join(", "))}`);
   if (bcc.length) lines.push(`Bcc: ${await enc("Bcc", bcc.join(", "))}`);
-  lines.push(`Subject: ${await enc("Subject", subject)}`);
-  if (kind !== "forward" && origMid) {
-    const refs = [...o.references.filter((r) => r !== `<${origMid}>`), `<${origMid}>`].slice(-MAX_REFERENCES);
-    lines.push(`In-Reply-To: <${origMid}>`, `References: ${refs.join("\r\n ")}`);
-  }
+  lines.push(`Subject: ${await enc("Subject", subject)}`, ...threading);
   lines.push(
     "X-Mozilla-Draft-Info: internal/draft; vcard=0; receipt=0; DSN=0; uuencode=0;\r\n attachmentreminder=0; deliveryformat=0",
     `X-Identity-Key: ${oneLine(identity.id)}`,
@@ -544,69 +823,32 @@ async function replyDraft(run, kind, h, a, who, drafts) {
   return { draftId: encodeId(drafts.accountId, drafts.path, mid) };
 }
 
-// findDraft looks for the draft saveMessage stored (IMAP returns no
-// header, docs/SPIKES.md §2) by its X-MFT-Draft header, until the budget
-// is nearly spent.
-async function findDraft(outer, drafts, tag, since) {
-  const run = { ...outer, deadline: Math.min(outer.deadline, Date.now() + LOOKUP.maxMs) };
-  const checked = new Set();
-  for (;;) {
-    const page = await call(run, () => tb().messages.query({ accountId: drafts.accountId, folderId: drafts.id, fromDate: new Date(since - LOOKUP_SLACK_MS), messagesPerPage: 100 }));
-    if (page === TIMEOUT) return null;
-    if (page && page.id) await call(run, () => tb().messages.abortList(page.id)).catch(() => {});
-    const candidates = (page && Array.isArray(page.messages) ? page.messages : [])
-      .filter((h) => !checked.has(h.id))
-      .sort((x, y) => new Date(y.date) - new Date(x.date) || y.id - x.id)
-      .slice(0, LOOKUP_CANDIDATES);
-    for (const h of candidates) {
-      checked.add(h.id);
-      const full = await call(run, () => tb().messages.getFull(h.id));
-      if (full === TIMEOUT) return null;
-      if (headerValues(full, "x-mft-draft").some((v) => v.trim() === tag)) return h;
-    }
-    if (run.deadline - Date.now() < 2 * POLL_MS) return null;
-    await sleep(POLL_MS);
-  }
-}
-
+// newDraft imports a new message into Drafts, as replyDraft does. Thunderbird's
+// messages.saveMessage would save it where the identity's settings say, a
+// folder add-ons cannot see beforehand, so it could land in an account
+// that is not enabled or in an excluded folder.
 async function newDraft(run, a, identity, drafts) {
-  const tag = globalThis.crypto.randomUUID();
   // Recipients are parsed and written back in one form, as for replies;
   // an entry that yields no address is kept as given.
   const norm = async (list) => {
     const boxes = await mailboxes(run, list || []);
     return boxes.map((m) => (m.email ? formatMailbox(m) : m.raw)).filter((x, i, all) => all.indexOf(x) === i);
   };
-  const details = {
-    identityId: identity.id,
-    to: await norm(a.to),
-    cc: await norm(a.cc),
-    bcc: await norm(a.bcc),
-    subject: oneLine(a.subject ?? ""),
-    body: bodyHtml(a),
-    customHeaders: [{ name: "X-MFT-Draft", value: tag }],
-  };
-  if (a.attachments.length) details.attachments = files(a.attachments);
-  const since = Date.now();
-  const res = await changing(run, () => tb().messages.saveMessage(details, { mode: "draft" }), "the draft may have been saved");
-  let h = res && Array.isArray(res.messages) ? res.messages.find((m) => m && m.folder && m.headerMessageId) : null;
-  // The draft is saved: a failed lookup gives no id rather than an error,
-  // so the client does not save it again.
-  if (!h) h = await findDraft(run, drafts, tag, since).catch(() => null);
-  return { draftId: h ? encodeId(h.folder.accountId, h.folder.path, h.headerMessageId) : null };
+  const [to, cc, bcc] = [await norm(a.to), await norm(a.cc), await norm(a.bcc)];
+  return importDraft(run, { identity, to, cc, bcc, subject: oneLine(a.subject ?? ""), html: htmlDoc(bodyHtml(a)), atts: a.attachments }, drafts);
 }
 
 async function mailDraft(args, ctx) {
   const s = ctx.settings;
   const kind = kindArg(args);
+  const forwardAs = forwardAsArg(args, kind);
   const a = common(args);
   const run = newRun(COMPOSE.budgetMs);
   const h = kind === "new" ? null : await message(run, args.id, s);
-  const accountId = accountFor(args, s, h);
-  const who = await identityOf(run, accountId);
-  const drafts = await draftsFolder(run, accountId, s);
+  const who = await writer(run, args, s, h, a.from);
+  const drafts = await draftsFolder(run, who.accountId, s);
   if (kind === "new") return newDraft(run, a, who.identity, drafts);
-  return replyDraft(run, kind, h, a, who, drafts);
+  return replyDraft(run, kind, h, a, who, drafts, forwardAs);
 }
 
 // ---- mail_compose ----
@@ -634,17 +876,25 @@ async function intoOpenWindow(run, fn) {
 // insertAtTop runs in the compose window's document (scripting
 // executeScript) and puts the text's HTML at the top of the body, above
 // the signature or quote, leaving the elements already there as they are.
+// It returns true, so the caller can tell the text went in.
 export function insertAtTop(html) {
   document.body.insertAdjacentHTML("afterbegin", html);
+  return true;
 }
+
+const REPLY_TYPES = { reply: "replyToSender", reply_all: "replyToAll", reply_list: "replyToList" };
 
 async function mailCompose(args, ctx) {
   const s = ctx.settings;
   const kind = kindArg(args);
+  const forwardAs = forwardAsArg(args, kind);
   const a = common(args);
   const run = newRun(COMPOSE.budgetMs);
   const h = kind === "new" ? null : await message(run, args.id, s);
-  const { identity } = await identityOf(run, accountFor(args, s, h));
+  const { identity } = await writer(run, args, s, h, a.from);
+  // Thunderbird answers the list itself; a message without one is refused
+  // here, so no window opens addressed some other way.
+  if (kind === "reply_list") await listAddress(run, answered(await headersOf(run, h.id)));
   const html = bodyHtml(a);
   const subject = a.subject === undefined ? undefined : oneLine(a.subject);
 
@@ -674,8 +924,8 @@ async function mailCompose(args, ctx) {
       kind === "new"
         ? tb().compose.beginNew(details)
         : kind === "forward"
-          ? tb().compose.beginForward(h.id, "forwardInline", details)
-          : tb().compose.beginReply(h.id, kind === "reply_all" ? "replyToAll" : "replyToSender", details),
+          ? tb().compose.beginForward(h.id, forwardAs === "attachment" ? "forwardAsAttachment" : "forwardInline", details)
+          : tb().compose.beginReply(h.id, REPLY_TYPES[kind], details),
     "the compose window may have opened",
   );
   if (html) {
@@ -689,14 +939,27 @@ async function mailCompose(args, ctx) {
       // An HTML text is inserted into the open document, not set as a new
       // body: setComposeDetails rebuilds the whole document, and Thunderbird
       // does not load the remote images of the rebuilt signature again, so
-      // they show broken in the window.
-      await intoOpenWindow(run, () => tb().scripting.executeScript({ target: { tabId: tab.id }, func: insertAtTop, args: [html] }));
+      // they show broken in the window. The script's result says whether
+      // the text went in: a script that threw, or found no document, gives
+      // no true.
+      const res = await intoOpenWindow(run, () => tb().scripting.executeScript({ target: { tabId: tab.id }, func: insertAtTop, args: [html] }));
+      const first = Array.isArray(res) ? res[0] : undefined;
+      if (!first || first.error !== undefined || first.result !== true) throw openedWithoutText("Thunderbird could not put the text in it");
     }
   }
-  return { opened: true };
+  // The ids name the window for the client (tabs and windows); a window
+  // Thunderbird did not report has none.
+  const out = { opened: true };
+  if (tab && Number.isInteger(tab.id)) out.tabId = tab.id;
+  if (tab && Number.isInteger(tab.windowId)) out.windowId = tab.windowId;
+  return out;
 }
 
 // ---- mail_send ----
+
+// offline says whether Thunderbird is in Work Offline mode: the background
+// page's navigator.onLine follows Thunderbird's offline state.
+const offline = () => globalThis.navigator?.onLine === false;
 
 async function mailSend(args, ctx) {
   const s = ctx.settings;
@@ -722,10 +985,20 @@ async function mailSend(args, ctx) {
     checked[k] = boxes.map((m) => m.email);
   }
 
-  const { identity } = await identityOf(run, accountFor(args, s, null));
+  const { identity } = await writer(run, args, s, null, a.from);
   const details = { identityId: identity.id, to: checked.to, cc: checked.cc, bcc: checked.bcc, subject: oneLine(a.subject), body: bodyHtml(a) };
   if (a.attachments.length) details.attachments = files(a.attachments);
-  await changing(run, () => tb().messages.sendMessage(details, { mode: "sendNow" }), "the message may have been sent");
+  // sendNow fails while Thunderbird is offline (only a send without a mode
+  // would be queued for later), so an offline Thunderbird sends nothing and
+  // says so, and a send that failed because Thunderbird went offline says
+  // that too.
+  if (offline()) fail("thunderbird_error", OFFLINE);
+  try {
+    await changing(run, () => tb().messages.sendMessage(details, { mode: "sendNow" }), "the message may have been sent");
+  } catch (e) {
+    if (!isToolError(e) && offline()) fail("thunderbird_error", OFFLINE);
+    throw e;
+  }
   return { sent: true };
 }
 

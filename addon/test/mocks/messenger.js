@@ -11,8 +11,17 @@
 // oldest-first ordering, never-settling queries, raw sources, attachments
 // and address books. Task 12 added getFull (plain and HTML parts, extra
 // headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
-// saveMessage, import, sendMessage, compose and messengerUtilities;
-// `release` below 153 takes away what Thunderbird 140 ESR lacks.
+// saveMessage, import, sendMessage, compose and messengerUtilities, and
+// folders.onRenamed and onMoved to fire by hand;
+// `release` below 153 takes away what Thunderbird 140 ESR lacks. Message
+// lists, the address, junk, me and tag filters, getHeaders and priority
+// follow Thunderbird 153.6 (ExtensionMessages.sys.mjs).
+// The organise handlers' tests added messages.onMoved and onCopied,
+// archive skipping and copying, and folders.getFolderCapabilities.
+// Folder and account events, with helpers that rename, move, copy,
+// create and delete folders and add and remove accounts, getBrowserInfo
+// and permissions.remove came with the folder exclusions that follow
+// renames.
 
 export function event() {
   const listeners = [];
@@ -42,6 +51,7 @@ export function header(id, folder, extra = {}) {
     junk: false,
     size: 10,
     tags: [],
+    priority: "none",
     recipients: [],
     ccList: [],
     bccList: [],
@@ -96,9 +106,18 @@ function checkSpecialUse(uses, where) {
 }
 
 // createMessenger returns a fresh mock. `accounts` is a list of
-// {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]}}.
-// `books` is a list of {id, name, contacts: [vCard string, ...]}.
-export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153 } = {}) {
+// {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]},
+// draftsIn?: account id whose Drafts folder saveMessage uses,
+// favorites?: [path, ...], folderInfo?: {path: {newMessageCount, quota, lastUsed, ...}},
+// noMessages?: [path, ...], noDelete?: [path, ...]}; a noMessages folder
+// cannot hold messages (getFolderCapabilities says canAddMessages: false),
+// and a noDelete folder cannot delete them (canDeleteMessages: false).
+// accounts.getDefault gives the account `defaultAccount` names (an id), or
+// none when it is not given. A folder may also be {path, isVirtual?,
+// isTag?, isUnified?}.
+// `books` is a list of {id, name, remote?, contacts: [vCard string, ...],
+// lists?: [{name, nickName?, members: [vCard string, ...]}]}.
+export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153, defaultAccount = null } = {}) {
   const local = new Map();
   const onChanged = event();
   const ports = [];
@@ -106,20 +125,31 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const actionState = { badgeText: "", title: "", badgeColor: null };
   const perms = new Set(granted);
   const requested = [];
+  const removed = [];
   const denyRequests = { value: false };
   let optionsOpened = 0;
 
   const folderList = [];
+  // folder id -> extra MailFolderInfo fields
+  const folderInfo = new Map();
+  const noMessages = new Set();
+  const noDelete = new Set();
+  const newFolder = (accountId, path, flags = {}, specialUse = []) => ({
+    id: `${accountId}:/${path}`,
+    accountId,
+    path,
+    name: path.split("/").pop(),
+    isRoot: false,
+    ...flags,
+    specialUse,
+  });
   for (const a of accounts) {
-    for (const path of a.folders || []) {
-      folderList.push({
-        id: `${a.id}:/${path}`,
-        accountId: a.id,
-        path,
-        name: path.split("/").pop(),
-        isRoot: false,
-        specialUse: (a.specialUse && a.specialUse[path]) || [],
-      });
+    for (const entry of a.folders || []) {
+      const { path, ...flags } = typeof entry === "string" ? { path: entry } : entry;
+      folderList.push(newFolder(a.id, path, { isFavorite: Boolean(a.favorites && a.favorites.includes(path)), ...flags }, (a.specialUse && a.specialUse[path]) || []));
+      if (a.folderInfo && a.folderInfo[path]) folderInfo.set(folderList.at(-1).id, a.folderInfo[path]);
+      if ((a.noMessages || []).includes(path)) noMessages.add(folderList.at(-1).id);
+      if ((a.noDelete || []).includes(path)) noDelete.add(folderList.at(-1).id);
       checkSpecialUse(folderList.at(-1).specialUse, `fixture ${a.id}:${path}`);
     }
   }
@@ -140,6 +170,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     continueList: [],
     get: [],
     getRaw: [],
+    getHeaders: [],
     getFull: [],
     listAttachments: [],
     getAttachmentFile: [],
@@ -162,10 +193,30 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // query's answer time in ms.
   // fail(op, id) true makes that organise call reject; stall(op) true makes
   // it never settle.
+  // archiveSkip(id) true: archive leaves that message where it is, as
+  // Thunderbird does when its identity has archiving turned off.
+  // archiveTo(header) gives the folder (accountId, path) archive files the
+  // message into; by default the account's archive folder. As Thunderbird
+  // does, archive leaves a message already in that folder where it is, and
+  // copies one from a noDelete folder or a newsgroup (an nntp account).
+  // movedDelay is the time in ms before messages.onMoved or
+  // messages.onCopied fires (null: neither fires).
   // saveReturns: saveMessage returns the saved header (Local Folders);
   // by default it returns none, as on IMAP (docs/SPIKES.md §2).
   // importReturns false: messages.import returns no header.
-  const behaviour = { hang: null, delay: null, fail: null, stall: null, inFlight: 0, maxInFlight: 0, saveReturns: false, importReturns: true };
+  const behaviour = {
+    hang: null,
+    delay: null,
+    fail: null,
+    stall: null,
+    inFlight: 0,
+    maxInFlight: 0,
+    saveReturns: false,
+    importReturns: true,
+    archiveSkip: null,
+    archiveTo: null,
+    movedDelay: 0,
+  };
   // pages read per query (index into calls.query), first page included
   const pagesByQuery = new Map();
   const lists = new Map();
@@ -186,6 +237,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         ports.push(p);
         return p;
       },
+      getBrowserInfo: async () => ({ name: "Thunderbird", vendor: "Mozilla", version: `${release}.6.0`, buildID: "20261026222624" }),
       onInstalled: event(),
       onStartup: event(),
       onMessage: event(),
@@ -223,6 +275,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const a = accounts.find((x) => x.id === id);
         return a ? { id: a.id, name: a.name, type: a.type, identities: clone(a.identities || []) } : null;
       },
+      getDefault: async () => {
+        const a = accounts.find((x) => x.id === defaultAccount);
+        return a ? { id: a.id, name: a.name, type: a.type, identities: clone(a.identities || []) } : null;
+      },
+      onCreated: event(),
+      onDeleted: event(),
     },
     folders: {
       query: async (q = {}) => {
@@ -234,13 +292,23 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (!f) throw new Error(`Folder not found: ${id}`);
         return clone(f);
       },
+      getFolderCapabilities: async (id) => {
+        const f = folderList.find((x) => x.id === id);
+        if (!f) throw new Error(`Folder not found: ${id}`);
+        return { canAddMessages: !noMessages.has(id), canAddSubfolders: true, canBeDeleted: true, canBeRenamed: true, canDeleteMessages: !noDelete.has(id) };
+      },
       getFolderInfo: async (id) => {
         calls.getFolderInfo.push(id);
         const f = folderList.find((x) => x.id === id);
         if (!f) throw new Error(`Folder not found: ${id}`);
         const hs = [...store.values()].filter((h) => h.folder.id === id);
-        return { totalMessageCount: hs.length, unreadMessageCount: hs.filter((h) => !h.read).length };
+        return { totalMessageCount: hs.length, unreadMessageCount: hs.filter((h) => !h.read).length, newMessageCount: 0, ...clone(folderInfo.get(id) || {}) };
       },
+      onCreated: event(),
+      onDeleted: event(),
+      onRenamed: event(),
+      onMoved: event(),
+      onCopied: event(),
     },
     messages: {
       get: async (id) => {
@@ -256,7 +324,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.query.push(q);
         const never = () => new Promise(() => {});
         if (typeof q.fromDate === "string" || typeof q.toDate === "string") return never();
-        const hang = Boolean(behaviour.hang && behaviour.hang(q));
+        // Thunderbird 153.6 reads its identities only for a true toMe or
+        // fromMe; a false one alone throws inside its search, whose list
+        // never ends.
+        const lonelyFalse = (q.toMe === false || q.fromMe === false) && !(q.toMe || q.fromMe);
+        const hang = lonelyFalse || Boolean(behaviour.hang && behaviour.hang(q));
         if (hang && !q.returnMessageListId) return never();
         const root = calls.query.length - 1;
         const delay = behaviour.delay ? behaviour.delay(q) : 0;
@@ -277,6 +349,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           });
         };
         const has = (s, sub) => String(s ?? "").includes(sub);
+        const mine = accounts.flatMap((a) => (a.identities || []).map((i) => String(i.email).toLowerCase()));
+        const isMine = (list) => list.some((x) => mine.includes(String(parseMailboxes(x)[0]?.email ?? "").toLowerCase()));
         const all = [...store.values()]
           .filter(
             (h) =>
@@ -285,19 +359,22 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
               (q.headerMessageId == null || h.headerMessageId === q.headerMessageId) &&
               (q.fromDate == null || h.date.getTime() >= q.fromDate.getTime()) &&
               (q.toDate == null || h.date.getTime() <= q.toDate.getTime()) &&
-              (q.author == null || has(h.author, q.author)) &&
-              (q.recipients == null || [...h.recipients, ...h.ccList, ...h.bccList].some((r) => has(r, q.recipients))) &&
+              (q.author == null || addressMatch(q.author, [h.author])) &&
+              (q.recipients == null || addressMatch(q.recipients, [...h.recipients, ...h.ccList, ...h.bccList])) &&
               (q.subject == null || has(h.subject, q.subject)) &&
               (q.fullText == null || has(h.subject, q.fullText) || has(h.author, q.fullText) || has(bodies.get(h.id), q.fullText)) &&
               (q.read == null || h.read === q.read) &&
               (q.flagged == null || h.flagged === q.flagged) &&
-              (q.tags == null || Object.keys(q.tags.tags || {}).every((t) => h.tags.includes(t))) &&
+              (q.junk == null || h.junk === q.junk) &&
+              (q.toMe == null || isMine([...h.recipients, ...h.ccList, ...h.bccList]) === q.toMe) &&
+              (q.fromMe == null || isMine([h.author]) === q.fromMe) &&
+              (q.tags == null || tagsMatch(q.tags, h.tags)) &&
               (q.attachment == null || (attachments.get(h.id) || []).length > 0 === q.attachment),
           )
           .sort((a, b) => a.date - b.date);
         if (q.returnMessageListId) {
           const listId = `list-${nextList++}`;
-          lists.set(listId, { items: all, per: q.messagesPerPage || 100, root, hang });
+          lists.set(listId, { items: all, per: q.messagesPerPage || 100, root, hang, done: false });
           return listId;
         }
         pagesByQuery.set(root, 1);
@@ -306,11 +383,12 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       continueList: async (listId) => {
         calls.continueList.push(listId);
         const rest = lists.get(listId);
-        if (!rest) throw new Error(`No message list for id ${listId}`);
+        if (!rest) throw new Error(`No message list for id ${listId}. Have you reached the end of a list?`);
         pagesByQuery.set(rest.root, (pagesByQuery.get(rest.root) || 0) + 1);
-        if (rest.hang) return new Promise(() => {});
+        // An aborted list answers at once: abortList resolves its page.
+        if (rest.hang && !rest.done) return new Promise(() => {});
         lists.delete(listId);
-        return page(rest.items, rest.per, false, rest.root);
+        return page(rest.done ? [] : rest.items, rest.per, false, rest.root);
       },
       // Organise calls (Task 15). Ids stay the same when a message moves.
       update: async (id, props) => {
@@ -328,7 +406,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          h.folder = { ...f };
+          moveTo(h, f);
         }
       },
       copy: async (ids, dest) => {
@@ -339,8 +417,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          const nid = nextId++;
-          store.set(nid, { ...clone(h), id: nid, folder: { ...f } });
+          copyTo(h, f);
         }
       },
       archive: async (ids) => {
@@ -349,8 +426,15 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          const f = folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
-          if (f) h.folder = { ...f };
+          if (behaviour.archiveSkip && behaviour.archiveSkip(id)) continue;
+          const want = behaviour.archiveTo ? behaviour.archiveTo(clone(h)) : null;
+          const f = want
+            ? folderList.find((x) => x.accountId === want.accountId && x.path === want.path)
+            : folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
+          if (!f || f.id === h.folder.id) continue;
+          const news = accounts.some((a) => a.id === h.folder.accountId && a.type === "nntp");
+          if (news || noDelete.has(h.folder.id)) copyTo(h, f);
+          else moveTo(h, f);
         }
       },
       delete: async (ids) => {
@@ -358,15 +442,18 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) store.delete(id);
       },
       // saveMessage stores the draft in the identity's account's Drafts
-      // folder with a Message-ID of its own; X- custom headers are kept.
+      // folder, or in the account a fixture's `draftsIn` names (an identity
+      // set to keep its drafts elsewhere), with a Message-ID of its own; X-
+      // custom headers are kept.
       saveMessage: async (details, options) => {
         calls.saveMessage.push([details, options]);
         const a = accounts.find((x) => (x.identities || []).some((i) => i.id === details.identityId));
-        const f = a && folderList.find((x) => x.accountId === a.id && x.specialUse.includes("drafts"));
+        const target = a && (a.draftsIn || a.id);
+        const f = a && folderList.find((x) => x.accountId === target && x.specialUse.includes("drafts"));
         if (!f) throw new Error("No drafts folder");
         const headers = {};
         for (const c of details.customHeaders || []) if (/^X-/i.test(c.name)) headers[c.name.toLowerCase()] = [c.value];
-        const h = addMessageTo(a.id, f.path, { headerMessageId: `saved-${nextId}@example.org`, subject: details.subject, date: new Date(), headers });
+        const h = addMessageTo(target, f.path, { headerMessageId: `saved-${nextId}@example.org`, subject: details.subject, date: new Date(), headers });
         return { mode: "draft", messages: behaviour.saveReturns ? [h] : [] };
       },
       // import adds the RFC 5322 file to the folder under its Message-ID.
@@ -385,15 +472,21 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.sendMessage.push([details, options]);
         return { mode: "sendNow", headerMessageId: "sent-1@example.org", messages: [] };
       },
+      onMoved: event(),
+      onCopied: event(),
       tags: {
         list: async () => [
           { key: "$label1", tag: "Important", color: "#FF0000", ordinal: "" },
           { key: "$label4", tag: "To Do", color: "#3333FF", ordinal: "" },
         ],
       },
+      // abortList ends the search but, as in Thunderbird, keeps the list
+      // until its last page (id null) is read with continueList.
       abortList: async (listId) => {
         calls.abortList.push(listId);
-        lists.delete(listId);
+        const l = lists.get(listId);
+        if (!l) throw new Error(`No message list for id ${listId}. Have you reached the end of a list?`);
+        l.done = true;
       },
       listAttachments: async (id) => {
         calls.listAttachments.push(id);
@@ -431,6 +524,19 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (mimeTrees.has(id)) return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [clone(mimeTrees.get(id))] };
         const parts = [bodyPart, ...atts].filter(Boolean);
         return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [{ contentType: "multipart/mixed", partName: "1", parts }] };
+      },
+      // getHeaders (Thunderbird 147 and later) returns the header block
+      // getRaw builds, as lower-case names with lists of values, without
+      // reading a body.
+      getHeaders: async (id) => {
+        calls.getHeaders.push(id);
+        const h = store.get(id);
+        if (!h) throw new Error(`Message not found: ${id}.`);
+        const r = refs.get(id) || {};
+        const out = { "message-id": [`<${h.headerMessageId}>`], from: [h.author], subject: [h.subject] };
+        if (r.inReplyTo) out["in-reply-to"] = [`<${r.inReplyTo}>`];
+        if (r.references && r.references.length) out.references = [r.references.map((x) => `<${x}>`).join(" ")];
+        return { ...out, ...clone(extraHeaders.get(id) || {}) };
       },
       // getRaw builds a small RFC 5322 source from the header and side data;
       // a File (Blob) unless data_format is "BinaryString".
@@ -470,6 +576,20 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           return out;
         },
       },
+      mailingLists: {
+        list: async (parentId) => {
+          const b = books.find((x) => x.id === parentId);
+          if (!b) throw new Error(`addressBook with id=${parentId} could not be found.`);
+          return (b.lists || []).map((l, i) => ({ id: `${b.id}-list${i}`, parentId: b.id, type: "mailingList", name: l.name, nickName: l.nickName ?? "", description: "" }));
+        },
+        listMembers: async (id) => {
+          for (const b of books) {
+            const i = (b.lists || []).findIndex((_, j) => `${b.id}-list${j}` === id);
+            if (i >= 0) return b.lists[i].members.map((vCard, j) => ({ id: `${id}-m${j}`, parentId: id, type: "contact", vCard }));
+          }
+          throw new Error(`mailingList with id=${id} could not be found.`);
+        },
+      },
     },
     action: {
       setBadgeText: async ({ text }) => {
@@ -506,12 +626,14 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.compose.push(["setComposeDetails", args]);
       },
     },
-    // executeScript records the call; compose tests read the body it would
-    // leave from the window's details and the function's argument.
+    // executeScript records the call and answers as Thunderbird does for a
+    // script that ran and returned true (insertAtTop's result); compose
+    // tests read the body it would leave from the window's details and the
+    // function's argument.
     scripting: {
       executeScript: async (...args) => {
         calls.compose.push(["executeScript", args]);
-        return [{ result: undefined }];
+        return [{ frameId: 0, result: true }];
       },
     },
     messengerUtilities: {
@@ -536,6 +658,16 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         messenger.permissions.onAdded.fire({ permissions, origins: [] });
         return true;
       },
+      // remove gives up a granted permission, as Thunderbird does without
+      // asking; every removal is recorded.
+      remove: async ({ permissions = [] }) => {
+        removed.push([...permissions]);
+        const had = permissions.filter((p) => perms.has(p));
+        for (const p of had) perms.delete(p);
+        syncSend();
+        if (had.length) messenger.permissions.onRemoved.fire({ permissions: had, origins: [] });
+        return had.length > 0;
+      },
       onAdded: event(),
       onRemoved: event(),
     },
@@ -553,6 +685,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     const id = nextId++;
     const { body, html, mime, headers, attachments: atts, references, inReplyTo, ...rest } = extra;
     const h = header(id, { ...f }, rest);
+    if (release < 153) delete h.priority;
     store.set(id, h);
     if (body !== undefined) bodies.set(id, body);
     if (html !== undefined) htmlBodies.set(id, html);
@@ -561,6 +694,31 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     if (atts !== undefined) attachments.set(id, atts);
     if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
     return clone(h);
+  }
+
+  // moveTo puts the message in folder f and fires messages.onMoved with its
+  // header before and after, as Thunderbird does (after movedDelay ms; on
+  // IMAP once the message is seen in the new folder).
+  function moveTo(h, f) {
+    const before = clone(h);
+    h.folder = { ...f };
+    tell(messenger.messages.onMoved, before, clone(h));
+  }
+
+  // copyTo puts a copy of the message in folder f, with an id of its own,
+  // and fires messages.onCopied with the original and the copy.
+  function copyTo(h, f) {
+    const nid = nextId++;
+    const copy = { ...clone(h), id: nid, folder: { ...f } };
+    store.set(nid, copy);
+    tell(messenger.messages.onCopied, clone(h), clone(copy));
+  }
+
+  function tell(ev, before, after) {
+    if (behaviour.movedDelay == null) return;
+    const fire = () => ev.fire({ id: null, messages: [before] }, { id: null, messages: [after] });
+    if (behaviour.movedDelay > 0) setTimeout(fire, behaviour.movedDelay);
+    else fire();
   }
 
   async function organiseGate(op, id) {
@@ -591,18 +749,40 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   syncSend();
 
   // release below 153 stands for Thunderbird 140 ESR: it has no
-  // messages.saveMessage or sendMessage, and rejects the messages.save and
+  // messages.getHeaders (147), saveMessage or sendMessage, and rejects the messages.save and
   // messages.send permissions it does not know.
   if (release < 153) {
+    delete messenger.messages.getHeaders;
     delete messenger.messages.saveMessage;
     delete messenger.messages.sendMessage;
     const unknown = (permissions) => {
       const bad = permissions.find((p) => p === "messages.save" || p === "messages.send");
       if (bad) throw new Error(`Type error for parameter permissions (Error processing permissions.0: Value "${bad}" must either be one of the known permissions)`);
     };
-    const { contains, request } = messenger.permissions;
+    const { contains, request, remove } = messenger.permissions;
     messenger.permissions.contains = async (arg = {}) => (unknown(arg.permissions || []), contains(arg));
     messenger.permissions.request = async (arg = {}) => (unknown(arg.permissions || []), request(arg));
+    messenger.permissions.remove = async (arg = {}) => (unknown(arg.permissions || []), remove(arg));
+  }
+
+  // relocate moves (or copies) a folder and its subfolders from one
+  // account and path to another, with their messages, and returns the
+  // folder before and after, as Thunderbird's folder events give them.
+  function relocate(accountId, path, toAccountId, toPath, copy) {
+    const under = (f) => f.accountId === accountId && (f.path === path || f.path.startsWith(path + "/"));
+    const top = folderList.find((f) => f.accountId === accountId && f.path === path);
+    if (!top) throw new Error(`no folder ${accountId} ${path}`);
+    const before = clone(top);
+    for (const f of folderList.filter(under)) {
+      const next = newFolder(toAccountId, toPath + f.path.slice(path.length), { isVirtual: f.isVirtual, isTag: f.isTag, isUnified: f.isUnified }, f.specialUse);
+      if (copy) folderList.push(next);
+      else {
+        const was = f.id;
+        Object.assign(f, next);
+        for (const h of store.values()) if (h.folder.id === was) h.folder = { ...f };
+      }
+    }
+    return [before, clone(folderList.find((f) => f.accountId === toAccountId && f.path === toPath))];
   }
 
   const mock = {
@@ -632,6 +812,41 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       });
     },
     permissionRequests: requested,
+    permissionRemovals: removed,
+    // Folder changes fire Thunderbird's folder events unless quiet is set,
+    // which stands for an event not yet delivered.
+    createFolder(accountId, path, { quiet = false, ...flags } = {}) {
+      folderList.push(newFolder(accountId, path, flags));
+      if (!quiet) messenger.folders.onCreated.fire(clone(folderList.at(-1)));
+    },
+    deleteFolder(accountId, path, { quiet = false } = {}) {
+      const gone = folderList.filter((f) => f.accountId === accountId && (f.path === path || f.path.startsWith(path + "/")));
+      for (const f of gone) folderList.splice(folderList.indexOf(f), 1);
+      if (!quiet && gone.length) messenger.folders.onDeleted.fire(clone(gone[0]));
+    },
+    renameFolder(accountId, path, toPath, { quiet = false } = {}) {
+      const [a, b] = relocate(accountId, path, accountId, toPath, false);
+      if (!quiet) messenger.folders.onRenamed.fire(a, b);
+    },
+    moveFolder(accountId, path, toAccountId, toPath, { quiet = false } = {}) {
+      const [a, b] = relocate(accountId, path, toAccountId, toPath, false);
+      if (!quiet) messenger.folders.onMoved.fire(a, b);
+    },
+    copyFolder(accountId, path, toAccountId, toPath, { quiet = false } = {}) {
+      const [a, b] = relocate(accountId, path, toAccountId, toPath, true);
+      if (!quiet) messenger.folders.onCopied.fire(a, b);
+    },
+    addAccount(a) {
+      accounts.push({ identities: [], folders: [], ...a });
+      for (const path of a.folders || []) folderList.push(newFolder(a.id, path));
+      messenger.accounts.onCreated.fire(a.id, { id: a.id, name: a.name, type: a.type, identities: [] });
+    },
+    removeAccount(id) {
+      const i = accounts.findIndex((x) => x.id === id);
+      if (i >= 0) accounts.splice(i, 1);
+      for (const f of folderList.filter((x) => x.accountId === id)) folderList.splice(folderList.indexOf(f), 1);
+      messenger.accounts.onDeleted.fire(id);
+    },
     denyRequests: (v = true) => {
       denyRequests.value = v;
     },
@@ -650,6 +865,49 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     pagesPerQuery: () => [...pagesByQuery.values()],
   };
   return mock;
+}
+
+// addressMatch is Thunderbird's isAddressMatch for author and recipients:
+// every mailbox of the search must match one of the addresses, its address
+// part in full and its name part as a fragment, in any case. Text without
+// "@" is a name.
+export function addressMatch(search, list) {
+  const prep = (m) => {
+    let email = m.email ? m.email.toLowerCase() : undefined;
+    let name = m.name ? m.name.toLowerCase() : undefined;
+    if (email && !name && !email.includes("@")) [name, email] = [email, undefined];
+    return { name, email };
+  };
+  const wanted = parseMailboxes(String(search).replaceAll(";", ",")).map(prep);
+  const have = list.flatMap((x) => parseMailboxes(x)).map(prep);
+  if (wanted.length === 0 || have.length === 0) return false;
+  return wanted.every((w) =>
+    have.some((a) => {
+      const nameOk = Boolean(w.name && a.name && a.name.includes(w.name));
+      if ((nameOk || !w.name) && w.email && a.email === w.email) return true;
+      return !w.email && nameOk;
+    }),
+  );
+}
+
+// tagsMatch is Thunderbird 153.6's TagsDetail check: tags set to true are
+// required (all or any of them), tags set to false forbidden (a message
+// with all of them, or with any, is left out). Mode "none" is not handled
+// by 153.6 and so filters nothing.
+function tagsMatch(detail, tags) {
+  const entries = Object.entries(detail.tags || {});
+  const required = entries.filter(([, v]) => v).map(([k]) => k);
+  const forbidden = entries.filter(([, v]) => !v).map(([k]) => k);
+  const mode = detail.mode;
+  if (required.length > 0) {
+    if (mode === "all" && !required.every((t) => tags.includes(t))) return false;
+    if (mode === "any" && !required.some((t) => tags.includes(t))) return false;
+  }
+  if (forbidden.length > 0) {
+    if (mode === "all" && forbidden.every((t) => tags.includes(t))) return false;
+    if (mode === "any" && forbidden.some((t) => tags.includes(t))) return false;
+  }
+  return true;
 }
 
 // The bodies of an open compose window (getComposeDetails), by how the

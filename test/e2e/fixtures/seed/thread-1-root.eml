@@ -1,0 +1,13 @@
+From: Carol Example <carol@example.test>
+To: Test User <test@localhost>
+Subject: Budget review
+Date: @DATE@
+Message-ID: <thread-root@seed.test>
+X-Priority: 1 (Highest)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Can we go through the budget on Monday?
+
+Carol

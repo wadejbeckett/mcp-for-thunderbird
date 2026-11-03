@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 2 November 2026.
+Last updated: 3 November 2026.
 
 This policy covers MCP for Thunderbird: the Thunderbird add-on and the host program it works with. MCP for Thunderbird lets AI apps on your computer, such as Claude Desktop, Claude Code, Codex or Cursor, work with the mail in Thunderbird, within limits you set in Thunderbird. MCP for Thunderbird is published by Wade J. Beckett, whose company is Noiz.
 
@@ -20,9 +20,9 @@ MCP for Thunderbird has two parts. The add-on runs in Thunderbird. The host is a
 
 Some more detail on each point:
 
-- **Only what is asked for, within your settings.** A tool result exists only because an AI app asked for it, and only for the accounts you ticked, outside the folders you excluded, and in the tool groups you turned on. Message headers here means sender, recipients, Reply-To, subject, date, folder, flags and tags, the names, sizes and types of attachments, and the sender authentication results (SPF, DKIM and DMARC) your mail server recorded. Search results never include message text. The text of a message is sent only when an AI app asks to read that one message.
+- **Only what is asked for, within your settings.** A tool result exists only because an AI app asked for it, and only for the accounts you ticked, outside the folders you excluded, and in the tool groups you turned on. There are two exceptions. Contacts are not limited by accounts or folders: see Contacts below. And Thunderbird keeps tags for the whole profile, not per account, so `mail_tags` returns every tag's name and colour once at least one account is ticked, including tags you use only in accounts you did not tick. Message headers here means sender, recipients, Reply-To, subject, date, folder, flags and tags, the names, sizes and types of attachments and the link of an attachment the message only links to, and the sender authentication results (SPF, DKIM and DMARC) your mail server recorded. When an AI app asks for them, it also gets every other header of the one message it reads, such as Received and List-Unsubscribe, but never Bcc, Resent-Bcc or any other header that lists blind-copy recipients. Search results never include message text. The text of a message is sent only when an AI app asks to read that one message.
 - **Attachments.** When an AI app saves an attachment, its bytes go to the native program, which writes them into the attachment folder you chose in the options. A plain-text attachment can instead be returned as text. Attachments over 50 MiB are refused.
-- **Contacts.** Address book entries (names, email addresses and organisation) are sent only when you have turned on the contacts group.
+- **Contacts.** Address book entries (names, email addresses and organisation, with the names of the address books they are in) and, when an AI app asks for them, mailing lists (their names, nicknames and members) are sent only when you have turned on the contacts group. Address books belong to the whole Thunderbird profile, not to one account, so the contacts group returns entries from every local address book whatever accounts you ticked or folders you excluded. That includes Collected Addresses, where Thunderbird keeps the addresses you send mail to from any account.
 - **The other direction.** The native program sends the add-on the AI app's requests: for example search terms, message ids, and the recipients and text of a draft. When a draft has attachments, the native program reads those files from your attachment folder and passes them to the add-on.
 - **Settings.** Besides tool results, the add-on sends the native program two settings: which tools are turned on, and the path of your attachment folder. The native program tells the add-on the name each AI app gives itself, for the activity log. On the setup page, the native program reports which supported AI apps it found on the computer.
 - **The access key.** Each time it starts, the native program makes a new random access key and keeps it, with its port number, in a file in your user's configuration folder that only your user can read. When Thunderbird closes, the native program removes the port and key from the file where it can (on Windows, Thunderbird may end it first). AI apps that start the native program with its `connect` command, whether MCP for Thunderbird set them up or you did, read the key from that file. An app that connects over HTTP gets the key only if you copy it from the options, and needs it copied again after each Thunderbird start.
@@ -32,11 +32,11 @@ Some more detail on each point:
 
 ## What is stored on your computer
 
-- **In Thunderbird (the add-on's own storage in your profile):** your settings (the accounts you ticked, the tool groups, the direct-sending list of addresses and domains you wrote, the attachment folder and the excluded folders) and the activity log. The activity log keeps the last 500 requests: time, AI app name, tool, the ids of the messages or the folder involved, and the outcome. It never records message text, and records no addresses as such; but a message id is an encoded form of the message's Message-ID header, which often contains a domain name, and a folder path can contain a name. You can clear it from the options.
+- **In Thunderbird (the add-on's own storage in your profile):** your settings (the accounts you ticked, the tool groups, the direct-sending list of addresses and domains you wrote, the attachment folder and the excluded folders, and for each account with excluded folders the paths of its folders seen so far, so that a folder renamed outside Thunderbird stays hidden) and the activity log. The activity log keeps the last 500 requests: time, AI app name, tool, the ids of the messages or the folder involved, and the outcome. It never records message text, and records no addresses as such; but a message id is an encoded form of the message's Message-ID header, which often contains a domain name, and a folder path can contain a name. You can clear it from the options.
 - **In your user's configuration folder:** the native program's connection file, with its port, access key, process number and the time that process started. Once Thunderbird has closed, the port and key are removed where the native program had the chance, and are never used again either way.
 - **In your attachment folder:** attachments that AI apps saved. They stay until you delete them.
 - **In your AI apps' settings:** if you asked MCP for Thunderbird to set up an AI app, an entry named `mcp-for-thunderbird` that starts the native program. A backup of each settings file is kept next to it before it is changed.
-- **Logs:** the native program logs only when it starts and stops, when AI apps connect, and errors. It logs no message text, subjects or addresses.
+- **Logs:** the native program logs only when it starts and stops (with the add-on's and Thunderbird's version numbers), when AI apps connect, and errors. It logs no message text, subjects or addresses.
 
 Removing the add-on deletes its storage. [INSTALL.md](INSTALL.md#uninstalling) shows how to remove the native program, its connection file and the AI app entries.
 
@@ -50,9 +50,9 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `messagesRead` | Searching and reading messages and their attachments. |
 | `messagesMove` | Moving, copying, archiving and moving to Trash. MCP for Thunderbird never deletes mail for good. |
 | `messagesUpdate` | Marking as read or flagged, and adding or removing tags. |
-| `messagesTagsList` | Finding tags by name. |
-| `messagesImport` | Saving reply and forward drafts into your Drafts folder with their threading kept. |
-| `messages.save` | Saving new drafts. |
+| `messagesTagsList` | Listing your tags and finding them by name. |
+| `messagesImport` | Saving drafts into your Drafts folder, with the threading of replies and forwards kept. |
+| `messages.save` | Telling MCP for Thunderbird that this Thunderbird (153 or later) can save and send without a window, so it offers `mail_draft` and `mail_send` there. It saves no mail with it. |
 | `compose` | Opening a filled-in compose window for you to check and send. |
 | `scripting` | Putting the text at the top of a compose window it opened, so the signature and its images stay as Thunderbird laid them out. |
 | `addressBooks` | Looking up contacts, only when the contacts group is on. MCP for Thunderbird does not change contacts. |

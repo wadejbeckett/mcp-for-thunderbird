@@ -2,10 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// Toolbar popup: the state line, a Pause or Resume button, the last 10
-// requests and a link to the options page.
+// Toolbar popup: the state line, notes on what to check in the options
+// (excluded folders not found, accounts not enabled yet), a Pause or
+// Resume button, the last 10 requests and a link to the options page.
 
 import { byId, showState, showLog, realDeps, inPage } from "./dom.js";
+import { stateNotes } from "./logic.js";
 
 const RECENT = 10;
 
@@ -19,6 +21,15 @@ export async function initPopup(doc, { send, m }) {
       const s = await send({ type: "getState" });
       paused = s.paused;
       showState(doc, stateEl, s.state, s.error);
+      const notes = stateNotes(s);
+      byId(doc, "notes").replaceChildren(
+        ...notes.map((n) => {
+          const li = doc.createElement("li");
+          li.textContent = n;
+          return li;
+        }),
+      );
+      byId(doc, "notes").hidden = notes.length === 0;
       pauseBtn.textContent = paused ? "Resume" : "Pause";
       pauseBtn.disabled = false;
       showLog(doc, byId(doc, "log"), byId(doc, "log-empty"), await send({ type: "listLog", limit: RECENT }));
