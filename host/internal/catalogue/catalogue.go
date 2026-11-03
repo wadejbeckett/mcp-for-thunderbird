@@ -57,7 +57,7 @@ const htmlDesc = "true when body is HTML rather than plain text. Allowed: p, br,
 
 // fromDesc tells callers how the sending identity is chosen
 // (addon/src/handlers/compose.js, writer).
-const fromDesc = "Identity to write from: its address or id, one of the account's identities. Without it, a reply or forward goes out from the identity the original was addressed to, and anything else from the account's default identity. With from and no account, the enabled account that has this identity."
+const fromDesc = "Identity to write from: its address or id. For a new message, one of the account's identities; with no account, the enabled account that has this identity. For a reply or forward, an identity of any enabled account. Without from, a reply or forward goes out from the identity the original was addressed to, in its own account first and then in any enabled account; for mail you sent, from the identity that sent it; otherwise from the account's default identity. A reply or forward from another account's identity is saved in that account's Drafts."
 
 // sendFromDesc is fromDesc for mail_send, which writes only new messages.
 const sendFromDesc = "Identity to send from: its address or id, one of the account's identities; the account's default identity when not given. With from and no account, the enabled account that has this identity."
@@ -158,7 +158,7 @@ var tools = []Tool{
 		Description: "Moves messages to the account's Trash folder. Returns {done: ids changed, failed: [{id, code}]}.",
 		Input:       schema([]string{"ids"}, m{"account": account(), "ids": strs("Message ids.")})},
 	{Name: "mail_draft", Group: "compose",
-		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards are saved to Drafts with threading kept. An account without a Drafts folder of its own saves to the Drafts folder of Local Folders when that is enabled. A forward is refused when the original has an attachment that is only a placeholder in the message (a FileLink, or a linked, detached or deleted file); forward_as attachment forwards such a message whole. Returns draftId, the saved draft's message id; draftId may be null when Thunderbird has not yet shown the saved draft in Drafts (the draft is still saved; do not save it again).",
+		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards keep their threading. The draft goes to the Drafts folder of the account it is written from. An account without a Drafts folder of its own saves to the Drafts folder of Local Folders, on this computer, when Local Folders is enabled, and is refused otherwise; a draft is never saved in another server account. A forward is refused when the original has an attachment that is only a placeholder in the message (a FileLink, or a linked, detached or deleted file); forward_as attachment forwards such a message whole. Returns draftId, the saved draft's message id.",
 		Input:       schema([]string{"kind", "body"}, composeProps())},
 	{Name: "mail_compose", Group: "compose",
 		Description: "Opens a compose window in Thunderbird, filled in, for the user to review and send. Returns {opened: true, tabId, windowId}, the ids of the compose tab and window Thunderbird opened.",

@@ -4,17 +4,19 @@
 
 // Compose handlers: mail_draft, mail_compose and mail_send.
 //
-// mail_draft never sends. A new draft goes through messages.saveMessage.
-// Replies and forwards are built here as an RFC 5322 message and imported
-// into the account's Drafts folder with messages.import, because
-// saveMessage drops In-Reply-To and References (ruling R8, recipe C in
-// docs/SPIKES.md §2). mail_compose opens a compose window for the user
-// and never sends, and returns the window's tab and window ids.
+// mail_draft never sends. Every draft is built here as an RFC 5322
+// message and imported with messages.import into the Drafts folder the
+// policy checked: the account's own, else an enabled Local Folders'
+// (draftsFolder). messages.saveMessage drops In-Reply-To and References
+// (ruling R8, recipe C in docs/SPIKES.md §2), and it saves where the
+// identity's settings say, which add-ons cannot see. mail_compose opens a
+// compose window for the user and never sends, and returns the window's
+// tab and window ids.
 //
 // Every tool writes from one identity of an enabled account: the one
 // `from` names (an identity id or address), else for a reply or forward
-// the one the original was addressed to (writer), else the account's
-// default identity. kind reply_list answers the list in the original's
+// the one the original was addressed to, in any enabled account (writer),
+// else the account's default identity. kind reply_list answers the list in the original's
 // List-Post header; forward_as attachment forwards the whole original as
 // an attached message.
 //
@@ -39,7 +41,7 @@
 import { HANDLERS } from "../rpc.js";
 import { encodeId } from "../ids.js";
 import { isPlainAddress } from "../address.js";
-import { assertFolderAllowed, enabledAccountIds, isExcluded } from "../policy.js";
+import { assertFolderAllowed, enabledAccountIds } from "../policy.js";
 import { fail, isToolError, ToolError } from "../errors.js";
 import { htmlToText, stripInvisible } from "../clean.js";
 import { call, newRun, answered, message, bodyParts, base64, realFolder, ATTACHMENT, TIMEOUT } from "./read.js";
@@ -56,16 +58,9 @@ const MAX_REFERENCES = 50;
 const TOO_LARGE = "The attachments are larger than 50 MiB in total.";
 const NO_SEND = "Thunderbird has not granted MCP for Thunderbird permission to send mail. Turn on direct send in the add-on's options.";
 export const OFFLINE = "Thunderbird is offline, so the message was not sent. Turn off Work Offline in Thunderbird and try again, or save it with mail_draft.";
-// A new draft is looked up in Drafts among the messages dated from a
-// minute before the call, newest first, a few at a time.
-const LOOKUP_SLACK_MS = 60_000;
-const LOOKUP_CANDIDATES = 25;
-const POLL_MS = 500;
-// The lookup uses at most this much of the call's budget.
-export const LOOKUP = { maxMs: 10_000 };
+const NO_DRAFTS = "This account has no Drafts folder of its own. Drafts of such an account are saved only in Local Folders, on this computer: enable Local Folders in MCP for Thunderbird, or save the draft in Thunderbird.";
 
 const tb = () => globalThis.messenger;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- allowlist ----
 
@@ -307,23 +302,29 @@ const identitiesIn = (a) => (a && Array.isArray(a.identities) ? a.identities : [
 // named finds the identity `from` names among ids: by id, else by address.
 const named = (ids, from) => ids.find((i) => i.id === from) || ids.find((i) => emailOf(i) !== "" && emailOf(i) === from.toLowerCase());
 
-// accountOf finds the enabled account that has the identity `from` names.
-async function accountOf(run, s, from) {
+// enabledAccounts lists the enabled accounts, with their identities, in
+// Thunderbird's order.
+async function enabledAccounts(run, s) {
   const enabled = new Set(enabledAccountIds(s));
   const list = answered(await call(run, () => tb().accounts.list(false)));
-  const hits = (Array.isArray(list) ? list : []).filter((a) => a && enabled.has(a.id) && named(identitiesIn(a), from));
-  if (hits.length === 0) fail("invalid_argument", `No enabled account has the identity ${from}.`);
-  if (hits.length > 1) fail("invalid_argument", `Several enabled accounts have the identity ${from}. Name the account to write from.`);
-  return hits[0].id;
+  return (Array.isArray(list) ? list : []).filter((a) => a && enabled.has(a.id));
 }
 
-// accountFor picks the account to write from: the original message's, the
+// accountOf finds the enabled account, among accounts, that has the
+// identity `from` names. `name` says how to settle a tie.
+function accountOf(accounts, from, name) {
+  const hits = accounts.filter((a) => named(identitiesIn(a), from));
+  if (hits.length === 0) fail("invalid_argument", `No enabled account has the identity ${from}.`);
+  if (hits.length > 1) fail("invalid_argument", `Several enabled accounts have the identity ${from}. ${name}`);
+  return hits[0];
+}
+
+// accountFor picks the account a new message is written from: the
 // `account` argument (policy has checked it is enabled), the enabled
 // account with the identity `from` names, or the only enabled account.
-async function accountFor(run, args, s, original, from) {
-  if (original) return original.folder.accountId;
+async function accountFor(run, args, s, from) {
   if (args.account !== undefined) return args.account;
-  if (from !== undefined) return accountOf(run, s, from);
+  if (from !== undefined) return accountOf(await enabledAccounts(run, s), from, "Name the account to write from.").id;
   const enabled = enabledAccountIds(s);
   if (enabled.length !== 1) fail("invalid_argument", "Name the account to write from.");
   return enabled[0];
@@ -341,60 +342,75 @@ async function addressedTo(run, ids, entries) {
   return undefined;
 }
 
-// writer returns the account and identity to write from, and the addresses
-// of all the account's identities. `from` must name an identity of that
-// account. Without it, a reply or forward goes out from the first identity
-// whose address is in the original's To or Cc, as Thunderbird picks one;
-// else, for mail the user sent, from the identity that sent it; else from
-// the account's default identity (listed first). The identity is always
-// passed to Thunderbird: given none, it would write from the default
-// account's identity, which can be another account's.
+// ownAddresses are the addresses of every identity in accounts.
+const ownAddresses = (accounts) => new Set(accounts.flatMap((a) => identitiesIn(a).map(emailOf)).filter(Boolean));
+
+// writer returns the account and identity to write from, and `own`, the
+// user's own addresses. The identity is always passed to Thunderbird:
+// given none, it would write from the default account's identity, which
+// can be another account's.
+//
+// A new message is written from the account accountFor picks: from the
+// identity `from` names, which must be one of that account's, else from
+// its default identity (listed first).
+//
+// A reply or forward may go out from any enabled account's identity, as
+// in Thunderbird (MailUtils.getIdentityForHeader), and is then saved in
+// that identity's account: `from` names it, else it is the first identity
+// whose address is in the original's To or Cc, else, for mail the user
+// sent, the identity that sent it, looked for first in the original's
+// account and then in every enabled account; else the original account's
+// default identity. `own` holds every enabled account's identities.
 async function writer(run, args, s, h, from) {
-  const accountId = await accountFor(run, args, s, h, from);
-  const a = answered(await call(run, () => tb().accounts.get(accountId, false)));
-  const ids = identitiesIn(a);
-  if (ids.length === 0) fail("refused", "This account has no identity to write from.");
-  let identity;
-  if (from !== undefined) {
-    identity = named(ids, from);
+  if (!h) {
+    const accountId = await accountFor(run, args, s, from);
+    const a = answered(await call(run, () => tb().accounts.get(accountId, false)));
+    const ids = identitiesIn(a);
+    if (ids.length === 0) fail("refused", "This account has no identity to write from.");
+    const identity = from === undefined ? ids[0] : named(ids, from);
     if (!identity) fail("invalid_argument", `from is not an identity of this account: ${from}`);
-  } else if (h) {
-    const list = (v) => (Array.isArray(v) ? v : []);
-    identity = (await addressedTo(run, ids, [...list(h.recipients), ...list(h.ccList)])) || (await addressedTo(run, ids, [h.author])) || ids[0];
-  } else {
-    identity = ids[0];
+    return { accountId, identity, own: ownAddresses([a]) };
   }
-  return { accountId, identity, own: new Set(ids.map(emailOf).filter(Boolean)) };
+  const accounts = await enabledAccounts(run, s);
+  const home = accounts.find((a) => a.id === h.folder.accountId);
+  const order = home ? [home, ...accounts.filter((a) => a !== home)] : accounts;
+  const own = ownAddresses(accounts);
+  if (from !== undefined) {
+    const a = home && named(identitiesIn(home), from) ? home : accountOf(accounts, from, "Name the identity by its id.");
+    return { accountId: a.id, identity: named(identitiesIn(a), from), own };
+  }
+  const list = (v) => (Array.isArray(v) ? v : []);
+  for (const entries of [[...list(h.recipients), ...list(h.ccList)], [h.author]]) {
+    for (const a of order) {
+      const identity = await addressedTo(run, identitiesIn(a), entries);
+      if (identity) return { accountId: a.id, identity, own };
+    }
+  }
+  const ids = identitiesIn(home);
+  if (ids.length === 0) fail("refused", "This account has no identity to write from. Name an identity of another enabled account with from.");
+  return { accountId: home.id, identity: ids[0], own };
 }
 
 const isDrafts = (f) => f && realFolder(f, f.accountId) && Array.isArray(f.specialUse) && f.specialUse.includes("drafts");
 
 // draftsFolder finds the Drafts folder a draft of the account goes to: the
-// account's own; else, for an account whose identities keep their drafts
-// in another account, the Drafts folder of an enabled Local Folders, or
-// the only one in the other enabled accounts. Thunderbird does not tell
-// add-ons which folder an identity saves drafts in, so a choice among
-// several is refused. An excluded Drafts folder refuses the draft.
+// account's own, else the Drafts folder of an enabled Local Folders, which
+// is on this computer. Thunderbird does not tell add-ons which folder an
+// identity saves drafts in, so the draft never goes to another server
+// account on a guess: it would copy the mail it quotes or forwards onto
+// that account's server. An excluded Drafts folder refuses the draft.
 async function draftsFolder(run, accountId, s) {
   const list = answered(await call(run, () => tb().folders.query({ specialUse: ["drafts"] })));
   const all = (Array.isArray(list) ? list : []).filter(isDrafts);
   let f = all.find((x) => x.accountId === accountId);
   if (!f) {
-    const enabled = new Set(enabledAccountIds(s));
-    const others = all.filter((x) => enabled.has(x.accountId));
-    const accounts = others.length > 1 ? answered(await call(run, () => tb().accounts.list(false))) : [];
-    const local = new Set((Array.isArray(accounts) ? accounts : []).filter((x) => x && x.type === "local").map((x) => x.id));
-    f = others.find((x) => local.has(x.accountId)) || (others.length === 1 ? others[0] : null);
-    if (!f && others.length > 1) fail("refused", "This account has no Drafts folder of its own, and several enabled accounts have one. Thunderbird does not tell add-ons which one this account's drafts go to; save the draft in Thunderbird.");
-    if (!f) fail("refused", "This account has no Drafts folder. If its drafts are kept in another account, such as Local Folders, enable that account in MCP for Thunderbird.");
+    const local = new Set((await enabledAccounts(run, s)).filter((a) => a.type === "local").map((a) => a.id));
+    f = all.find((x) => local.has(x.accountId));
+    if (!f) fail("refused", NO_DRAFTS);
   }
   assertFolderAllowed(f.accountId, f.path, s);
   return f;
 }
-
-// shown says whether a folder is one the client may see: in an enabled
-// account and not excluded.
-const shown = (f, s) => Boolean(f) && enabledAccountIds(s).includes(f.accountId) && !isExcluded(f.accountId, f.path, s);
 
 // mailboxes parses address entries with Thunderbird's header parser.
 // An entry that yields no mailbox gives one with an empty address.
@@ -668,8 +684,9 @@ async function attachedOriginal(run, h, already) {
 // replyRecipients works out To and Cc of a reply the client gave none
 // for. A reply goes to the original's Reply-To, else its author; a reply
 // to mail the user sent goes to that mail's recipients, as in Thunderbird.
-// A reply_all adds the original's To and Cc to Cc, without the account's
-// own addresses and those already in To. A reply_list goes to the list.
+// A reply_all adds the original's To and Cc to Cc, without the user's
+// own addresses (every enabled account's) and those already in To. A
+// reply_list goes to the list.
 async function replyRecipients(run, kind, h, o, own) {
   const listOf = (v) => (Array.isArray(v) ? v : []).filter((x) => typeof x === "string").map(oneLine);
   if (kind === "reply_list") return { to: [await listAddress(run, o.headers)], cc: [] };
@@ -701,9 +718,6 @@ async function replyRecipients(run, kind, h, o, own) {
 async function replyDraft(run, kind, h, a, who, drafts, forwardAs) {
   const { identity, own } = who;
   const o = await original(run, h);
-  const domain = oneLine(identity.email).split("@").pop().replace(/[^A-Za-z0-9.-]/g, "");
-  const mid = `${globalThis.crypto.randomUUID()}@${domain || "mcp-for-thunderbird.invalid"}`;
-  const tag = globalThis.crypto.randomUUID();
   const origMid = oneLine(h.headerMessageId).replace(/[<>\s]/g, "");
 
   // A reply_list without a list is refused even when the client gave
@@ -752,6 +766,23 @@ async function replyDraft(run, kind, h, a, who, drafts, forwardAs) {
   let atts = a.attachments;
   if (kind === "forward") atts = [...atts, ...(forwardAs === "attachment" ? [await attachedOriginal(run, h, given)] : await forwardedAttachments(run, h, given))];
 
+  const threading = [];
+  if (kind !== "forward" && origMid) {
+    const refs = [...o.references.filter((r) => r !== `<${origMid}>`), `<${origMid}>`].slice(-MAX_REFERENCES);
+    threading.push(`In-Reply-To: <${origMid}>`, `References: ${refs.join("\r\n ")}`);
+  }
+  return importDraft(run, { identity, to, cc, bcc, subject, html, atts, threading }, drafts);
+}
+
+// importDraft writes a draft as an RFC 5322 message from the identity and
+// imports it into the Drafts folder draftsFolder checked, so the draft
+// lands exactly there, and its id is known from the Message-ID set here.
+// X-Identity-Key tells Thunderbird which identity to send it from when the
+// user opens it.
+async function importDraft(run, { identity, to, cc, bcc, subject, html, atts, threading = [] }, drafts) {
+  const domain = oneLine(identity.email).split("@").pop().replace(/[^A-Za-z0-9.-]/g, "");
+  const mid = `${globalThis.crypto.randomUUID()}@${domain || "mcp-for-thunderbird.invalid"}`;
+  const tag = globalThis.crypto.randomUUID();
   const enc = (name, value) => encodeHeader(run, name, value);
   const lines = [
     `Message-ID: <${mid}>`,
@@ -763,11 +794,7 @@ async function replyDraft(run, kind, h, a, who, drafts, forwardAs) {
   if (to.length) lines.push(`To: ${await enc("To", to.join(", "))}`);
   if (cc.length) lines.push(`Cc: ${await enc("Cc", cc.join(", "))}`);
   if (bcc.length) lines.push(`Bcc: ${await enc("Bcc", bcc.join(", "))}`);
-  lines.push(`Subject: ${await enc("Subject", subject)}`);
-  if (kind !== "forward" && origMid) {
-    const refs = [...o.references.filter((r) => r !== `<${origMid}>`), `<${origMid}>`].slice(-MAX_REFERENCES);
-    lines.push(`In-Reply-To: <${origMid}>`, `References: ${refs.join("\r\n ")}`);
-  }
+  lines.push(`Subject: ${await enc("Subject", subject)}`, ...threading);
   lines.push(
     "X-Mozilla-Draft-Info: internal/draft; vcard=0; receipt=0; DSN=0; uuencode=0;\r\n attachmentreminder=0; deliveryformat=0",
     `X-Identity-Key: ${oneLine(identity.id)}`,
@@ -781,59 +808,19 @@ async function replyDraft(run, kind, h, a, who, drafts, forwardAs) {
   return { draftId: encodeId(drafts.accountId, drafts.path, mid) };
 }
 
-// findDraft looks for the draft saveMessage stored (IMAP returns no
-// header, docs/SPIKES.md §2) by its X-MFT-Draft header, read with
-// headersOf, until the budget is nearly spent.
-async function findDraft(outer, drafts, tag, since) {
-  const run = { ...outer, deadline: Math.min(outer.deadline, Date.now() + LOOKUP.maxMs) };
-  const checked = new Set();
-  for (;;) {
-    const page = await call(run, () => tb().messages.query({ accountId: drafts.accountId, folderId: drafts.id, fromDate: new Date(since - LOOKUP_SLACK_MS), messagesPerPage: 100 }));
-    if (page === TIMEOUT) return null;
-    if (page && page.id) await call(run, () => tb().messages.abortList(page.id)).catch(() => {});
-    const candidates = (page && Array.isArray(page.messages) ? page.messages : [])
-      .filter((h) => !checked.has(h.id))
-      .sort((x, y) => new Date(y.date) - new Date(x.date) || y.id - x.id)
-      .slice(0, LOOKUP_CANDIDATES);
-    for (const h of candidates) {
-      checked.add(h.id);
-      const headers = await headersOf(run, h.id);
-      if (headers === TIMEOUT) return null;
-      if (headerValues(headers, "x-mft-draft").some((v) => v.trim() === tag)) return h;
-    }
-    if (run.deadline - Date.now() < 2 * POLL_MS) return null;
-    await sleep(POLL_MS);
-  }
-}
-
-async function newDraft(run, a, identity, drafts, s) {
-  const tag = globalThis.crypto.randomUUID();
+// newDraft imports a new message into Drafts, as replyDraft does. Thunderbird's
+// messages.saveMessage would save it where the identity's settings say, a
+// folder add-ons cannot see beforehand, so it could land in an account
+// that is not enabled or in an excluded folder.
+async function newDraft(run, a, identity, drafts) {
   // Recipients are parsed and written back in one form, as for replies;
   // an entry that yields no address is kept as given.
   const norm = async (list) => {
     const boxes = await mailboxes(run, list || []);
     return boxes.map((m) => (m.email ? formatMailbox(m) : m.raw)).filter((x, i, all) => all.indexOf(x) === i);
   };
-  const details = {
-    identityId: identity.id,
-    to: await norm(a.to),
-    cc: await norm(a.cc),
-    bcc: await norm(a.bcc),
-    subject: oneLine(a.subject ?? ""),
-    body: bodyHtml(a),
-    customHeaders: [{ name: "X-MFT-Draft", value: tag }],
-  };
-  if (a.attachments.length) details.attachments = files(a.attachments);
-  const since = Date.now();
-  const res = await changing(run, () => tb().messages.saveMessage(details, { mode: "draft" }), "the draft may have been saved");
-  const saved = res && Array.isArray(res.messages) ? res.messages.find((m) => m && m.folder && m.headerMessageId) : null;
-  // Thunderbird saves where the identity's settings say. A draft it
-  // reports in a folder the client may not see gets no id.
-  if (saved) return { draftId: shown(saved.folder, s) ? encodeId(saved.folder.accountId, saved.folder.path, saved.headerMessageId) : null };
-  // The draft is saved: a failed lookup gives no id rather than an error,
-  // so the client does not save it again.
-  const h = await findDraft(run, drafts, tag, since).catch(() => null);
-  return { draftId: h ? encodeId(h.folder.accountId, h.folder.path, h.headerMessageId) : null };
+  const [to, cc, bcc] = [await norm(a.to), await norm(a.cc), await norm(a.bcc)];
+  return importDraft(run, { identity, to, cc, bcc, subject: oneLine(a.subject ?? ""), html: htmlDoc(bodyHtml(a)), atts: a.attachments }, drafts);
 }
 
 async function mailDraft(args, ctx) {
@@ -845,7 +832,7 @@ async function mailDraft(args, ctx) {
   const h = kind === "new" ? null : await message(run, args.id, s);
   const who = await writer(run, args, s, h, a.from);
   const drafts = await draftsFolder(run, who.accountId, s);
-  if (kind === "new") return newDraft(run, a, who.identity, drafts, s);
+  if (kind === "new") return newDraft(run, a, who.identity, drafts);
   return replyDraft(run, kind, h, a, who, drafts, forwardAs);
 }
 

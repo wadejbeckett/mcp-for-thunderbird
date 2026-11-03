@@ -1013,10 +1013,18 @@ func TestE2EDraftAndSend(t *testing.T) {
 		return *d.DraftID, mid
 	}
 
-	// A new draft (messages.saveMessage, found again by its X-MFT-Draft header).
-	_, mid := draftIn(map[string]any{"account": "account1", "kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
-	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") {
+	// A new draft (messages.import into the account's Drafts, as replies),
+	// readable through the id it returns.
+	newID, mid := draftIn(map[string]any{"account": "account1", "kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
+	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") || !strings.Contains(h, "X-Identity-Key: id1") || strings.Contains(h, "In-Reply-To:") {
 		t.Fatalf("new draft header:\n%s", h)
+	}
+	var newRead struct {
+		Text string `json:"text"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": newID}, &newRead)
+	if !strings.Contains(newRead.Text, "Draft body") {
+		t.Fatalf("new draft text = %q", newRead.Text)
 	}
 
 	// A reply (messages.import): threaded, and readable through its id.
@@ -2040,6 +2048,55 @@ func TestE2EComposeIdentity(t *testing.T) {
 		t.Fatalf("forward_as attachment draft attachments = %+v", fwd.Attachments)
 	}
 	t.Logf("drafts from %s: reply, reply_list, new with from, forward as attachment %+v", alias, fwd.Attachments)
+}
+
+// TestE2EComposeOtherAccount enables account3 beside account1 and delivers
+// to account1's INBOX a message addressed to account3's identity
+// (other@localhost). A reply window goes out from that identity, as
+// Thunderbird picks it. account3 has no Drafts folder and Local Folders is
+// not enabled, so a reply draft is refused rather than saved in account1's
+// Drafts on the same server.
+func TestE2EComposeOtherAccount(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, orig) })
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["accounts"] = map[string]any{"account1": true, "account3": true}
+	addonSettings(t, next)
+
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E to the other account " + stamp
+	msg := "From: Sender <sender@example.org>\r\nTo: Other User <other@localhost>\r\n" +
+		"Subject: " + subj + "\r\nMessage-ID: <other-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nFor the other account.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"account": "account1", "subject": subj}, subj)
+	o := find(res, subj)
+
+	var opened struct {
+		Opened bool `json:"opened"`
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "body": "From the other account."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id2" || !strings.Contains(w.To, "sender@example.org") {
+		t.Fatalf("reply window: identity %q to %q, want id2 to the sender", w.Identity, w.To)
+	}
+
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Logf("Thunderbird %s: no mail_draft, compose window checked only", version)
+		return
+	}
+	text, isErr := call(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "body": "Must not reach account1's Drafts."})
+	if !isErr || !strings.Contains(text, "no Drafts folder of its own") {
+		t.Fatalf("reply draft from account3's identity: %v %s, want refused for no Drafts folder", isErr, text)
+	}
+	for _, at := range greenmailFind(t, "Re: "+subj) {
+		t.Fatalf("a reply draft was saved in %s", at)
+	}
+	t.Logf("reply window from id2; reply draft refused: %s", text)
 }
 
 // TestE2EForwardPlaceholder delivers a message whose attachment is a

@@ -111,8 +111,8 @@ func TestSearchSchemaHasNoBodyOutput(t *testing.T) {
 	if !strings.Contains(byName(t, "mail_read").Description, "plainTextDiffers") {
 		t.Error("mail_read description must explain plainTextDiffers")
 	}
-	if !strings.Contains(byName(t, "mail_draft").Description, "draftId may be null") {
-		t.Error("mail_draft description must say draftId may be null")
+	if d := byName(t, "mail_draft").Description; !strings.Contains(d, "Returns draftId") || strings.Contains(d, "null") {
+		t.Errorf("mail_draft description must say it returns draftId, which is never null: %s", d)
 	}
 	if !strings.Contains(byName(t, "mail_send").Description, "only simple addresses (letters, digits, . _ + -)") {
 		t.Error("mail_send description must say only simple addresses can be sent to")
@@ -276,8 +276,13 @@ func TestComposeIdentityKindsAndForward(t *testing.T) {
 			}
 		}
 	}
-	if d, _ := props(t, "mail_compose")["from"]["description"].(string); !strings.Contains(d, "addressed to") {
-		t.Errorf("mail_compose from description must say a reply goes out from the identity the original was addressed to: %s", d)
+	for _, n := range []string{"mail_draft", "mail_compose"} {
+		d, _ := props(t, n)["from"]["description"].(string)
+		for _, want := range []string{"addressed to", "for mail you sent, from the identity that sent it", "any enabled account"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s from description must mention %q: %s", n, want, d)
+			}
+		}
 	}
 	for _, n := range []string{"mail_draft", "mail_compose"} {
 		kind := props(t, n)["kind"]
@@ -301,7 +306,7 @@ func TestComposeIdentityKindsAndForward(t *testing.T) {
 	if d := byName(t, "mail_send").Description; !strings.Contains(d, "offline") {
 		t.Errorf("mail_send description must say nothing is sent while offline: %s", d)
 	}
-	if d := byName(t, "mail_draft").Description; !strings.Contains(d, "Local Folders") || !strings.Contains(d, "placeholder") {
-		t.Errorf("mail_draft description must mention Local Folders' Drafts and placeholder attachments: %s", d)
+	if d := byName(t, "mail_draft").Description; !strings.Contains(d, "Local Folders") || !strings.Contains(d, "placeholder") || !strings.Contains(d, "never saved in another server account") {
+		t.Errorf("mail_draft description must mention Local Folders' Drafts, that no other server account gets a draft, and placeholder attachments: %s", d)
 	}
 }

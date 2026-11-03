@@ -9,7 +9,7 @@ import { install, fetchFrom, COMPOSE_NEW_BODY } from "./mocks/messenger.js";
 import { dispatch, HANDLERS } from "../src/rpc.js";
 import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, baseName, insertAtTop, textToHtml, cleanHtml, asMessage, listPost, COMPOSE, LOOKUP, OFFLINE } from "../src/handlers/compose.js";
+import { isAllowed, baseName, insertAtTop, textToHtml, cleanHtml, asMessage, listPost, COMPOSE, OFFLINE } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -243,6 +243,15 @@ function parse(raw) {
 
 const b64text = (s) => Buffer.from(s.replace(/\r\n/g, ""), "base64").toString("utf8");
 
+// drafted is the i-th imported draft: its headers and its HTML body (the
+// first part of a multipart message).
+function drafted(i) {
+  const { headers, body } = parse(mock.calls.import[i].raw);
+  const m = /boundary="([^"]+)"/.exec(headers["content-type"] || "");
+  const first = m ? parse(body.split(`--${m[1]}`)[1].replace(/^\r\n/, "")).body : body;
+  return { headers, html: b64text(first) };
+}
+
 test("TestDraftReplyThreading", async () => {
   const o = original();
   const r = await call("mail_draft", { kind: "reply_all", id: o.id, body: "Sounds good & see you.\n\nMe" });
@@ -358,7 +367,7 @@ test("TestForwardIncludesOriginalAttachments", async () => {
 
 test("mail_draft forward without recipients, and an odd identity address, still saves", async () => {
   const o = original();
-  mock.messenger.accounts.get = async () => ({ id: "a1", identities: [{ id: "id1", email: "me@exa mple\r\n.com>", name: "Me" }] });
+  mock.messenger.accounts.list = async () => [{ id: "a1", type: "imap", identities: [{ id: "id1", email: "me@exa mple\r\n.com>", name: "Me" }] }];
   const r = await call("mail_draft", { kind: "forward", id: o.id, body: "FYI" });
   assert.equal(r.ok, true, JSON.stringify(r));
   const h = parse(mock.calls.import[0].raw).headers;
@@ -375,73 +384,39 @@ test("mail_draft forward refuses attachments over 50 MiB in total", async () => 
   assert.equal(mock.calls.getAttachmentFile.length, 0);
 });
 
-test("mail_draft new uses saveMessage and finds the draft by its X-MFT-Draft header", async () => {
-  const r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "Plan​", body: "a\nb", attachments: [{ name: "f.txt", data: new TextEncoder().encode("hi") }] });
+test("mail_draft new imports the draft into the account's Drafts folder", async () => {
+  const r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "Plan\u200b", body: "a\nb", attachments: [{ name: "f.txt", data: new TextEncoder().encode("hi") }] });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(mock.calls.import.length, 0);
-  const [d, opts] = mock.calls.saveMessage[0];
-  assert.deepEqual(opts, { mode: "draft" });
-  assert.equal(d.identityId, "id1");
-  assert.deepEqual(d.to, ["x@example.test"]);
-  assert.equal(d.subject, "Plan");
-  assert.equal(d.body, "<p>a<br>b</p>");
-  assert.equal(d.attachments[0].name, "f.txt");
-  assert.equal(await d.attachments[0].file.text(), "hi");
-  const tag = d.customHeaders.find((c) => c.name === "X-MFT-Draft");
-  assert.match(tag.value, /^[0-9a-f-]{36}$/);
-  const saved = [...mock.store.values()].find((h) => h.folder.path === "Drafts");
-  assert.deepEqual(decodeId(r.content.draftId), { accountId: "a1", folderPath: "Drafts", headerMessageId: saved.headerMessageId });
-});
-
-test("mail_draft new uses the header saveMessage returns", async () => {
-  mock.behaviour.saveReturns = true;
-  const r = await call("mail_draft", { kind: "new", body: "a" });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(decodeId(r.content.draftId).folderPath, "Drafts");
-  assert.equal(mock.calls.getFull.length, 0);
-});
-
-test("mail_draft new gives up the draft lookup after LOOKUP.maxMs (10 s) of the budget", async (t) => {
-  assert.equal(LOOKUP.maxMs, 10_000);
-  const max = LOOKUP.maxMs;
-  LOOKUP.maxMs = 1500;
-  t.after(() => {
-    LOOKUP.maxMs = max;
-  });
-  mock.messenger.messages.saveMessage = async (details, options) => {
-    mock.calls.saveMessage.push([details, options]);
-    return { mode: "draft", messages: [] };
-  };
-  const t0 = Date.now();
-  const r = await call("mail_draft", { kind: "new", body: "a" });
-  const took = Date.now() - t0;
-  assert.deepEqual(r.content, { draftId: null });
-  // the 30 s call budget is not what ended the lookup
-  assert.ok(took >= 500 && took < 3000, `took ${took} ms`);
+  assert.equal(mock.calls.saveMessage.length, 0);
+  assert.equal(mock.calls.import.length, 1);
+  const imp = mock.calls.import[0];
+  assert.equal(imp.folderId, "a1:/Drafts");
+  assert.deepEqual(imp.props, { read: true });
+  const { headers: h, html } = drafted(0);
+  assert.equal(h.from, '"Me Myself" <me@allowed.com>');
+  assert.equal(h.to, "x@example.test");
+  assert.equal(h.subject, "Plan");
+  assert.equal(h["x-identity-key"], "id1");
+  assert.match(h["x-mozilla-draft-info"], /^internal\/draft;/);
+  assert.equal(h["in-reply-to"], undefined);
+  assert.equal(h.references, undefined);
+  assert.match(html, /<body><p>a<br>b<\/p><\/body>/);
+  assert.match(imp.raw, /Content-Disposition: attachment; filename="f\.txt"\r\nContent-Transfer-Encoding: base64\r\n\r\naGk=\r\n/);
+  // the id is the imported draft's, known without a lookup
+  const mid = h["message-id"].replace(/^<|>$/g, "");
+  assert.match(mid, /@allowed\.com$/);
+  assert.deepEqual(decodeId(r.content.draftId), { accountId: "a1", folderPath: "Drafts", headerMessageId: mid });
+  assert.equal(mock.calls.query.length + mock.calls.getHeaders.length + mock.calls.getFull.length, 0);
+  const read = await call("mail_read", { id: r.content.draftId });
+  assert.equal(read.ok, true, JSON.stringify(read));
 });
 
 test("mail_draft new normalises recipients", async () => {
   const r = await call("mail_draft", { kind: "new", to: ['Alice A <alice@example.test>, "Bob, B" <bob@example.test>'], cc: ["nobody-here"], body: "a" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  const [d] = mock.calls.saveMessage[0];
-  assert.deepEqual(d.to, ['"Alice A" <alice@example.test>', '"Bob, B" <bob@example.test>']);
-  assert.deepEqual(d.cc, ["nobody-here"]);
-});
-
-test("mail_draft new returns a null draftId when the draft does not show up in time", async () => {
-  const budget = COMPOSE.budgetMs;
-  COMPOSE.budgetMs = 1500;
-  try {
-    mock.messenger.messages.saveMessage = async (details, options) => {
-      mock.calls.saveMessage.push([details, options]);
-      return { mode: "draft", messages: [] };
-    };
-    const r = await call("mail_draft", { kind: "new", body: "a" });
-    assert.equal(r.ok, true, JSON.stringify(r));
-    assert.deepEqual(r.content, { draftId: null });
-  } finally {
-    COMPOSE.budgetMs = budget;
-  }
+  const { headers: h } = drafted(0);
+  assert.equal(h.to, '"Alice A" <alice@example.test>, "Bob, B" <bob@example.test>');
+  assert.equal(h.cc, "nobody-here");
 });
 
 test("mail_draft checks kind, id and the Drafts folder", async () => {
@@ -633,7 +608,8 @@ test("mail_compose with the budget spent before the window is asked for opens no
   const o = original();
   for (const args of [{ kind: "new", body: "Hi" }, { kind: "reply", id: o.id, body: "Hi" }]) {
     mock.calls.compose.length = 0;
-    const undo = spendBudgetIn(mock.messenger.accounts, "get");
+    // a new message reads its account, a reply the enabled accounts
+    const undo = spendBudgetIn(mock.messenger.accounts, args.kind === "new" ? "get" : "list");
     let e;
     try {
       e = await composeDirect(args);
@@ -756,7 +732,7 @@ test("mail_compose and mail_draft send a list body as HTML lists", async () => {
 
   r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "S", body: "1. a\n2. b" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(mock.calls.saveMessage[0][0].body, "<ol><li>a</li><li>b</li></ol>");
+  assert.match(drafted(0).html, /<body><ol><li>a<\/li><li>b<\/li><\/ol><\/body>/);
 });
 
 // ---- HTML bodies ----
@@ -807,8 +783,8 @@ test("mail_compose, mail_draft and mail_send take an HTML body with html: true",
 
   r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "S", body, html: true });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.match(mock.calls.saveMessage[0][0].body, /^<p>Hi<\/p><table border="1"/);
-  assert.doesNotMatch(mock.calls.saveMessage[0][0].body, /script/);
+  assert.match(drafted(0).html, /<body><p>Hi<\/p><table border="1"/);
+  assert.doesNotMatch(drafted(0).html, /script/);
 
   // without html the same body is text, escaped
   r = await call("mail_compose", { kind: "new", to: ["x@example.test"], subject: "S", body: "<p>Hi</p>" });
@@ -870,7 +846,7 @@ test("replies and forwards go out from the identity the original was addressed t
 test("from picks the identity by address or id, for new messages, replies and sends", async () => {
   let r = await call("mail_draft", { kind: "new", from: "Alias@Allowed.com", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(mock.calls.saveMessage[0][0].identityId, "id9");
+  assert.equal(drafted(0).headers["x-identity-key"], "id9");
 
   r = await call("mail_compose", { kind: "new", from: "id9", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -880,7 +856,7 @@ test("from picks the identity by address or id, for new messages, replies and se
   const o = original({ recipients: ["alias@allowed.com"] });
   r = await call("mail_draft", { kind: "reply", id: o.id, from: "me@allowed.com", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(parse(mock.calls.import[0].raw).headers["x-identity-key"], "id1");
+  assert.equal(parse(mock.calls.import[1].raw).headers["x-identity-key"], "id1");
 
   r = await send({ from: "alias@allowed.com" });
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -892,7 +868,8 @@ test("from finds the account to write from among the enabled accounts only", asy
   // two accounts enabled and no account named: from decides
   let r = await call("mail_draft", { kind: "new", from: "me@home.test", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(mock.calls.saveMessage[0][0].identityId, "id2");
+  assert.equal(drafted(0).headers["x-identity-key"], "id2");
+  assert.equal(mock.calls.import[0].folderId, "a2:/Drafts");
   assert.equal(decodeId(r.content.draftId).accountId, "a2");
   r = await call("mail_draft", { kind: "new", body: "x" });
   assert.equal(r.error.code, "invalid_argument");
@@ -910,10 +887,12 @@ test("from finds the account to write from among the enabled accounts only", asy
   r = await call("mail_compose", { kind: "new", account: "a1", from: "me@home.test", body: "x" });
   assert.equal(r.error.code, "invalid_argument");
   assert.equal(r.error.message, "from is not an identity of this account: me@home.test");
-  // so must it for a reply: the original's account
+  // for a reply, from must be an identity of an enabled account
   const o = original();
   r = await call("mail_draft", { kind: "reply", id: o.id, from: "nobody@allowed.com", body: "x" });
-  assert.equal(r.error.message, "from is not an identity of this account: nobody@allowed.com");
+  assert.equal(r.error.message, "No enabled account has the identity nobody@allowed.com.");
+  r = await call("mail_compose", { kind: "reply", id: o.id, from: "me@home.test", body: "x" });
+  assert.equal(r.error.message, "No enabled account has the identity me@home.test.");
   for (const from of [5, "", " \r\n"]) {
     r = await call("mail_draft", { kind: "new", from, body: "x" });
     assert.equal(r.error.code, "invalid_argument", JSON.stringify(from));
@@ -940,7 +919,7 @@ test("a reply to mail the user sent goes to that mail's recipients", async () =>
   let h = parse(mock.calls.import[0].raw).headers;
   assert.equal(h.to, '"Carol" <carol@example.test>');
   assert.equal(h.cc, undefined);
-  // the identity that sent it, as none of the recipients is one
+  // me@allowed.com is among the recipients, so the reply is from id1
   assert.equal(h["x-identity-key"], "id1");
 
   r = await call("mail_draft", { kind: "reply_all", id, body: "x" });
@@ -952,6 +931,28 @@ test("a reply to mail the user sent goes to that mail's recipients", async () =>
   const self = mock.addMessage("a1", "Sent", { headerMessageId: "self@allowed.com", author: "me@allowed.com", recipients: ["me@allowed.com"], subject: "Note" });
   r = await call("mail_draft", { kind: "reply", id: encodeId("a1", "Sent", self.headerMessageId), body: "x" });
   assert.equal(parse(mock.calls.import[2].raw).headers.to, "me@allowed.com");
+});
+
+test("a reply to mail the user sent from an alias to others goes out from that alias", async () => {
+  const o = mock.addMessage("a1", "Sent", {
+    headerMessageId: "alias-sent@allowed.com",
+    author: "Alias <alias@allowed.com>",
+    recipients: ["Carol <carol@example.test>"],
+    ccList: [],
+    subject: "From the alias",
+    body: "Sent from the alias.",
+  });
+  const id = encodeId("a1", "Sent", o.headerMessageId);
+  let r = await call("mail_draft", { kind: "reply", id, body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const h = parse(mock.calls.import[0].raw).headers;
+  assert.equal(h["x-identity-key"], "id9");
+  assert.equal(h.from, '"Alias" <alias@allowed.com>');
+  assert.equal(h.to, '"Carol" <carol@example.test>');
+  r = await call("mail_compose", { kind: "reply", id, body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const [, args] = mock.calls.compose.find(([f]) => f === "beginReply");
+  assert.equal(args[2].identityId, "id9");
 });
 
 test("a reply draft uses Reply-To as Thunderbird decoded it, without decoding it again", async () => {
@@ -1080,6 +1081,19 @@ test("mail_draft forward as attachment refuses an original over 50 MiB", async (
   assert.equal(mock.calls.getRaw.length + mock.calls.import.length, 0);
 });
 
+test("mail_draft forward as attachment refuses a raw message over 50 MiB that its header calls small", async () => {
+  const o = original({ size: 1000 });
+  const big = { size: 50 * 1024 * 1024 + 1, arrayBuffer: async () => assert.fail("the bytes must not be read") };
+  mock.messenger.messages.getRaw = async (id) => {
+    mock.calls.getRaw.push(id);
+    return big;
+  };
+  const r = await call("mail_draft", { kind: "forward", id: o.id, forward_as: "attachment", body: "x" });
+  assert.equal(r.error && r.error.code, "too_large", JSON.stringify(r));
+  assert.equal(mock.calls.getRaw.length, 1);
+  assert.equal(mock.calls.import.length, 0);
+});
+
 test("asMessage writes an attached message unencoded, with CRLF line ends", () => {
   const enc = (s) => new TextEncoder().encode(s);
   const dec = (r) => new TextDecoder().decode(r.data);
@@ -1167,58 +1181,175 @@ test("mail_draft uses an enabled Local Folders' Drafts for an account without on
   assert.equal(parse(mock.calls.import[0].raw).headers["x-identity-key"], "id3");
   assert.equal(decodeId(r.content.draftId).accountId, "lf");
 
-  // a new draft: Thunderbird saves it in Local Folders and returns it
-  mock.behaviour.saveReturns = true;
+  // a new draft goes to the same folder, with its id
   r = await call("mail_draft", { kind: "new", account: "a3", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.deepEqual(decodeId(r.content.draftId).folderPath, "Drafts");
-  assert.equal(decodeId(r.content.draftId).accountId, "lf");
-  // and found by its header when Thunderbird returns none
-  mock.behaviour.saveReturns = false;
-  r = await call("mail_draft", { kind: "new", account: "a3", body: "x" });
-  assert.equal(decodeId(r.content.draftId).accountId, "lf");
+  const { headers } = drafted(1);
+  assert.equal(mock.calls.import[1].folderId, "lf:/Drafts");
+  assert.equal(headers["x-identity-key"], "id3");
+  assert.deepEqual(decodeId(r.content.draftId), { accountId: "lf", folderPath: "Drafts", headerMessageId: headers["message-id"].replace(/^<|>$/g, "") });
+  assert.equal(mock.calls.saveMessage.length, 0);
 });
 
-test("mail_draft refuses an account without Drafts when no enabled account can take its drafts", async () => {
+const NO_DRAFTS =
+  "This account has no Drafts folder of its own. Drafts of such an account are saved only in Local Folders, on this computer: enable Local Folders in MCP for Thunderbird, or save the draft in Thunderbird.";
+
+test("mail_draft never puts a draft of an account without Drafts into another server account", async () => {
   mock = install({ accounts: ELSEWHERE });
   await save({ accounts: { a3: true }, groups: { compose: true } });
   let r = await call("mail_draft", { kind: "new", body: "x" });
   assert.equal(r.error.code, "refused");
-  assert.equal(r.error.message, "This account has no Drafts folder. If its drafts are kept in another account, such as Local Folders, enable that account in MCP for Thunderbird.");
+  assert.equal(r.error.message, NO_DRAFTS);
 
-  // several candidates and no Local Folders among them
+  // a1's Drafts is the only other enabled one, on another server: a3's
+  // mail must not be copied there
+  await save({ accounts: { a3: true, a1: true } });
+  const h = mock.addMessage("a3", "INBOX", { headerMessageId: "private-1@shop.test", recipients: ["shop@shop.test"], subject: "Private" });
+  const id = encodeId("a3", "INBOX", h.headerMessageId);
+  for (const args of [
+    { kind: "forward", id, forward_as: "attachment", to: ["x@example.test"], body: "x" },
+    { kind: "reply", id, body: "x" },
+    { kind: "new", account: "a3", body: "x" },
+  ]) {
+    r = await call("mail_draft", args);
+    assert.equal(r.error && r.error.code, "refused", JSON.stringify(args));
+    assert.equal(r.error.message, NO_DRAFTS);
+  }
   await save({ accounts: { a3: true, a1: true, a2: true } });
   r = await call("mail_draft", { kind: "new", account: "a3", body: "x" });
-  assert.equal(r.error.code, "refused");
-  assert.match(r.error.message, /^This account has no Drafts folder of its own, and several enabled accounts have one\./);
+  assert.equal(r.error.message, NO_DRAFTS);
 
   // the Local Folders' Drafts is excluded
   await save({ accounts: { a3: true, lf: true }, excludedFolders: [{ accountId: "lf", path: "Drafts" }] });
   r = await call("mail_draft", { kind: "new", account: "a3", body: "x" });
   assert.equal(r.error.code, "excluded");
-  assert.equal(mock.calls.saveMessage.length + mock.calls.import.length, 0);
+  assert.equal(mock.calls.saveMessage.length + mock.calls.import.length + mock.calls.getRaw.length, 0);
 });
 
-test("a new draft Thunderbird reports in a folder the client may not see gets no id", async () => {
-  mock = install({ accounts: ELSEWHERE });
-  // Local Folders, where a3's drafts go, is not enabled; a1's Drafts is the only candidate
-  await save({ accounts: { a3: true, a1: true }, groups: { compose: true } });
-  mock.behaviour.saveReturns = true;
-  const r = await call("mail_draft", { kind: "new", account: "a3", body: "x" });
+test("a new draft goes into the Drafts folder the policy checked, wherever the identity keeps its drafts", async () => {
+  // a1's identities keep their drafts in a2, which is not enabled; there
+  // saveMessage would have written it
+  mock = install({ accounts: ACCOUNTS.map((a) => (a.id === "a1" ? { ...a, draftsIn: "a2" } : a)) });
+  await save({ accounts: { a1: true }, groups: { compose: true } });
+  const r = await call("mail_draft", { kind: "new", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.deepEqual(r.content, { draftId: null });
-  assert.equal(mock.calls.saveMessage.length, 1);
+  assert.equal(mock.calls.saveMessage.length, 0);
+  assert.equal(mock.calls.import[0].folderId, "a1:/Drafts");
+  assert.equal(decodeId(r.content.draftId).accountId, "a1");
+  assert.equal([...mock.store.values()].filter((m) => m.folder.accountId === "a2").length, 0);
+
+  // an excluded Drafts folder refuses it before anything is written
+  await save({ excludedFolders: [{ accountId: "a1", path: "Drafts" }] });
+  const r2 = await call("mail_draft", { kind: "new", body: "x" });
+  assert.equal(r2.error.code, "excluded");
+  assert.equal(mock.calls.import.length, 1);
 });
 
-test("mail_draft new finds its draft with getHeaders, or getFull where there is none", async () => {
-  let r = await call("mail_draft", { kind: "new", body: "a" });
-  assert.notEqual(r.content.draftId, null);
-  assert.ok(mock.calls.getHeaders.length > 0);
-  assert.equal(mock.calls.getFull.length, 0);
-  delete mock.messenger.messages.getHeaders;
-  r = await call("mail_draft", { kind: "new", body: "b" });
-  assert.notEqual(r.content.draftId, null);
-  assert.ok(mock.calls.getFull.length > 0);
+// ---- identities of other accounts ----
+
+test("a reply or forward goes out from an identity of another enabled account the original was addressed to", async () => {
+  await save({ accounts: { a1: true, a2: true } });
+  const o = original({ recipients: ["Me <me@home.test>", "Carol <carol@example.test>"], ccList: ["Dave <dave@example.test>"] });
+  let r = await call("mail_draft", { kind: "reply_all", id: o.id, body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const { headers: h } = drafted(0);
+  assert.equal(h["x-identity-key"], "id2");
+  assert.equal(h.from, '"Me" <me@home.test>');
+  // saved in the identity's account
+  assert.equal(mock.calls.import[0].folderId, "a2:/Drafts");
+  assert.equal(decodeId(r.content.draftId).accountId, "a2");
+  // every enabled account's addresses are the user's own
+  assert.equal(h.cc, '"Carol" <carol@example.test>, "Dave" <dave@example.test>');
+  for (const kind of ["reply", "forward"]) {
+    mock.calls.compose.length = 0;
+    r = await call("mail_compose", { kind, id: o.id, body: "x" });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const [, args] = mock.calls.compose.find(([f]) => f === "beginReply" || f === "beginForward");
+    assert.equal(args[2].identityId, "id2", kind);
+  }
+
+  // the original's own account comes first, even for an address in Cc
+  const both = original({ headerMessageId: "both@seed.test", recipients: ["me@home.test"], ccList: ["alias@allowed.com"] });
+  r = await call("mail_draft", { kind: "reply", id: both.id, body: "x" });
+  assert.equal(drafted(1).headers["x-identity-key"], "id9");
+
+  // an identity of an account that is not enabled is not used
+  await save({ accounts: { a1: true } });
+  r = await call("mail_draft", { kind: "reply", id: o.id, body: "x" });
+  assert.equal(drafted(2).headers["x-identity-key"], "id1");
+  assert.equal(mock.calls.import[2].folderId, "a1:/Drafts");
+});
+
+test("from may name an identity of another enabled account for a reply or forward", async () => {
+  await save({ accounts: { a1: true, a2: true } });
+  const o = original();
+  let r = await call("mail_draft", { kind: "reply", id: o.id, from: "ME@home.test", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(0).headers["x-identity-key"], "id2");
+  assert.equal(mock.calls.import[0].folderId, "a2:/Drafts");
+  r = await call("mail_compose", { kind: "forward", id: o.id, from: "id2", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(mock.calls.compose.find(([f]) => f === "beginForward")[1][2].identityId, "id2");
+});
+
+const LOCAL_ORIGINAL = [
+  { id: "lf", name: "Local Folders", type: "local", identities: [], folders: ["Drafts", "Archive"], specialUse: { Drafts: ["drafts"] } },
+  ...ACCOUNTS,
+];
+
+test("a reply to mail filed in Local Folders goes out from an identity of another enabled account", async () => {
+  mock = install({ accounts: LOCAL_ORIGINAL });
+  await save({ accounts: { lf: true, a1: true }, groups: { compose: true } });
+  const kept = mock.addMessage("lf", "Archive", { headerMessageId: "kept@seed.test", author: "Bob <bob@example.test>", recipients: ["alias@allowed.com"], subject: "Kept" });
+  let r = await call("mail_draft", { kind: "reply", id: encodeId("lf", "Archive", kept.headerMessageId), body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(0).headers["x-identity-key"], "id9");
+  assert.equal(mock.calls.import[0].folderId, "a1:/Drafts");
+
+  // addressed to no identity: from names one; without it, refused
+  const other = mock.addMessage("lf", "Archive", { headerMessageId: "other@seed.test", author: "Bob <bob@example.test>", recipients: ["carol@example.test"], subject: "Other" });
+  const id = encodeId("lf", "Archive", other.headerMessageId);
+  r = await call("mail_draft", { kind: "reply", id, from: "info@allowed.com", body: "x" });
+  assert.equal(r.error.message, "No enabled account has the identity info@allowed.com.");
+  r = await call("mail_draft", { kind: "reply", id, from: "me@allowed.com", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(1).headers["x-identity-key"], "id1");
+  r = await call("mail_compose", { kind: "reply", id, body: "x" });
+  assert.equal(r.error.code, "refused");
+  assert.equal(r.error.message, "This account has no identity to write from. Name an identity of another enabled account with from.");
+});
+
+test("an identity address two enabled accounts share is refused unless the account is known", async () => {
+  const shared = { id: "id7", accountId: "a2", email: "Shared@other.test", name: "Shared" };
+  const accounts = [
+    ...ACCOUNTS.map((a) => (a.id === "a2" ? { ...a, identities: [...a.identities, shared] } : a)),
+    { id: "a4", name: "Third", type: "imap", identities: [{ id: "id8", accountId: "a4", email: "shared@other.test", name: "Shared" }], folders: ["INBOX", "Drafts"], specialUse: { INBOX: ["inbox"], Drafts: ["drafts"] } },
+  ];
+  mock = install({ accounts });
+  await save({ accounts: { a1: true, a2: true, a4: true }, groups: { compose: true } });
+  let r = await call("mail_draft", { kind: "new", from: "shared@other.test", body: "x" });
+  assert.equal(r.error.code, "invalid_argument");
+  assert.equal(r.error.message, "Several enabled accounts have the identity shared@other.test. Name the account to write from.");
+  r = await call("mail_compose", { kind: "new", from: "shared@other.test", body: "x" });
+  assert.equal(r.error.message, "Several enabled accounts have the identity shared@other.test. Name the account to write from.");
+  // a reply from a1's mail: neither account is the original's
+  const o = original();
+  r = await call("mail_draft", { kind: "reply", id: o.id, from: "shared@other.test", body: "x" });
+  assert.equal(r.error.code, "invalid_argument");
+  assert.equal(r.error.message, "Several enabled accounts have the identity shared@other.test. Name the identity by its id.");
+  assert.equal(mock.calls.import.length + mock.calls.compose.length, 0);
+
+  // with the account named, or the identity by its id, it is settled
+  r = await call("mail_draft", { kind: "new", account: "a2", from: "shared@other.test", body: "x" });
+  assert.equal(drafted(0).headers["x-identity-key"], "id7");
+  r = await call("mail_draft", { kind: "reply", id: o.id, from: "id8", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(1).headers["x-identity-key"], "id8");
+  // a reply from the account that has it uses that account's
+  const h = mock.addMessage("a2", "INBOX", { headerMessageId: "home-1@seed.test", author: "Bob <bob@example.test>", recipients: ["carol@example.test"], subject: "Home" });
+  r = await call("mail_draft", { kind: "reply", id: encodeId("a2", "INBOX", h.headerMessageId), from: "shared@other.test", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(2).headers["x-identity-key"], "id7");
 });
 
 // ---- the text goes into the window ----

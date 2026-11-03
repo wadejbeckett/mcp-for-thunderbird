@@ -51,8 +51,8 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `messagesMove` | Moving, copying, archiving and moving to Trash. MCP for Thunderbird never deletes mail for good. |
 | `messagesUpdate` | Marking as read or flagged, and adding or removing tags. |
 | `messagesTagsList` | Finding tags by name. |
-| `messagesImport` | Saving reply and forward drafts into your Drafts folder with their threading kept. |
-| `messages.save` | Saving new drafts. |
+| `messagesImport` | Saving drafts into your Drafts folder, with the threading of replies and forwards kept. |
+| `messages.save` | Telling MCP for Thunderbird that this Thunderbird (153 or later) can save and send without a window, so it offers `mail_draft` and `mail_send` there. It saves no mail with it. |
 | `compose` | Opening a filled-in compose window for you to check and send. |
 | `scripting` | Putting the text at the top of a compose window it opened, so the signature and its images stay as Thunderbird laid them out. |
 | `addressBooks` | Looking up contacts, only when the contacts group is on. MCP for Thunderbird does not change contacts. |
