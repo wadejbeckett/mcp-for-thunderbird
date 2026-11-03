@@ -96,7 +96,8 @@ function checkSpecialUse(uses, where) {
 }
 
 // createMessenger returns a fresh mock. `accounts` is a list of
-// {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]}}.
+// {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]},
+// draftsIn?: account id whose Drafts folder saveMessage uses}.
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
 export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153 } = {}) {
   const local = new Map();
@@ -141,6 +142,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     get: [],
     getRaw: [],
     getFull: [],
+    getHeaders: [],
     listAttachments: [],
     getAttachmentFile: [],
     getFolderInfo: [],
@@ -358,15 +360,18 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) store.delete(id);
       },
       // saveMessage stores the draft in the identity's account's Drafts
-      // folder with a Message-ID of its own; X- custom headers are kept.
+      // folder, or in the account a fixture's `draftsIn` names (an identity
+      // set to keep its drafts elsewhere), with a Message-ID of its own; X-
+      // custom headers are kept.
       saveMessage: async (details, options) => {
         calls.saveMessage.push([details, options]);
         const a = accounts.find((x) => (x.identities || []).some((i) => i.id === details.identityId));
-        const f = a && folderList.find((x) => x.accountId === a.id && x.specialUse.includes("drafts"));
+        const target = a && (a.draftsIn || a.id);
+        const f = a && folderList.find((x) => x.accountId === target && x.specialUse.includes("drafts"));
         if (!f) throw new Error("No drafts folder");
         const headers = {};
         for (const c of details.customHeaders || []) if (/^X-/i.test(c.name)) headers[c.name.toLowerCase()] = [c.value];
-        const h = addMessageTo(a.id, f.path, { headerMessageId: `saved-${nextId}@example.org`, subject: details.subject, date: new Date(), headers });
+        const h = addMessageTo(target, f.path, { headerMessageId: `saved-${nextId}@example.org`, subject: details.subject, date: new Date(), headers });
         return { mode: "draft", messages: behaviour.saveReturns ? [h] : [] };
       },
       // import adds the RFC 5322 file to the folder under its Message-ID.
@@ -431,6 +436,14 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         if (mimeTrees.has(id)) return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [clone(mimeTrees.get(id))] };
         const parts = [bodyPart, ...atts].filter(Boolean);
         return { contentType: "message/rfc822", partName: "", headers, size: h.size, parts: [{ contentType: "multipart/mixed", partName: "1", parts }] };
+      },
+      // getHeaders (Thunderbird 147 and later) returns the headers getFull
+      // gives, without reading a body.
+      getHeaders: async (id) => {
+        calls.getHeaders.push(id);
+        const h = store.get(id);
+        if (!h) throw new Error(`Message not found: ${id}.`);
+        return { "message-id": [`<${h.headerMessageId}>`], from: [h.author], subject: [h.subject], ...clone(extraHeaders.get(id) || {}) };
       },
       // getRaw builds a small RFC 5322 source from the header and side data;
       // a File (Blob) unless data_format is "BinaryString".
@@ -506,12 +519,14 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.compose.push(["setComposeDetails", args]);
       },
     },
-    // executeScript records the call; compose tests read the body it would
-    // leave from the window's details and the function's argument.
+    // executeScript records the call and answers as Thunderbird does for a
+    // script that ran and returned true (insertAtTop's result); compose
+    // tests read the body it would leave from the window's details and the
+    // function's argument.
     scripting: {
       executeScript: async (...args) => {
         calls.compose.push(["executeScript", args]);
-        return [{ result: undefined }];
+        return [{ frameId: 0, result: true }];
       },
     },
     messengerUtilities: {
@@ -591,9 +606,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   syncSend();
 
   // release below 153 stands for Thunderbird 140 ESR: it has no
-  // messages.saveMessage or sendMessage, and rejects the messages.save and
+  // messages.getHeaders (147), saveMessage or sendMessage, and rejects the messages.save and
   // messages.send permissions it does not know.
   if (release < 153) {
+    delete messenger.messages.getHeaders;
     delete messenger.messages.saveMessage;
     delete messenger.messages.sendMessage;
     const unknown = (permissions) => {

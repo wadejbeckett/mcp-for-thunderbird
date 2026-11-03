@@ -815,7 +815,11 @@ func marionette(t *testing.T, script string, out any) {
 	cmd.Stdin = strings.NewReader(script)
 	b, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("marionette: %v: %s", err, b)
+		var stderr []byte
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = ee.Stderr
+		}
+		t.Fatalf("marionette: %v: %s%s", err, b, stderr)
 	}
 	if err := json.Unmarshal(b, out); err != nil {
 		t.Fatalf("marionette result %q: %v", b, err)
@@ -1009,10 +1013,18 @@ func TestE2EDraftAndSend(t *testing.T) {
 		return *d.DraftID, mid
 	}
 
-	// A new draft (messages.saveMessage, found again by its X-MFT-Draft header).
-	_, mid := draftIn(map[string]any{"account": "account1", "kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
-	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") {
+	// A new draft (messages.import into the account's Drafts, as replies),
+	// readable through the id it returns.
+	newID, mid := draftIn(map[string]any{"account": "account1", "kind": "new", "to": []string{"someone@example.org"}, "subject": "E2E new draft", "body": "Draft body"})
+	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "Subject: E2E new draft") || !strings.Contains(h, "X-Identity-Key: id1") || strings.Contains(h, "In-Reply-To:") {
 		t.Fatalf("new draft header:\n%s", h)
+	}
+	var newRead struct {
+		Text string `json:"text"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": newID}, &newRead)
+	if !strings.Contains(newRead.Text, "Draft body") {
+		t.Fatalf("new draft text = %q", newRead.Text)
 	}
 
 	// A reply (messages.import): threaded, and readable through its id.
@@ -1876,6 +1888,304 @@ func TestE2EComposeHTMLReply(t *testing.T) {
 		t.Fatalf("compose window: border %q, scripts %d, quote after the table %v, signature after the table %v", got.Border, got.Script, got.QuoteAfter, got.SigAfter)
 	}
 	t.Logf("compose window: cells %q, list %q, border %q", got.Cells, got.LI, got.Border)
+}
+
+// aliasIdentityScript adds ("add") a second identity, alias@localhost, to
+// account1, with id1's Drafts and Sent folders, and returns its key; with
+// "remove" it removes it again and returns "".
+const aliasIdentityScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const acct = MailServices.accounts.getAccount("account1");
+const old = [...acct.identities].find((i) => i.email === "alias@localhost");
+if (%q === "remove") {
+  if (old) acct.removeIdentity(old);
+  return "";
+}
+if (old) return old.key;
+const id = MailServices.accounts.createIdentity();
+id.email = "alias@localhost";
+id.fullName = "Alias User";
+id.smtpServerKey = "smtp1";
+id.draftsFolderURI = "imap://test@127.0.0.1/Drafts";
+id.fccFolderURI = "imap://test@127.0.0.1/Sent";
+acct.addIdentity(id);
+return id.key;
+`
+
+// composeIdentityScript finds the compose window with subject WANT, reads
+// its identity, To recipients and attachment names, and closes it.
+const composeIdentityScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let win = null;
+  for (let i = 0; i < 40 && !win; i++) {
+    win = [...Services.wm.getEnumerator("msgcompose")].find((w) =>
+      w.document.getElementById("msgSubject").value === WANT && w.gCurrentIdentity);
+    if (!win) await sleep(250);
+  }
+  if (!win) return { error: "no compose window with subject " + WANT };
+  await sleep(500);
+  const out = {
+    identity: win.gCurrentIdentity.key,
+    to: win.GetComposeDetails().to,
+    attachments: [...win.document.getElementById("attachmentBucket").itemChildren].map((i) => i.attachment.name),
+  };
+  win.close();
+  return out;
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// composeIdentity is one compose window as composeIdentityScript reads it.
+type composeIdentity struct {
+	Identity    string   `json:"identity"`
+	To          string   `json:"to"`
+	Attachments []string `json:"attachments"`
+	Error       string   `json:"error"`
+}
+
+func readComposeIdentity(t *testing.T, subject string) composeIdentity {
+	t.Helper()
+	var got composeIdentity
+	marionette(t, strings.Replace(composeIdentityScript, "WANT", fmt.Sprintf("%q", subject), -1), &got)
+	if got.Error != "" {
+		t.Fatalf("reading the compose window: %s", got.Error)
+	}
+	return got
+}
+
+// TestE2EComposeIdentity gives account1 a second identity, alias@localhost,
+// and delivers a message from a mailing list addressed to it. A reply and
+// a forward in a compose window and a reply draft go out from the alias;
+// from picks the alias for a new draft; reply_list answers the list from
+// its List-Post header; and forward_as attachment attaches the whole
+// original. mail_compose returns the ids of the window it opened.
+func TestE2EComposeIdentity(t *testing.T) {
+	cs := httpSession(t)
+	var alias string
+	marionette(t, fmt.Sprintf(aliasIdentityScript, "add"), &alias)
+	t.Cleanup(func() {
+		var ignored string
+		marionette(t, fmt.Sprintf(aliasIdentityScript, "remove"), &ignored)
+	})
+	if alias == "" || alias == "id1" {
+		t.Fatalf("alias identity key %q", alias)
+	}
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E to the alias " + stamp
+	msg := "From: Hosting List <hosting-owner@example.org>\r\nTo: Alias User <alias@localhost>\r\n" +
+		"Subject: " + subj + "\r\nMessage-ID: <alias-" + stamp + "@e2e.test>\r\n" +
+		"List-Post: <mailto:hosting@lists.example.org>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nA list message for the alias.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "hosting-owner@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"subject": subj}, subj)
+	orig := find(res, subj)
+
+	type opened struct {
+		Opened   bool `json:"opened"`
+		TabID    *int `json:"tabId"`
+		WindowID *int `json:"windowId"`
+	}
+	var o opened
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": orig.ID, "body": "Reply from the alias."}, &o)
+	if !o.Opened || o.TabID == nil || o.WindowID == nil {
+		t.Fatalf("mail_compose reply = %+v, want opened with a tab and window id", o)
+	}
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != alias || !strings.Contains(w.To, "hosting-owner@example.org") {
+		t.Fatalf("reply window: identity %q to %q, want %q to the sender", w.Identity, w.To, alias)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply_list", "id": orig.ID, "body": "To the list."}, &o)
+	if w := readComposeIdentity(t, "Re: "+subj); !strings.Contains(w.To, "hosting@lists.example.org") {
+		t.Fatalf("reply_list window To %q, want the list", w.To)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "forward", "id": orig.ID, "forward_as": "attachment", "to": []string{"someone@example.org"}, "body": "Have a look."}, &o)
+	if w := readComposeIdentity(t, "Fwd: "+subj); w.Identity != alias || len(w.Attachments) != 1 || !strings.HasSuffix(w.Attachments[0], ".eml") {
+		t.Fatalf("forward window: identity %q attachments %q, want %q with the original attached", w.Identity, w.Attachments, alias)
+	}
+	t.Logf("compose windows from %s; window ids %d/%d", alias, *o.TabID, *o.WindowID)
+
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Logf("Thunderbird %s: no mail_draft, compose windows checked only", version)
+		return
+	}
+	type drafted struct {
+		DraftID *string `json:"draftId"`
+	}
+	draft := func(args map[string]any) (string, string) {
+		t.Helper()
+		var d drafted
+		callOK(t, cs, "mail_draft", args, &d)
+		if d.DraftID == nil {
+			t.Fatalf("mail_draft %v: no draft id", args)
+		}
+		_, mid := draftMessageID(t, *d.DraftID)
+		imapWait(t, "draft", "Drafts", mid, func(found bool, _ string) bool { return found })
+		return *d.DraftID, imapHeader(t, "Drafts", mid)
+	}
+	fromAlias := regexp.MustCompile(`(?m)^From: .*alias@localhost`)
+	_, h := draft(map[string]any{"kind": "reply", "id": orig.ID, "body": "Reply draft from the alias."})
+	if !strings.Contains(h, "X-Identity-Key: "+alias) || !fromAlias.MatchString(h) {
+		t.Fatalf("reply draft is not from the alias:\n%s", h)
+	}
+	_, h = draft(map[string]any{"kind": "reply_list", "id": orig.ID, "body": "Draft to the list."})
+	if !regexp.MustCompile(`(?m)^To: .*hosting@lists\.example\.org`).MatchString(h) || !strings.Contains(h, "In-Reply-To: <alias-"+stamp+"@e2e.test>") {
+		t.Fatalf("reply_list draft:\n%s", h)
+	}
+	_, h = draft(map[string]any{"account": "account1", "kind": "new", "from": "alias@localhost", "to": []string{"someone@example.org"}, "subject": "E2E new from the alias " + stamp, "body": "New draft."})
+	if !fromAlias.MatchString(h) {
+		t.Fatalf("new draft with from is not from the alias:\n%s", h)
+	}
+	id, _ := draft(map[string]any{"kind": "forward", "id": orig.ID, "forward_as": "attachment", "to": []string{"someone@example.org"}, "body": "Forwarded whole."})
+	var fwd struct {
+		Attachments []struct {
+			Name        string `json:"name"`
+			ContentType string `json:"contentType"`
+		} `json:"attachments"`
+	}
+	callOK(t, cs, "mail_read", map[string]any{"id": id}, &fwd)
+	if len(fwd.Attachments) != 1 || fwd.Attachments[0].Name != subj+".eml" || fwd.Attachments[0].ContentType != "message/rfc822" {
+		t.Fatalf("forward_as attachment draft attachments = %+v", fwd.Attachments)
+	}
+	t.Logf("drafts from %s: reply, reply_list, new with from, forward as attachment %+v", alias, fwd.Attachments)
+}
+
+// TestE2EComposeOtherAccount enables account3 beside account1 and delivers
+// to account1's INBOX a message addressed to account3's identity
+// (other@localhost). A reply window goes out from that identity, as
+// Thunderbird picks it. account3 has no Drafts folder and Local Folders is
+// not enabled, so a reply draft is refused rather than saved in account1's
+// Drafts on the same server.
+func TestE2EComposeOtherAccount(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, orig) })
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["accounts"] = map[string]any{"account1": true, "account3": true}
+	addonSettings(t, next)
+
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E to the other account " + stamp
+	msg := "From: Sender <sender@example.org>\r\nTo: Other User <other@localhost>\r\n" +
+		"Subject: " + subj + "\r\nMessage-ID: <other-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nFor the other account.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"account": "account1", "subject": subj}, subj)
+	o := find(res, subj)
+
+	var opened struct {
+		Opened bool `json:"opened"`
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "body": "From the other account."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id2" || !strings.Contains(w.To, "sender@example.org") {
+		t.Fatalf("reply window: identity %q to %q, want id2 to the sender", w.Identity, w.To)
+	}
+
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Logf("Thunderbird %s: no mail_draft, compose window checked only", version)
+		return
+	}
+	text, isErr := call(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "body": "Must not reach account1's Drafts."})
+	if !isErr || !strings.Contains(text, "no Drafts folder of its own") {
+		t.Fatalf("reply draft from account3's identity: %v %s, want refused for no Drafts folder", isErr, text)
+	}
+	for _, at := range greenmailFind(t, "Re: "+subj) {
+		t.Fatalf("a reply draft was saved in %s", at)
+	}
+	t.Logf("reply window from id2; reply draft refused: %s", text)
+}
+
+// TestE2EForwardPlaceholder delivers a message whose attachment is a
+// FileLink placeholder (an X-Mozilla-Cloud-Part header): Thunderbird 153
+// lists it with type cloudFile, so a forward draft is refused, and one with
+// forward_as attachment, which forwards the message whole, is saved.
+func TestE2EForwardPlaceholder(t *testing.T) {
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Skipf("Thunderbird %s has no mail_draft", version)
+	}
+	cs := httpSession(t)
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E FileLink " + stamp
+	msg := "From: Sender <sender@example.org>\r\nTo: test@localhost\r\nSubject: " + subj + "\r\n" +
+		"Message-ID: <filelink-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
+		"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nThe report is linked.\r\n" +
+		"--b1\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\n" +
+		"X-Mozilla-Cloud-Part: cloudFile; url=https://files.example.org/report.pdf; name=report.pdf\r\n\r\nplaceholder\r\n--b1--\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"subject": subj}, subj)
+	orig := find(res, subj)
+	text, isErr := call(t, cs, "mail_draft", map[string]any{"kind": "forward", "id": orig.ID, "to": []string{"someone@example.org"}, "body": "FYI"})
+	const want = "refused: The attachment report.pdf is a FileLink, stored online, so the message holds only a placeholder for it and it cannot be forwarded as a file. Forward the whole message with forward_as attachment instead."
+	if !isErr || text != want {
+		t.Fatalf("forward of a FileLink: %v %q, want %q", isErr, text, want)
+	}
+	var d struct {
+		DraftID *string `json:"draftId"`
+	}
+	callOK(t, cs, "mail_draft", map[string]any{"kind": "forward", "id": orig.ID, "forward_as": "attachment", "to": []string{"someone@example.org"}, "body": "FYI"}, &d)
+	if d.DraftID == nil {
+		t.Fatal("forward_as attachment: no draft id")
+	}
+	t.Logf("FileLink forward refused: %s", text)
+}
+
+// offlineScript sets Thunderbird's Work Offline state (Services.io.offline)
+// to the given value and returns the one it had.
+const offlineScript = `
+const before = Services.io.offline;
+Services.io.manageOfflineStatus = false;
+Services.io.offline = %v;
+return before;
+`
+
+// TestE2ESendOffline grants messages.send and sends while Thunderbird is
+// set to Work Offline: mail_send says Thunderbird is offline, and nothing
+// reaches GreenMail.
+func TestE2ESendOffline(t *testing.T) {
+	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
+		t.Skipf("Thunderbird %s has no mail_send", version)
+	}
+	cs := httpSession(t)
+	had := sendPermission(t, "get")
+	if !had && !sendPermission(t, "add") {
+		t.Fatal("granting messages.send: not granted")
+	}
+	t.Cleanup(func() {
+		if !had {
+			sendPermission(t, "remove")
+		}
+	})
+	deadline := time.Now().Add(30 * time.Second)
+	for !contains(toolNames(t, cs), "mail_send") {
+		if time.Now().After(deadline) {
+			t.Fatalf("mail_send not listed after the grant: %v", toolNames(t, cs))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	var wasOffline bool
+	marionette(t, fmt.Sprintf(offlineScript, true), &wasOffline)
+	t.Cleanup(func() {
+		var ignored bool
+		marionette(t, fmt.Sprintf(offlineScript, wasOffline), &ignored)
+	})
+	subj := "E2E offline send " + time.Now().Format("150405.000")
+	text, isErr := call(t, cs, "mail_send", map[string]any{"account": "account1", "to": []string{"test@localhost"}, "subject": subj, "body": "Must not be sent."})
+	const want = "thunderbird_error: Thunderbird is offline, so the message was not sent. Turn off Work Offline in Thunderbird and try again, or save it with mail_draft."
+	if !isErr || text != want {
+		t.Fatalf("mail_send offline: %v %q, want %q", isErr, text, want)
+	}
+	time.Sleep(3 * time.Second)
+	if where := greenmailFind(t, subj); len(where) != 0 {
+		t.Fatalf("an offline send reached GreenMail: %v", where)
+	}
+	t.Logf("offline send refused: %s", text)
 }
 
 // Thunderbird restarts: a plain restart (new token, R33), a removed

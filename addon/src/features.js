@@ -10,6 +10,10 @@
 // mail_send are left out of the tool list and refused with not_supported
 // if called. mail_compose, which opens a compose window, works on both.
 //
+// mail_draft itself saves with messages.import, not saveMessage (see
+// handlers/compose.js), but is still offered only where saveMessage shows
+// a Thunderbird of 153 or later, the versions its drafts are tested on.
+//
 // mail_send is found out from messages.saveMessage, not sendMessage:
 // messages.save is a required permission, so saveMessage is there from
 // the start on 153 and later, but messages.send is optional and

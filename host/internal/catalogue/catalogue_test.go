@@ -111,8 +111,8 @@ func TestSearchSchemaHasNoBodyOutput(t *testing.T) {
 	if !strings.Contains(byName(t, "mail_read").Description, "plainTextDiffers") {
 		t.Error("mail_read description must explain plainTextDiffers")
 	}
-	if !strings.Contains(byName(t, "mail_draft").Description, "draftId may be null") {
-		t.Error("mail_draft description must say draftId may be null")
+	if d := byName(t, "mail_draft").Description; !strings.Contains(d, "Returns draftId") || strings.Contains(d, "null") {
+		t.Errorf("mail_draft description must say it returns draftId, which is never null: %s", d)
 	}
 	if !strings.Contains(byName(t, "mail_send").Description, "only simple addresses (letters, digits, . _ + -)") {
 		t.Error("mail_send description must say only simple addresses can be sent to")
@@ -255,5 +255,58 @@ func TestHTMLBodyOption(t *testing.T) {
 				t.Errorf("%s html description must mention %s", n, want)
 			}
 		}
+	}
+}
+
+func TestComposeIdentityKindsAndForward(t *testing.T) {
+	for _, n := range []string{"mail_draft", "mail_compose", "mail_send"} {
+		f, ok := props(t, n)["from"]
+		if !ok || f["type"] != "string" {
+			t.Fatalf("%s must take a from string: %v", n, f)
+		}
+		d, _ := f["description"].(string)
+		for _, want := range []string{"address or id", "default identity"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s from description must mention %q: %s", n, want, d)
+			}
+		}
+		for _, r := range byName(t, n).Input["required"].([]string) {
+			if r == "from" {
+				t.Errorf("%s: from must be optional", n)
+			}
+		}
+	}
+	for _, n := range []string{"mail_draft", "mail_compose"} {
+		d, _ := props(t, n)["from"]["description"].(string)
+		for _, want := range []string{"addressed to", "for mail you sent, from the identity that sent it", "any enabled account"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s from description must mention %q: %s", n, want, d)
+			}
+		}
+	}
+	for _, n := range []string{"mail_draft", "mail_compose"} {
+		kind := props(t, n)["kind"]
+		if got := strings.Join(kind["enum"].([]string), ","); got != "new,reply,reply_all,reply_list,forward" {
+			t.Errorf("%s kind enum = %s", n, got)
+		}
+		if d, _ := kind["description"].(string); !strings.Contains(d, "List-Post") {
+			t.Errorf("%s kind description must explain reply_list: %s", n, d)
+		}
+		fa := props(t, n)["forward_as"]
+		if got := strings.Join(fa["enum"].([]string), ","); got != "inline,attachment" {
+			t.Errorf("%s forward_as enum = %s", n, got)
+		}
+	}
+	if _, ok := props(t, "mail_send")["forward_as"]; ok {
+		t.Error("mail_send sends new messages only and must not take forward_as")
+	}
+	if d := byName(t, "mail_compose").Description; !strings.Contains(d, "tabId") || !strings.Contains(d, "windowId") {
+		t.Errorf("mail_compose description must name the tabId and windowId it returns: %s", d)
+	}
+	if d := byName(t, "mail_send").Description; !strings.Contains(d, "offline") {
+		t.Errorf("mail_send description must say nothing is sent while offline: %s", d)
+	}
+	if d := byName(t, "mail_draft").Description; !strings.Contains(d, "Local Folders") || !strings.Contains(d, "placeholder") || !strings.Contains(d, "never saved in another server account") {
+		t.Errorf("mail_draft description must mention Local Folders' Drafts, that no other server account gets a draft, and placeholder attachments: %s", d)
 	}
 }

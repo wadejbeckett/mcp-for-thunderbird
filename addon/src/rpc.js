@@ -25,6 +25,10 @@ export function withSave(content, save) {
 }
 
 const GENERIC = "Thunderbird could not complete the request.";
+// GENERIC_OFFLINE names the likely cause when Thunderbird is in Work
+// Offline mode, which the background page's navigator.onLine follows.
+const GENERIC_OFFLINE = "Thunderbird could not complete the request. Thunderbird is offline; turn off Work Offline in Thunderbird and try again.";
+const generic = () => (globalThis.navigator?.onLine === false ? GENERIC_OFFLINE : GENERIC);
 
 const MAX_TARGETS = 20;
 const MAX_TARGET_CHARS = 200;
@@ -96,7 +100,7 @@ export async function dispatch(call) {
       msg.content = out === undefined ? null : out;
     }
   } catch (e) {
-    const error = isToolError(e) ? { code: e.code, message: e.message } : { code: "thunderbird_error", message: GENERIC };
+    const error = isToolError(e) ? { code: e.code, message: e.message } : { code: "thunderbird_error", message: generic() };
     msg = { type: "result", id: call.id, ok: false, error };
   }
   try {
