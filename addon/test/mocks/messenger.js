@@ -260,7 +260,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.query.push(q);
         const never = () => new Promise(() => {});
         if (typeof q.fromDate === "string" || typeof q.toDate === "string") return never();
-        const hang = Boolean(behaviour.hang && behaviour.hang(q));
+        // Thunderbird 153.6 reads its identities only for a true toMe or
+        // fromMe; a false one alone throws inside its search, whose list
+        // never ends.
+        const lonelyFalse = (q.toMe === false || q.fromMe === false) && !(q.toMe || q.fromMe);
+        const hang = lonelyFalse || Boolean(behaviour.hang && behaviour.hang(q));
         if (hang && !q.returnMessageListId) return never();
         const root = calls.query.length - 1;
         const delay = behaviour.delay ? behaviour.delay(q) : 0;

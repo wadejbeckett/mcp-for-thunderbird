@@ -445,8 +445,11 @@ func TestE2EFolderSearch(t *testing.T) {
 // TestE2ESearchAndThread follows a two-message conversation with
 // mail_thread (messages.getHeaders on 147 and later, the raw source on 140)
 // and searches it with the arguments Thunderbird matches itself (a whole
-// address, to_me, from_me, junk) and those the add-on matches (part of an
-// address, untagged). The root carries X-Priority: 1. Thunderbird shows the
+// address, to_me and from_me true, junk) and those the add-on matches (part
+// of an address, to_me and from_me false, untagged). The reply is tagged
+// for the tag modes, so untagged and none must leave it out (Thunderbird
+// 153.6 ignores its own mode "none"); the tag is removed again. The root
+// carries X-Priority: 1. Thunderbird shows the
 // reply's subject without "Re: ", so the two are told apart by sender. Both
 // have the same date, so the root is seeded first (file name order) to come
 // first.
@@ -511,9 +514,26 @@ func TestE2ESearchAndThread(t *testing.T) {
 	only(map[string]any{"subject": "Budget", "to": "example.test"}, me)
 	only(map[string]any{"subject": "Budget", "from_me": true}, me)
 	only(map[string]any{"subject": "Budget", "to_me": true}, carol)
+	// Thunderbird's search never ends on a false toMe or fromMe alone
+	only(map[string]any{"subject": "Budget", "from_me": false}, carol)
+	only(map[string]any{"subject": "Budget", "to_me": false}, me)
+	only(map[string]any{"subject": "Budget", "to_me": false, "from_me": false})
 	only(map[string]any{"subject": "Budget", "junk": false}, carol, me)
-	only(map[string]any{"subject": "Budget", "tags_mode": "untagged"}, carol, me)
-	only(map[string]any{"subject": "Budget", "tags_mode": "none", "tag": "important"}, carol, me)
+
+	var o organised
+	callOK(t, cs, "mail_tag", map[string]any{"ids": []string{reply.ID}, "add": []string{"important"}}, &o)
+	o.only(t, "mail_tag", reply.ID)
+	t.Cleanup(func() {
+		if t.Failed() {
+			call(t, cs, "mail_tag", map[string]any{"ids": []string{reply.ID}, "remove": []string{"important"}})
+		}
+	})
+	searchUntil(t, cs, map[string]any{"subject": "Budget", "tag": "important"}, subj)
+	only(map[string]any{"subject": "Budget", "tag": "important", "tags_mode": "any"}, me)
+	only(map[string]any{"subject": "Budget", "tags_mode": "untagged"}, carol)
+	only(map[string]any{"subject": "Budget", "tags_mode": "none", "tag": "important"}, carol)
+	callOK(t, cs, "mail_tag", map[string]any{"ids": []string{reply.ID}, "remove": []string{"important"}}, &o)
+	o.only(t, "mail_tag", reply.ID)
 
 	var cut struct {
 		searchResult

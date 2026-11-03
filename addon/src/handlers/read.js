@@ -32,7 +32,11 @@
 // or against part of the name. So `from` and `to` go to Thunderbird only
 // when they are a whole address; any other text is matched here, against
 // name and address. tags_mode untagged is matched here too, because
-// Thunderbird 153.6's query ignores its own tag mode "none". A search with
+// Thunderbird 153.6's query ignores its own tag mode "none". So are to_me
+// and from_me, except a true value when every account with an address is
+// enabled: Thunderbird compares them with every identity in the profile,
+// and a false value given without a true one stops its search with an
+// error (153.6), so the list never ends. A search with
 // a match of its own cannot tell from a page's size how many of it match,
 // so it reads each window to its end, in large pages, instead of splitting
 // it, and keeps the newest matches.
@@ -70,7 +74,7 @@ const LOCAL_PAGE = 250;
 const HEAD_BYTES = 65_536;
 const THREAD_MAX = 200;
 const THREAD_IDS_MAX = 100;
-const THREAD_CANDIDATES = 50;
+const THREAD_CANDIDATES = LOCAL_PAGE;
 const THREAD_CANDIDATES_MAX = 200;
 const THREAD_HEADERS = ["Message-ID", "References", "In-Reply-To"];
 
@@ -425,13 +429,50 @@ export async function folderByPath(run, accountId, path) {
 // A whole address (bob@acme.com) is what Thunderbird's author and
 // recipients matches can find in full; other text is matched here.
 const WHOLE_ADDRESS = /^[^\s@<>,;"]+@[^\s@<>,;"]+$/;
+const ANGLE_ADDRESS = /<([^<>\s]+@[^<>\s]+)>/g;
+const BARE_ADDRESS = /[^\s@<>,;"]+@[^\s@<>,;"]+/g;
+
+const recipientsOf = (h) => [h.recipients, h.ccList, h.bccList].flatMap((l) => (Array.isArray(l) ? l : []));
+
+// emailsOf returns the addresses in header values ("Ann" <ann@x>, ann@x),
+// in lower case: the one in angle brackets where there is one, so an
+// address in a display name does not count.
+function emailsOf(values) {
+  const out = [];
+  for (const v of values) {
+    const text = String(v ?? "");
+    const angle = [...text.matchAll(ANGLE_ADDRESS)].map((m) => m[1]);
+    for (const e of angle.length > 0 ? angle : text.match(BARE_ADDRESS) || []) out.push(e.toLowerCase());
+  }
+  return out;
+}
+
+// ownAddresses returns the addresses of the enabled accounts' identities,
+// in lower case, and whether every account with an address is enabled.
+async function ownAddresses(run, s) {
+  const accounts = answered(await call(run, () => tb().accounts.list(false))) || [];
+  const on = new Set(enabledAccountIds(s));
+  const mine = new Set();
+  let every = true;
+  for (const a of accounts) {
+    const emails = (Array.isArray(a.identities) ? a.identities : []).map((i) => String((i && i.email) || "").trim().toLowerCase()).filter(Boolean);
+    if (!on.has(a.id)) {
+      if (emails.length > 0) every = false;
+      continue;
+    }
+    for (const e of emails) mine.add(e);
+  }
+  return { mine, every };
+}
 
 const TAGS_MODES = ["all", "any", "none", "untagged"];
 
-// searchNote says how to narrow a search that was cut off.
-function searchNote(run, limit) {
+// searchNote says how to narrow a search that was cut off. A whole
+// address is suggested only when a from or to was matched here.
+function searchNote(run, limit, partial) {
   if (run.timedOut) {
-    return "Thunderbird did not finish the search in time, so some matching messages may be missing. Narrow it with since and until, a folder, or a whole address in from or to.";
+    const how = partial ? "since and until, a folder, or a whole address in from or to" : "since and until, or a folder";
+    return `Thunderbird did not finish the search in time, so some matching messages may be missing. Narrow it with ${how}.`;
   }
   const raise = limit < MAX_LIMIT ? `, or raise limit (at most ${MAX_LIMIT})` : "";
   return `More messages match than were returned. Narrow the search with since and until, a folder or more criteria${raise}.`;
@@ -449,18 +490,22 @@ async function mailSearch(args, ctx) {
   }
   // from and to: a whole address goes to Thunderbird; other text must be
   // in the name or address, in any case.
+  let partial = false;
   const addressArg = (k, q, of) => {
     const v = optString(args, k);
     if (v === undefined) return;
-    if (WHOLE_ADDRESS.test(v.trim())) {
-      base[q] = v.trim();
+    const want = v.trim();
+    if (want === "") return;
+    if (WHOLE_ADDRESS.test(want)) {
+      base[q] = want;
       return;
     }
-    const want = v.toLowerCase();
-    keeps.push((h) => of(h).some((x) => String(x ?? "").toLowerCase().includes(want)));
+    const low = want.toLowerCase();
+    partial = true;
+    keeps.push((h) => of(h).some((x) => String(x ?? "").toLowerCase().includes(low)));
   };
   addressArg("from", "author", (h) => [h.author]);
-  addressArg("to", "recipients", (h) => [h.recipients, h.ccList, h.bccList].flatMap((l) => (Array.isArray(l) ? l : [])));
+  addressArg("to", "recipients", recipientsOf);
   const unread = optBool(args, "unread");
   if (unread !== undefined) base.read = !unread;
   const flagged = optBool(args, "flagged");
@@ -470,9 +515,7 @@ async function mailSearch(args, ctx) {
   const junk = optBool(args, "junk");
   if (junk !== undefined) base.junk = junk;
   const toMe = optBool(args, "to_me");
-  if (toMe !== undefined) base.toMe = toMe;
   const fromMe = optBool(args, "from_me");
-  if (fromMe !== undefined) base.fromMe = fromMe;
   const tags = [];
   const tag = optString(args, "tag");
   if (tag !== undefined) tags.push(tag);
@@ -498,6 +541,20 @@ async function mailSearch(args, ctx) {
   if (sinceMs != null && untilMs != null && sinceMs >= untilMs) return { messages: [], truncated: false };
 
   const run = newRun();
+  if (toMe !== undefined || fromMe !== undefined) {
+    // See the file header: only true values, and only when Thunderbird's
+    // identities are the enabled accounts' addresses, go to Thunderbird.
+    const { mine, every } = await ownAddresses(run, s);
+    const native = every && toMe !== false && fromMe !== false;
+    for (const [v, q, of] of [
+      [toMe, "toMe", recipientsOf],
+      [fromMe, "fromMe", (h) => [h.author]],
+    ]) {
+      if (v === undefined) continue;
+      if (native) base[q] = true;
+      else keeps.push((h) => emailsOf(of(h)).some((e) => mine.has(e)) === v);
+    }
+  }
   if (tags.length > 0) {
     const list = await tagList(run);
     const keys = tags.map((t) => tagKeyOf(list, t));
@@ -531,7 +588,7 @@ async function mailSearch(args, ctx) {
   const top = all.slice(0, limit);
   // The note is chosen before the attachment checks, which may run out of
   // time without cutting the search short.
-  const note = truncated ? searchNote(run, limit) : null;
+  const note = truncated ? searchNote(run, limit, partial) : null;
   const out = { messages: await pointers(top, attachment, run), truncated };
   if (note) out.note = note;
   return out;
@@ -565,19 +622,26 @@ async function headOf(run, id) {
 }
 
 // readList returns the messages of a query that pass `keep`, page by page,
-// up to `max`, and closes the list. more is true when it stopped at `max`
-// with messages left. A thread is best effort: a failed query adds nothing
-// more.
-async function readList(run, query, max, keep = () => true) {
+// and closes the list. It keeps the first `max`, or with `newest` reads the
+// list to its end (or the time budget) and keeps the last `max`, which are
+// the newest, as Thunderbird returns them oldest first. more is true when
+// matching messages were left out. A thread is best effort: a failed query
+// adds nothing more.
+async function readList(run, query, max, keep = () => true, newest = false) {
   const out = [];
+  let more = false;
   try {
     let page = await openList(run, { ...query, autoPaginationTimeout: 0 });
     while (page !== TIMEOUT) {
       for (const h of page.messages || []) {
         if (!keep(h)) continue;
         if (out.length >= max) {
-          if (page.id) await closeList(run, page.id);
-          return { messages: out, more: true };
+          more = true;
+          if (!newest) {
+            if (page.id) await closeList(run, page.id);
+            return { messages: out, more };
+          }
+          out.shift();
         }
         out.push(h);
       }
@@ -587,7 +651,7 @@ async function readList(run, query, max, keep = () => true) {
   } catch {
     // keep what was found
   }
-  return { messages: out, more: false };
+  return { messages: out, more };
 }
 
 // A thread holds each message once, keyed by its Message-ID (as message
@@ -622,7 +686,8 @@ async function mailThread(args, ctx) {
   // Replies: later messages of the same subject whose References or
   // In-Reply-To name a message of the thread. Only visible candidates are
   // read, so no headers are read in an excluded folder. Thunderbird
-  // returns them oldest first, so they are read page by page.
+  // returns them oldest first, so the list is read to its end and the
+  // newest THREAD_CANDIDATES_MAX are kept.
   const norm = normalizeSubject(msg.subject || "");
   if (norm) {
     const query = { accountId, subject: norm, messagesPerPage: THREAD_CANDIDATES };
@@ -633,6 +698,7 @@ async function mailThread(args, ctx) {
       query,
       THREAD_CANDIDATES_MAX,
       (h) => inAccount(h) && visible(h, s) && !found.has(threadKey(h)) && normalizeSubject(h.subject || "").toLowerCase() === norm.toLowerCase(),
+      true,
     );
     if (more) cut = true;
     const heads = await Promise.all(candidates.map(async (h) => [h, buildThreadIds(await headOf(run, h.id))]));

@@ -108,8 +108,6 @@ test("search maps its arguments to messages.query with Date objects", async () =
     tag: "to do",
     has_attachment: true,
     junk: false,
-    to_me: true,
-    from_me: false,
     limit: 7,
   });
   const q = mock.calls.query[0];
@@ -120,8 +118,6 @@ test("search maps its arguments to messages.query with Date objects", async () =
   assert.equal(q.author, "f@x.example");
   assert.equal(q.recipients, "r@x.example");
   assert.equal(q.junk, false);
-  assert.equal(q.toMe, true);
-  assert.equal(q.fromMe, false);
   assert.equal(q.subject, "s");
   assert.equal(q.read, false);
   assert.equal(q.flagged, false);
@@ -289,7 +285,7 @@ test("a query that answers after the budget has its list aborted", async () => {
   assert.deepEqual(out, {
     messages: [],
     truncated: true,
-    note: "Thunderbird did not finish the search in time, so some matching messages may be missing. Narrow it with since and until, a folder, or a whole address in from or to.",
+    note: "Thunderbird did not finish the search in time, so some matching messages may be missing. Narrow it with since and until, or a folder.",
   });
   await new Promise((r) => setTimeout(r, 500));
   assert.equal(mock.calls.query.length, 1);
@@ -1185,6 +1181,8 @@ test("from and to that are not a whole address match part of a name or address, 
   assert.deepEqual(subjects(await ok("mail_search", { account: "a3", from: "smith" })), ["bob"]);
   assert.deepEqual(subjects(await ok("mail_search", { account: "a3", to: "acme.com" })), ["carol", "eve"]);
   assert.deepEqual(subjects(await ok("mail_search", { account: "a3", to: "ann" })), ["bob"]);
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a3", from: " acme.com " })), ["bob"], "spaces around the text are ignored");
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a3", to: "acme.com " })), ["carol", "eve"]);
   for (const q of mock.calls.query) {
     assert.equal(q.author, undefined, "partial text is not given to Thunderbird");
     assert.equal(q.recipients, undefined);
@@ -1228,6 +1226,38 @@ test("junk, to_me and from_me select by Thunderbird's junk state and the user's 
   assert.deepEqual(subjects(await ok("mail_search", { account: "a1", junk: false, to_me: true })), ["to me", "cc me"]);
   assert.deepEqual(subjects(await ok("mail_search", { account: "a1", from_me: true })), ["from me"]);
   assert.deepEqual(subjects(await ok("mail_search", { account: "a1", from_me: false, to_me: false })), []);
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", from_me: false })), ["spam", "to me", "cc me"]);
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", to_me: false })), ["from me"]);
+  assert.deepEqual(mock.openLists(), []);
+});
+
+test("to_me and from_me count only the enabled accounts' addresses", async () => {
+  // off@example.org is a2's, which is not enabled: not one of the user's addresses here
+  mock.addMessage("a1", "INBOX", { subject: "from off", author: "Off <off@example.org>", recipients: ["b@example.org"], date: ago(1) });
+  mock.addMessage("a1", "INBOX", { subject: "to off", recipients: ['"me@work.example" <off@example.org>'], date: ago(2) });
+  mock.addMessage("a1", "INBOX", { subject: "from me", author: "me@work.example", recipients: ["b@example.org"], date: ago(3) });
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", from_me: true })), ["from me"]);
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", from: "off@example.org", from_me: true })), []);
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", to_me: true })), [], "an address in a display name does not count");
+  for (const q of mock.calls.query) {
+    assert.equal(q.toMe, undefined);
+    assert.equal(q.fromMe, undefined);
+  }
+});
+
+test("to_me and from_me true go to Thunderbird when every account with an address is enabled", async () => {
+  await save({ accounts: { a1: true, a2: true, a3: true } });
+  mock.addMessage("a1", "INBOX", { subject: "to me", recipients: ["me@work.example"], date: ago(1) });
+  mock.addMessage("a1", "INBOX", { subject: "to b", author: "me@work.example", recipients: ["b@example.org"], date: ago(2) });
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", to_me: true })), ["to me"]);
+  assert.equal(mock.calls.query.at(-1).toMe, true);
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", to_me: true, from_me: true })), []);
+  assert.equal(mock.calls.query.at(-1).fromMe, true);
+  // a false value is never given to Thunderbird
+  assert.deepEqual(subjects(await ok("mail_search", { account: "a1", from_me: true, to_me: false })), ["to b"]);
+  assert.equal(mock.calls.query.at(-1).toMe, undefined);
+  assert.equal(mock.calls.query.at(-1).fromMe, undefined);
+  assert.deepEqual(mock.openLists(), []);
 });
 
 test("tags_mode all, any, none and untagged", async () => {
@@ -1374,13 +1404,52 @@ test("a thread longer than its limits is truncated and keeps its newest messages
   const out = await ok("mail_thread", { id: idOf(root) });
   assert.equal(out.truncated, true, "more than 200 candidates");
   assert.equal(out.messages.length, 200);
+  // the newest 200 candidates are followed and the newest 200 messages kept
+  assert.equal(decodeId(out.messages[0].id).headerMessageId, "daily-31@x");
+  assert.equal(decodeId(out.messages.at(-1).id).headerMessageId, "daily-230@x");
   assert.deepEqual(mock.openLists(), []);
   // from the newest reply, every earlier one is named in References
   const refs = Array.from({ length: 230 }, (_, i) => `daily-${i + 1}@x`);
   const last = mock.addMessage("a1", "INBOX", { subject: "Re: Daily report", date: ago(0), headerMessageId: "last@x", references: ["daily@x", ...refs] });
   const back = await ok("mail_thread", { id: idOf(last) });
-  assert.equal(back.truncated, true, "more than 100 Message-IDs and 200 messages");
+  assert.equal(back.truncated, true, "more than 100 Message-IDs");
   assert.equal(back.messages.length, 101);
   assert.equal(decodeId(back.messages[0].id).headerMessageId, "daily-131@x", "the nearest 100 are kept");
   assert.equal(decodeId(back.messages.at(-1).id).headerMessageId, "last@x");
+});
+
+test("a thread of more than 200 messages is truncated to its newest 200", async () => {
+  // 100 earlier messages named in References, the message, 150 replies:
+  // under every other limit
+  const start = Date.now() - 300 * 60_000;
+  const at = (i) => new Date(start + i * 60_000);
+  const earlier = Array.from({ length: 100 }, (_, i) => `w-${i + 1}@x`);
+  earlier.forEach((headerMessageId, i) => mock.addMessage("a1", "INBOX", { subject: "Weekly", date: at(i), headerMessageId }));
+  const mid = mock.addMessage("a1", "INBOX", { subject: "Re: Weekly", date: at(100), headerMessageId: "mid@x", references: earlier });
+  for (let i = 1; i <= 150; i++) {
+    mock.addMessage("a1", "INBOX", { subject: "Re: Weekly", date: at(100 + i), headerMessageId: `r-${i}@x`, references: ["mid@x"] });
+  }
+  const out = await ok("mail_thread", { id: idOf(mid) });
+  assert.equal(out.truncated, true);
+  assert.equal(out.messages.length, 200);
+  assert.equal(decodeId(out.messages[0].id).headerMessageId, "w-52@x");
+  assert.equal(decodeId(out.messages.at(-1).id).headerMessageId, "r-150@x");
+});
+
+test("more than 200 same-subject candidates truncate a short thread, whose newest replies are found", async () => {
+  const start = Date.now() - 300 * 60_000;
+  const root = mock.addMessage("a1", "INBOX", { subject: "Status", date: new Date(start), headerMessageId: "z@x" });
+  for (let i = 1; i <= 230; i++) {
+    mock.addMessage("a1", "INBOX", { subject: "Status", date: new Date(start + i * 60_000), headerMessageId: `other-${i}@x` });
+  }
+  for (let i = 1; i <= 5; i++) {
+    mock.addMessage("a1", "INBOX", { subject: "Re: Status", date: new Date(start + (230 + i) * 60_000), headerMessageId: `zr-${i}@x`, references: ["z@x"] });
+  }
+  const out = await ok("mail_thread", { id: idOf(root) });
+  assert.equal(out.truncated, true, "more than 200 candidates");
+  assert.deepEqual(
+    out.messages.map((p) => decodeId(p.id).headerMessageId),
+    ["z@x", "zr-1@x", "zr-2@x", "zr-3@x", "zr-4@x", "zr-5@x"],
+  );
+  assert.deepEqual(mock.openLists(), []);
 });

@@ -278,8 +278,16 @@ func TestSearchArgumentsFromCoverageAudit(t *testing.T) {
 			t.Errorf("mail_search %s must say how a whole address and other text match: %s", k, d)
 		}
 	}
+	for _, k := range []string{"to_me", "from_me"} {
+		if d, _ := p[k]["description"].(string); !strings.Contains(d, "enabled accounts' addresses") {
+			t.Errorf("mail_search %s must say it compares with the enabled accounts' addresses: %s", k, d)
+		}
+	}
+	if d, _ := p["tags_mode"]["description"].(string); !strings.Contains(d, "message by message") {
+		t.Errorf("mail_search tags_mode must say untagged is checked message by message: %s", d)
+	}
 	d := byName(t, "mail_search").Description
-	for _, s := range []string{"note on how to narrow", "priority", "before 148"} {
+	for _, s := range []string{"note on how to narrow", "priority", "before 148", "tags_mode untagged", "to_me or from_me false"} {
 		if !strings.Contains(d, s) {
 			t.Errorf("mail_search description lacks %q: %s", s, d)
 		}
@@ -288,7 +296,7 @@ func TestSearchArgumentsFromCoverageAudit(t *testing.T) {
 		t.Errorf("mail_search until must say mail dated in the future is found without it: %s", u)
 	}
 	td := byName(t, "mail_thread").Description
-	for _, s := range []string{"truncated", "200", "100", "newest", "priority"} {
+	for _, s := range []string{"truncated", "200", "100", "newest 200 later messages", "priority"} {
 		if !strings.Contains(td, s) {
 			t.Errorf("mail_thread description lacks %q: %s", s, td)
 		}
