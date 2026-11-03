@@ -1172,6 +1172,27 @@ function charsetSource(att) {
   return typeof v === "string" && /charset\s*=/i.test(v) ? v : String(att.contentType || "");
 }
 
+// rawBytes tells whether Thunderbird hands over a text attachment's own
+// bytes. Thunderbird 153 and later do, and list each attachment's type
+// from the same version. Thunderbird 140 hands over the text it decoded
+// itself with each character cut to its low byte, so what arrives is the
+// text's Latin-1 code points, whatever the part's charset says, and a
+// character outside Latin-1 is lost there (README, Supported versions).
+function rawBytes(att) {
+  return Boolean(att) && typeof att.type === "string";
+}
+
+// latin1 decodes bytes as Latin-1 code points, one character a byte.
+// TextDecoder has no such decoder: its "iso-8859-1" is windows-1252.
+function latin1(buf) {
+  const bytes = new Uint8Array(buf);
+  const out = [];
+  for (let i = 0; i < bytes.length; i += B64_PIECE) {
+    out.push(String.fromCharCode.apply(null, bytes.subarray(i, i + B64_PIECE)));
+  }
+  return out.join("");
+}
+
 function decoderFor(contentType) {
   const m = /charset\s*=\s*"?([^";\s]+)/i.exec(contentType);
   try {
@@ -1238,7 +1259,7 @@ async function mailAttachment(args, ctx) {
     // BODY_CAP bytes.
     const sliceBytes = isHtml ? BODY_CAP : ATTACHMENT_TEXT * 4;
     const buf = answered(await call(run, () => file.slice(0, sliceBytes).arrayBuffer()));
-    let text = decoderFor(charsetSource(att)).decode(buf);
+    let text = rawBytes(att) ? decoderFor(charsetSource(att)).decode(buf) : latin1(buf);
     const partial = file.size > sliceBytes;
     if (partial) text = text.replace(/\uFFFD$/, "");
     if (isHtml) text = htmlToText(text);

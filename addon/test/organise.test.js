@@ -605,6 +605,17 @@ test("mail_archive reports a message already in its archive folder as done, its 
   assert.deepEqual((await call("mail_archive", { ids: [work.id] })).content.failed, [{ id: work.id, code: "not_enabled" }]);
 });
 
+test("mail_archive reports a message briefly out of sight after a re-archive as in place, its id unchanged", async () => {
+  // On IMAP Thunderbird can renumber a message it left in its archive
+  // folder, and for a moment it is found under neither number, longer
+  // than the recheck: the handler looks once more after its event wait.
+  const flat = add("a1", "Archives", 1);
+  mock.behaviour.archiveHide = () => 800;
+  const r = await call("mail_archive", { ids: [flat.id] });
+  assert.deepEqual(r.content, { done: [flat.id], failed: [], moved: [{ from: flat.id, to: flat.id }] });
+  assert.equal(mock.calls.archive.length, 1);
+});
+
 test("mail_archive reports a message Thunderbird archived as a copy under copied", async () => {
   const a1 = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Shared"], noDelete: ["Shared"] };
   mock = install({ accounts: [a1, ...ACCOUNTS.slice(1)] });

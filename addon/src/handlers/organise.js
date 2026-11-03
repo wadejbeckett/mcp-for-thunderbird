@@ -459,6 +459,18 @@ async function mailArchive(args, ctx) {
     // left the accounts and folders MCP for Thunderbird may work with: it
     // is failed with refused, and its new id is not given. A copy that was
     // not seen may still be made.
+    // A message that was out of sight at the check above (on IMAP a moved
+    // message can be renumbered, and is then briefly found under neither
+    // number) and got no event is looked for once more: back in its
+    // archive folder, it was left in place.
+    for (const p of open) {
+      if (failed.has(p.id) || watch.seen(p.id) || p.copy || !inArchive(p.h.folder, marked)) continue;
+      try {
+        if (await stillThere(run, p.id)) inPlace.add(p.id);
+      } catch (e) {
+        unsure(p, e);
+      }
+    }
     const out = { done: [], failed: [], moved: [] };
     const done = new Map();
     for (const p of archived) {

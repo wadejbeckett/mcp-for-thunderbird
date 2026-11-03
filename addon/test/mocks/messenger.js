@@ -199,6 +199,9 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // message into; by default the account's archive folder. As Thunderbird
   // does, archive leaves a message already in that folder where it is, and
   // copies one from a noDelete folder or a newsgroup (an nntp account).
+  // archiveHide(id) gives the ms for which archive, when it leaves that
+  // message where it is, takes it out of sight and then puts it back under
+  // a new number (as IMAP can renumber a message), or 0.
   // movedDelay is the time in ms before messages.onMoved or
   // messages.onCopied fires (null: neither fires).
   // saveReturns: saveMessage returns the saved header (Local Folders);
@@ -215,6 +218,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     importReturns: true,
     archiveSkip: null,
     archiveTo: null,
+    archiveHide: null,
     movedDelay: 0,
   };
   // pages read per query (index into calls.query), first page included
@@ -431,7 +435,17 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           const f = want
             ? folderList.find((x) => x.accountId === want.accountId && x.path === want.path)
             : folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
-          if (!f || f.id === h.folder.id) continue;
+          if (!f || f.id === h.folder.id) {
+            const ms = behaviour.archiveHide ? behaviour.archiveHide(id) : 0;
+            if (ms > 0) {
+              store.delete(id);
+              setTimeout(() => {
+                const nid = nextId++;
+                store.set(nid, { ...h, id: nid });
+              }, ms);
+            }
+            continue;
+          }
           const news = accounts.some((a) => a.id === h.folder.accountId && a.type === "nntp");
           if (news || noDelete.has(h.folder.id)) copyTo(h, f);
           else moveTo(h, f);

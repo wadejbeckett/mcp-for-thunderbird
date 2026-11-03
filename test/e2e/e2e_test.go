@@ -733,10 +733,20 @@ func TestE2EAttachmentKinds(t *testing.T) {
 	}
 
 	// The text is decoded in the charset of the attachment's own header.
+	// Thunderbird 140 hands over the text it decoded itself, each character
+	// cut to one byte: é survives as its Latin-1 code point, € does not.
 	var menu struct{ Text string }
 	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "name": "menu.txt"}, &menu)
-	if inner, ok := unwrap(menu.Text); !ok || strings.TrimSpace(inner) != "Menu: café 5€" {
-		t.Fatalf("menu.txt = %q", menu.Text)
+	inner, ok := unwrap(menu.Text)
+	got := strings.TrimSpace(inner)
+	if current {
+		if !ok || got != "Menu: café 5€" {
+			t.Fatalf("menu.txt = %q", menu.Text)
+		}
+	} else if !ok || !strings.HasPrefix(got, "Menu: café 5") {
+		t.Fatalf("menu.txt on Thunderbird %s = %q", os.Getenv("MFT_E2E_TB_VERSION"), menu.Text)
+	} else if got != "Menu: café 5€" {
+		t.Logf("menu.txt on Thunderbird %s = %q: a character outside Latin-1 is cut by Thunderbird", os.Getenv("MFT_E2E_TB_VERSION"), got)
 	}
 
 	// A part alone fetches the attachment with no name.
