@@ -31,6 +31,8 @@ AI apps write the body of a message as plain text, and the add-on turns it into 
 
 An AI app can send the body as HTML instead, with `html` set to true, when it needs tables or formatting. The add-on keeps paragraphs, line breaks, bulleted and numbered lists, bold and italic, links to web and mail addresses, and tables, and gives each table a border and cell padding so it reads the same in Thunderbird and in the recipient's mail program. Everything else is removed: scripts, styles, images and any other markup. The identity's signature and, in a reply or forward, the quoted original still follow the text.
 
+A reply or forward goes out from the identity the original was addressed to, as in Thunderbird; for mail you sent, from the identity that sent it. An AI app can name another of the account's identities, by its address, with `from`, which also picks the sender of a new message or a direct send. A reply can go to a mailing list (kind `reply_list`) when the original names one in its List-Post header, and a forward can attach the whole original message (`forward_as` set to `attachment`) instead of quoting it. `mail_compose` returns the ids of the compose tab and window it opened.
+
 ## What it cannot do
 
 - **Delete mail for good.** The organise tools can move mail to Trash, but no tool empties Trash or Junk, deletes a folder or changes account settings.
@@ -76,6 +78,9 @@ An AI app can send the body as HTML instead, with `html` set to true, when it ne
 - **"Has attachments" can be unknown** in search results when there was no time left to check it.
 - **One time budget per request.** A request that changes many messages at once (marking, tagging, moving) reports which messages were done and which failed if Thunderbird is slow.
 - **Reply and forward drafts** are saved to Drafts with their threading kept. When you send one, Thunderbird files the sent copy according to the account's own settings; this has not been tested on every account type.
+- **Drafts kept in another account.** Thunderbird does not tell add-ons which folder an identity saves its drafts in. For an account with no Drafts folder of its own, `mail_draft` uses the Drafts folder of Local Folders when Local Folders is enabled, or the only Drafts folder among the other enabled accounts, and refuses when there are several.
+- **Attachments stored outside a message**, such as a FileLink or a detached file, are only a placeholder in the message. A forward draft that would carry one is refused; forward the whole message as an attachment instead, or open the forward with `mail_compose`.
+- **Direct sending needs Thunderbird online.** While Thunderbird is set to Work Offline, `mail_send` sends nothing and says so; it does not queue the message to send later.
 - **Direct sending accepts only simple addresses**: letters, digits and `. _ + -` before the `@`, and a plain domain. Write a draft for any other address. [SECURITY.md](SECURITY.md) explains why.
 - **The host is not code-signed yet**, so Windows and macOS warn when you install it. The add-on on the releases page is unsigned too; Thunderbird installs an unsigned add-on from a file, and it will be signed by addons.thunderbird.net once listed there.
 

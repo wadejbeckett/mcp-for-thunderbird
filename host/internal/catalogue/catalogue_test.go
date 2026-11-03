@@ -257,3 +257,51 @@ func TestHTMLBodyOption(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeIdentityKindsAndForward(t *testing.T) {
+	for _, n := range []string{"mail_draft", "mail_compose", "mail_send"} {
+		f, ok := props(t, n)["from"]
+		if !ok || f["type"] != "string" {
+			t.Fatalf("%s must take a from string: %v", n, f)
+		}
+		d, _ := f["description"].(string)
+		for _, want := range []string{"address or id", "default identity"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s from description must mention %q: %s", n, want, d)
+			}
+		}
+		for _, r := range byName(t, n).Input["required"].([]string) {
+			if r == "from" {
+				t.Errorf("%s: from must be optional", n)
+			}
+		}
+	}
+	if d, _ := props(t, "mail_compose")["from"]["description"].(string); !strings.Contains(d, "addressed to") {
+		t.Errorf("mail_compose from description must say a reply goes out from the identity the original was addressed to: %s", d)
+	}
+	for _, n := range []string{"mail_draft", "mail_compose"} {
+		kind := props(t, n)["kind"]
+		if got := strings.Join(kind["enum"].([]string), ","); got != "new,reply,reply_all,reply_list,forward" {
+			t.Errorf("%s kind enum = %s", n, got)
+		}
+		if d, _ := kind["description"].(string); !strings.Contains(d, "List-Post") {
+			t.Errorf("%s kind description must explain reply_list: %s", n, d)
+		}
+		fa := props(t, n)["forward_as"]
+		if got := strings.Join(fa["enum"].([]string), ","); got != "inline,attachment" {
+			t.Errorf("%s forward_as enum = %s", n, got)
+		}
+	}
+	if _, ok := props(t, "mail_send")["forward_as"]; ok {
+		t.Error("mail_send sends new messages only and must not take forward_as")
+	}
+	if d := byName(t, "mail_compose").Description; !strings.Contains(d, "tabId") || !strings.Contains(d, "windowId") {
+		t.Errorf("mail_compose description must name the tabId and windowId it returns: %s", d)
+	}
+	if d := byName(t, "mail_send").Description; !strings.Contains(d, "offline") {
+		t.Errorf("mail_send description must say nothing is sent while offline: %s", d)
+	}
+	if d := byName(t, "mail_draft").Description; !strings.Contains(d, "Local Folders") || !strings.Contains(d, "placeholder") {
+		t.Errorf("mail_draft description must mention Local Folders' Drafts and placeholder attachments: %s", d)
+	}
+}

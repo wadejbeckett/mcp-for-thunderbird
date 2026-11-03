@@ -55,11 +55,21 @@ const bodyDesc = "Plain-text body. A blank line starts a new paragraph. A paragr
 // (addon/src/handlers/compose.js, cleanHtml).
 const htmlDesc = "true when body is HTML rather than plain text. Allowed: p, br, ul, ol, li, strong, em (b and i become strong and em), a with an http, https or mailto href, and table, thead, tbody, tr, th, td (colspan and rowspan). Tables get a border and cell padding. Any other element keeps only its text; scripts, styles and images are removed, as are all other attributes. The signature and, for replies and forwards, the quoted original still follow the body."
 
+// fromDesc tells callers how the sending identity is chosen
+// (addon/src/handlers/compose.js, writer).
+const fromDesc = "Identity to write from: its address or id, one of the account's identities. Without it, a reply or forward goes out from the identity the original was addressed to, and anything else from the account's default identity. With from and no account, the enabled account that has this identity."
+
+// sendFromDesc is fromDesc for mail_send, which writes only new messages.
+const sendFromDesc = "Identity to send from: its address or id, one of the account's identities; the account's default identity when not given. With from and no account, the enabled account that has this identity."
+
 func composeProps() m {
 	return m{
-		"account":     account(),
-		"kind":        enum("new, reply, reply_all or forward.", "new", "reply", "reply_all", "forward"),
+		"account": account(),
+		"from":    str(fromDesc),
+		"kind": enum("new, reply, reply_all, reply_list or forward. reply_list answers the mailing list in the original's List-Post header, and is refused for a message without one.",
+			"new", "reply", "reply_all", "reply_list", "forward"),
 		"id":          str("Message id to reply to or forward."),
+		"forward_as":  enum("For kind forward: inline (the default) quotes the original in the body with its attachments; attachment attaches the whole original message.", "inline", "attachment"),
 		"to":          strs("To recipients."),
 		"cc":          strs("Cc recipients."),
 		"bcc":         strs("Bcc recipients."),
@@ -148,15 +158,15 @@ var tools = []Tool{
 		Description: "Moves messages to the account's Trash folder. Returns {done: ids changed, failed: [{id, code}]}.",
 		Input:       schema([]string{"ids"}, m{"account": account(), "ids": strs("Message ids.")})},
 	{Name: "mail_draft", Group: "compose",
-		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards are saved to Drafts with threading kept. Returns draftId, the saved draft's message id; draftId may be null when Thunderbird has not yet shown the saved draft in Drafts (the draft is still saved; do not save it again).",
+		Description: "Saves a new message, reply or forward to Drafts without sending; replies and forwards are saved to Drafts with threading kept. An account without a Drafts folder of its own saves to the Drafts folder of Local Folders when that is enabled. A forward is refused when the original has an attachment that is only a placeholder in the message (a FileLink, or a linked, detached or deleted file); forward_as attachment forwards such a message whole. Returns draftId, the saved draft's message id; draftId may be null when Thunderbird has not yet shown the saved draft in Drafts (the draft is still saved; do not save it again).",
 		Input:       schema([]string{"kind", "body"}, composeProps())},
 	{Name: "mail_compose", Group: "compose",
-		Description: "Opens a compose window in Thunderbird, filled in, for the user to review and send.",
+		Description: "Opens a compose window in Thunderbird, filled in, for the user to review and send. Returns {opened: true, tabId, windowId}, the ids of the compose tab and window Thunderbird opened.",
 		Input:       schema([]string{"kind", "body"}, composeProps())},
 	{Name: "mail_send", Group: "send", Destructive: true,
-		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message. Direct send accepts only simple addresses (letters, digits, . _ + -) before the @ and a plain ASCII domain; use mail_draft for any other address.",
+		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message. Direct send accepts only simple addresses (letters, digits, . _ + -) before the @ and a plain ASCII domain; use mail_draft for any other address. Nothing is sent while Thunderbird is offline.",
 		Input: schema([]string{"to", "subject", "body"}, m{
-			"account": account(), "to": strs("To recipients."), "cc": strs("Cc recipients."), "bcc": strs("Bcc recipients."),
+			"account": account(), "from": str(sendFromDesc), "to": strs("To recipients."), "cc": strs("Cc recipients."), "bcc": strs("Bcc recipients."),
 			"subject": str("Subject."), "body": str(bodyDesc), "html": boolean(htmlDesc), "attachments": attachments(),
 		})},
 }
