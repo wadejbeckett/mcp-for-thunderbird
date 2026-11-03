@@ -152,13 +152,13 @@ test("TestMoveToTrashRefused", async () => {
 test("mail_move moves within the account and mail_move copy copies", async () => {
   const m = add("a1", "INBOX", 1);
   const r = await call("mail_move", { ids: [m.id], folder: "Work" });
-  assert.deepEqual(r.content, { done: [m.id], failed: [] });
+  assert.deepEqual(r.content, { done: [m.id], failed: [], moved: [{ from: m.id, to: encodeId("a1", "Work", "msg1@example.org") }] });
   assert.equal(folderOf(m.num).path, "Work");
   assert.equal(mock.calls.move.length, 1);
 
   const m2 = add("a1", "INBOX", 2);
   const c = await call("mail_move", { ids: [m2.id], folder: "Work", copy: true });
-  assert.deepEqual(c.content, { done: [m2.id], failed: [] });
+  assert.deepEqual(c.content, { done: [m2.id], failed: [], copied: [{ from: m2.id, to: encodeId("a1", "Work", "msg2@example.org") }] });
   assert.equal(folderOf(m2.num).path, "INBOX");
   assert.equal(mock.calls.copy.length, 1);
   assert.equal([...mock.store.values()].filter((h) => h.headerMessageId === "msg2@example.org").length, 2);
@@ -178,7 +178,14 @@ test("TestTrashUsesMoveNotDelete", async () => {
   const m1 = add("a1", "INBOX", 1);
   const m2 = add("a2", "INBOX", 2);
   const r = await call("mail_trash", { ids: [m1.id, m2.id] });
-  assert.deepEqual(r.content, { done: [m1.id, m2.id], failed: [] });
+  assert.deepEqual(r.content, {
+    done: [m1.id, m2.id],
+    failed: [],
+    moved: [
+      { from: m1.id, to: encodeId("a1", "Trash", "msg1@example.org") },
+      { from: m2.id, to: encodeId("a2", "Trash", "msg2@example.org") },
+    ],
+  });
   assert.equal(folderOf(m1.num).path, "Trash");
   assert.equal(folderOf(m1.num).accountId, "a1");
   assert.equal(folderOf(m2.num).path, "Trash");
@@ -200,7 +207,7 @@ test("mail_trash with no Trash folder is refused", async () => {
 test("mail_trash leaves a message already in Trash where it is", async () => {
   const m = add("a1", "Trash", 1);
   const r = await call("mail_trash", { ids: [m.id] });
-  assert.deepEqual(r.content, { done: [m.id], failed: [] });
+  assert.deepEqual(r.content, { done: [m.id], failed: [], moved: [{ from: m.id, to: m.id }] });
   assert.equal(mock.calls.move.length, 0);
   assert.equal(mock.calls.delete.length, 0);
 });
@@ -208,7 +215,7 @@ test("mail_trash leaves a message already in Trash where it is", async () => {
 test("mail_archive uses messages.archive", async () => {
   const m = add("a1", "INBOX", 1);
   const r = await call("mail_archive", { ids: [m.id] });
-  assert.deepEqual(r.content, { done: [m.id], failed: [] });
+  assert.deepEqual(r.content, { done: [m.id], failed: [], moved: [{ from: m.id, to: encodeId("a1", "Archives", "msg1@example.org") }] });
   assert.equal(folderOf(m.num).path, "Archives");
   assert.equal(mock.calls.archive.length, 1);
   assert.equal(mock.calls.delete.length, 0);
@@ -345,7 +352,7 @@ test("mail_move refuses the Outbox and folders below it as a target", async () =
   }
   noOrganiseCalls();
   const ok = await call("mail_move", { ids: [m.id], folder: "Inbox" });
-  assert.deepEqual(ok.content, { done: [m.id], failed: [] });
+  assert.deepEqual(ok.content.done, [m.id]);
 });
 
 test("mail_tag calls running together on one message keep both changes", async () => {
@@ -430,13 +437,157 @@ test("mail_archive is refused when an archive folder is in Local Folders", async
   }
 });
 
-test("another account's own archive folder does not block archiving", async () => {
+test("another enabled account's own archive folder does not block archiving", async () => {
   const a2 = { ...ACCOUNTS[1], folders: [...ACCOUNTS[1].folders, "Archives"], specialUse: { ...ACCOUNTS[1].specialUse, Archives: ["archives"] } };
   mock = install({ accounts: [ACCOUNTS[0], a2, ACCOUNTS[2]] });
-  await save({ accounts: { a1: true, a3: true }, excludedFolders: [{ accountId: "a2", path: "Archives" }] });
+  await save({ accounts: { a1: true, a2: true, a3: true }, excludedFolders: [] });
   const m = add("a1", "INBOX", 1);
   const r = await call("mail_archive", { ids: [m.id] });
-  assert.deepEqual(r.content, { done: [m.id], failed: [] });
+  assert.deepEqual(r.content.done, [m.id]);
   assert.equal(folderOf(m.num).path, "Archives");
   assert.equal(folderOf(m.num).accountId, "a1");
+});
+
+test("an archive folder in an account that is not enabled, or excluded, blocks archiving", async () => {
+  // An identity of a1 may archive into a2's folder: Thunderbird does not
+  // say which folder each identity uses.
+  const a2 = { ...ACCOUNTS[1], folders: [...ACCOUNTS[1].folders, "Archives", "Archives/2026"], specialUse: { ...ACCOUNTS[1].specialUse, Archives: ["archives"] } };
+  const feeds = { id: "a5", name: "Feeds", type: "rss", folders: ["Archives"], specialUse: { Archives: ["archives"] } };
+  mock = install({ accounts: [ACCOUNTS[0], a2, ACCOUNTS[2], feeds] });
+  const m = add("a1", "INBOX", 1);
+  const cases = [
+    [{ accounts: { a1: true, a5: true }, excludedFolders: [] }, "not_enabled", /not enabled/],
+    [{ accounts: { a1: true, a2: true, a5: true }, excludedFolders: [{ accountId: "a2", path: "Archives" }] }, "excluded", /excluded/],
+    [{ accounts: { a1: true, a2: true, a5: true }, excludedFolders: [{ accountId: "a2", path: "Archives/2026" }] }, "excluded", /excluded/],
+    // a feed account counts too
+    [{ accounts: { a1: true, a2: true }, excludedFolders: [] }, "not_enabled", /not enabled/],
+  ];
+  for (const [settings, code, message] of cases) {
+    await save(settings);
+    const r = await call("mail_archive", { ids: [m.id] });
+    assert.equal(r.ok, false, JSON.stringify(settings));
+    assert.equal(r.error.code, code, JSON.stringify(settings));
+    assert.match(r.error.message, message);
+    assert.match(r.error.message, /another account/);
+  }
+  noOrganiseCalls();
+  assert.equal(folderOf(m.num).path, "INBOX");
+  await save({ accounts: { a1: true, a2: true, a5: true }, excludedFolders: [] });
+  assert.deepEqual((await call("mail_archive", { ids: [m.id] })).content.done, [m.id]);
+});
+
+test("mail_archive reports a message Thunderbird did not archive as failed", async () => {
+  const kept = add("a1", "INBOX", 1);
+  const gone = add("a1", "INBOX", 2);
+  // archiving turned off for the identity: Thunderbird skips the message
+  mock.behaviour.archiveSkip = (id) => id === kept.num;
+  const r = await call("mail_archive", { ids: [kept.id, gone.id] });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.content, {
+    done: [gone.id],
+    failed: [{ id: kept.id, code: "not_enabled" }],
+    moved: [{ from: gone.id, to: encodeId("a1", "Archives", "msg2@example.org") }],
+  });
+  assert.equal(folderOf(kept.num).path, "INBOX");
+  assert.equal(mock.calls.archive.length, 2);
+});
+
+test("mail_archive gives the new id from Thunderbird's move event, also when it comes late", async () => {
+  const yearly = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Archives/2026"] };
+  mock = install({ accounts: [yearly, ...ACCOUNTS.slice(1)] });
+  await save({ accounts: { a1: true, a2: true, a3: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  const m = add("a1", "INBOX", 1);
+  // Thunderbird files into a year subfolder; on IMAP the event comes once
+  // the message is seen there
+  mock.behaviour.archiveTo = () => ({ accountId: "a1", path: "Archives/2026" });
+  mock.behaviour.movedDelay = 150;
+  const r = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(r.content, { done: [m.id], failed: [], moved: [{ from: m.id, to: encodeId("a1", "Archives/2026", "msg1@example.org") }] });
+  assert.equal(globalThis.messenger.messages.onMoved.listeners.length, 0);
+});
+
+test("mail_archive without a move event still reports the message done, with no new id", async () => {
+  SEARCH.budgetMs = 400;
+  const m = add("a1", "INBOX", 1);
+  mock.behaviour.movedDelay = null;
+  const r = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(r.content, { done: [m.id], failed: [], moved: [] });
+  assert.equal(folderOf(m.num).path, "Archives");
+});
+
+test("mail_archive gives no new id for a folder the settings do not allow", async () => {
+  const m = add("a1", "INBOX", 1);
+  const n = add("a1", "INBOX", 2);
+  // Thunderbird filed them where the checks did not expect
+  mock.behaviour.archiveTo = (h) => (h.headerMessageId === "msg1@example.org" ? { accountId: "a1", path: "Private" } : { accountId: "a4", path: "Kept" });
+  const r = await call("mail_archive", { ids: [m.id, n.id] });
+  assert.deepEqual(r.content, { done: [m.id, n.id], failed: [], moved: [] });
+});
+
+test("mail_move copy into the message's own folder fails; a move there changes nothing", async () => {
+  const m = add("a1", "Work", 1);
+  const other = add("a1", "INBOX", 2);
+  const c = await call("mail_move", { ids: [m.id, other.id], folder: "Work", copy: true });
+  assert.deepEqual(c.content, {
+    done: [other.id],
+    failed: [{ id: m.id, code: "refused" }],
+    copied: [{ from: other.id, to: encodeId("a1", "Work", "msg2@example.org") }],
+  });
+  assert.equal(mock.calls.copy.length, 1);
+  assert.deepEqual(mock.calls.copy[0][0], [other.num]);
+  const mv = await call("mail_move", { ids: [m.id], folder: "Work" });
+  assert.deepEqual(mv.content, { done: [m.id], failed: [], moved: [{ from: m.id, to: m.id }] });
+  assert.equal(mock.calls.move.length, 0);
+});
+
+test("mail_move refuses a folder that cannot hold messages", async () => {
+  const a1 = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Clients", "Clients/Acme"], noMessages: ["Clients"] };
+  mock = install({ accounts: [a1, ...ACCOUNTS.slice(1)] });
+  await save({ accounts: { a1: true, a2: true, a3: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  const m = add("a1", "INBOX", 1);
+  for (const copy of [false, true]) {
+    const r = await call("mail_move", { ids: [m.id], folder: "Clients", copy });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, "invalid_argument");
+    assert.equal(r.error.message, "This folder cannot hold messages.");
+  }
+  noOrganiseCalls();
+  const ok = await call("mail_move", { ids: [m.id], folder: "Clients/Acme" });
+  assert.deepEqual(ok.content.done, [m.id]);
+});
+
+test("mail_move goes ahead when Thunderbird cannot say what a folder allows", async () => {
+  const m = add("a1", "INBOX", 1);
+  globalThis.messenger.folders.getFolderCapabilities = async () => {
+    throw new Error("no capabilities");
+  };
+  assert.deepEqual((await call("mail_move", { ids: [m.id], folder: "Work" })).content.done, [m.id]);
+  delete globalThis.messenger.folders.getFolderCapabilities;
+  const n = add("a1", "INBOX", 2);
+  assert.deepEqual((await call("mail_move", { ids: [n.id], folder: "Work" })).content.done, [n.id]);
+});
+
+test("mail_tags lists keys, labels and colours, cleaned", async () => {
+  const r = await call("mail_tags", {});
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.content, {
+    tags: [
+      { key: "$label1", label: "Important", color: "#FF0000" },
+      { key: "$label4", label: "To Do", color: "#3333FF" },
+    ],
+  });
+  globalThis.messenger.messages.tags.list = async () => [
+    { key: "invoices", tag: "Invo​ices", color: "red", ordinal: "" },
+    { key: "", tag: "No key" },
+    null,
+  ];
+  assert.deepEqual((await call("mail_tags", {})).content, { tags: [{ key: "invoices", label: "Invoices", color: null }] });
+  assert.equal(mock.calls.update.length, 0);
+});
+
+test("mail_tags is a read tool", async () => {
+  await save({ groups: { read: false, organise: true, compose: false, contacts: false } });
+  assert.equal((await call("mail_tags", {})).error.code, "not_enabled");
+  await save({ groups: { read: true, organise: false, compose: false, contacts: false } });
+  assert.equal((await call("mail_tags", {})).ok, true);
 });

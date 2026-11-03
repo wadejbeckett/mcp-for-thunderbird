@@ -21,8 +21,8 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 
 | Group | Tools | What they do |
 |---|---|---|
-| Read | `mail_accounts`, `mail_folders`, `mail_search`, `mail_read`, `mail_thread`, `mail_attachment`, `mail_filter_suggest` | List accounts and folders; search mail; read one message; list the messages in a conversation; save an attachment to a folder you choose; describe a message filter for you to create. |
-| Organise | `mail_mark`, `mail_tag`, `mail_move`, `mail_archive`, `mail_trash` | Mark as read or flagged; add or remove tags; move or copy to another folder; archive; move to Trash. |
+| Read | `mail_accounts`, `mail_folders`, `mail_search`, `mail_read`, `mail_thread`, `mail_attachment`, `mail_filter_suggest`, `mail_tags` | List accounts and folders; search mail; read one message; list the messages in a conversation; save an attachment to a folder you choose; describe a message filter for you to create; list your tags with their colours. |
+| Organise | `mail_mark`, `mail_tag`, `mail_move`, `mail_archive`, `mail_trash` | Mark as read or flagged; add or remove tags; move or copy to another folder; archive; move to Trash. Moving, archiving and moving to Trash give back each message's new id, so the AI app can go on working with it. |
 | Draft | `mail_draft`, `mail_compose` | Save a new message, reply or forward to Drafts (Thunderbird 153 or later); open a filled-in compose window for you to check and send. |
 | Contacts | `mail_contacts` | Look people up in your address books. |
 | Sending | `mail_send` | Send a message with no window, only to recipients you have listed (Thunderbird 153 or later). Off unless you turn it on. |

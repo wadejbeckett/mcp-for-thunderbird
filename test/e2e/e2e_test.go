@@ -43,7 +43,7 @@ const (
 )
 
 var (
-	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"}
+	readTools     = []string{"mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"}
 	organiseTools = []string{"mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"}
 	composeTools  = composeToolsOf(os.Getenv("MFT_E2E_TB_VERSION"))
 	contactsTools = []string{"mail_contacts"}
@@ -649,12 +649,59 @@ type organised struct {
 		ID   string `json:"id"`
 		Code string `json:"code"`
 	} `json:"failed"`
+	Moved  []movedID `json:"moved"`
+	Copied []movedID `json:"copied"`
+}
+
+// movedID is a message's id before (From) and after (To) a move or copy.
+type movedID struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 func (o organised) only(t *testing.T, tool, id string) {
 	t.Helper()
 	if len(o.Done) != 1 || o.Done[0] != id || len(o.Failed) != 0 {
 		t.Fatalf("%s = %+v, want only %s done", tool, o, id)
+	}
+}
+
+// movedTo returns the new id the result gives for id, checking that it
+// names the folder (with or without a leading slash) and the Message-ID.
+func (o organised) movedTo(t *testing.T, tool, id, folder, msgID string) string {
+	t.Helper()
+	for _, m := range append(o.Moved, o.Copied...) {
+		if m.From != id {
+			continue
+		}
+		f, mid := draftMessageID(t, m.To)
+		if strings.TrimPrefix(f, "/") != folder || mid != msgID {
+			t.Fatalf("%s new id names %s/%s, want %s/%s", tool, f, mid, folder, msgID)
+		}
+		return m.To
+	}
+	t.Fatalf("%s = %+v gives no new id for %s", tool, o, id)
+	return ""
+}
+
+// readUntil calls mail_read on id until it succeeds: on IMAP a moved
+// message may take a moment to appear in its new folder.
+func readUntil(t *testing.T, cs *mcp.ClientSession, id string) readResult {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		text, isErr := call(t, cs, "mail_read", map[string]any{"id": id})
+		if !isErr {
+			var r readResult
+			if err := json.Unmarshal([]byte(text), &r); err != nil {
+				t.Fatalf("mail_read: %v", err)
+			}
+			return r
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mail_read %s: %s", id, text)
+		}
+		time.Sleep(time.Second)
 	}
 }
 
@@ -697,12 +744,23 @@ func TestE2EOrganise(t *testing.T) {
 		t.Fatalf("unknown tag: %v %s", isErr, text)
 	}
 
-	// move within the account; Trash is not a mail_move target.
+	// move within the account; Trash is not a mail_move target, and a copy
+	// into the message's own folder, which Thunderbird would skip, fails.
 	if text, isErr := call(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": "/Trash"}); !isErr || !strings.HasPrefix(text, "refused:") {
 		t.Fatalf("move to Trash: %v %s", isErr, text)
 	}
+	o = organised{}
+	callOK(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": one.Folder, "copy": true}, &o)
+	if len(o.Done) != 0 || len(o.Failed) != 1 || o.Failed[0].ID != one.ID || o.Failed[0].Code != "refused" {
+		t.Fatalf("copy into its own folder = %+v", o)
+	}
+	o = organised{}
 	callOK(t, cs, "mail_move", map[string]any{"ids": []string{one.ID}, "folder": "/Sorted"}, &o)
 	o.only(t, "mail_move", one.ID)
+	movedID := o.movedTo(t, "mail_move", one.ID, "Sorted", id1)
+	if r := readUntil(t, cs, movedID); r.Headers.Subject != subj1 {
+		t.Fatalf("mail_read of the moved id: %+v", r.Headers)
+	}
 	imapWait(t, "move", "Sorted", id1, func(found bool, _ string) bool { return found })
 	imapWait(t, "move", "INBOX", id1, func(found bool, _ string) bool { return !found })
 	moved, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Sorted"}, subj1)
@@ -712,8 +770,10 @@ func TestE2EOrganise(t *testing.T) {
 	}
 
 	// trash: the message lands in Trash, flagged nothing, not expunged.
+	o = organised{}
 	callOK(t, cs, "mail_trash", map[string]any{"ids": []string{sorted.ID}}, &o)
 	o.only(t, "mail_trash", sorted.ID)
+	o.movedTo(t, "mail_trash", sorted.ID, "Trash", id1)
 	_, flags := imapWait(t, "trash", "Trash", id1, func(found bool, _ string) bool { return found })
 	if strings.Contains(flags, `\Deleted`) {
 		t.Fatalf("trashed message is marked deleted on the server: %q", flags)
@@ -727,19 +787,51 @@ func TestE2EOrganise(t *testing.T) {
 
 // TestE2EArchive archives a message with mail_archive and checks the
 // server over IMAP: the message is in Archives, the folder identity id1
-// archives into (make-profile.sh), and no longer in INBOX.
+// archives into (make-profile.sh), and no longer in INBOX; the new id the
+// result gives reads the message there. With archiving turned off for the
+// identity, Thunderbird skips the message, and mail_archive reports it as
+// failed.
 func TestE2EArchive(t *testing.T) {
 	cs := httpSession(t)
 	const (
-		subj = "Archive me"
-		id   = "archive-one@seed.test"
+		subj     = "Archive me"
+		id       = "archive-one@seed.test"
+		keptSubj = "Archive me not"
+		keptID   = "archive-two@seed.test"
 	)
 	res, _ := searchUntil(t, cs, map[string]any{"text": "archive test"}, subj)
-	one := find(res, subj)
-	if one.ID == "" {
-		t.Fatalf("seed message: %+v", res)
+	res, _ = searchUntil(t, cs, map[string]any{"text": "archive test"}, keptSubj)
+	one, kept := find(res, subj), find(res, keptSubj)
+	if one.ID == "" || kept.ID == "" {
+		t.Fatalf("seed messages: %+v", res)
 	}
+
+	// archiving off for id1: nothing moves, and the message is failed.
+	var before bool
+	marionette(t, fmt.Sprintf(archiveEnabledScript, "false"), &before)
+	if !before {
+		t.Fatal("identity id1 does not archive (make-profile.sh)")
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			var was bool
+			marionette(t, fmt.Sprintf(archiveEnabledScript, "true"), &was)
+			restored = true
+		}
+	}
+	defer restore()
 	var o organised
+	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{kept.ID}}, &o)
+	if len(o.Done) != 0 || len(o.Failed) != 1 || o.Failed[0].ID != kept.ID || o.Failed[0].Code != "not_enabled" {
+		t.Fatalf("mail_archive with archiving off = %+v", o)
+	}
+	if found, _ := imapLookup(t, "INBOX", keptID); !found {
+		t.Fatal("the message Thunderbird did not archive left INBOX")
+	}
+	restore()
+
+	o = organised{}
 	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{one.ID}}, &o)
 	o.only(t, "mail_archive", one.ID)
 	_, flags := imapWait(t, "archive", "Archives", id, func(found bool, _ string) bool { return found })
@@ -747,9 +839,59 @@ func TestE2EArchive(t *testing.T) {
 		t.Fatalf("archived message is marked deleted on the server: %q", flags)
 	}
 	imapWait(t, "archive", "INBOX", id, func(found bool, _ string) bool { return !found })
-	archived, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Archives"}, subj)
-	if p := find(archived, subj); p.Folder != "Archives" && p.Folder != "/Archives" {
-		t.Fatalf("archived message is in %q", p.Folder)
+	// The new id comes from Thunderbird's move event, which on IMAP waits
+	// until Thunderbird has the message in Archives, so it reads at once.
+	// That wait has been checked on 153 only: on 140 ESR a result without
+	// the new id falls back to finding the message in Archives by search.
+	if len(o.Moved) == 0 && !backgroundSave(os.Getenv("MFT_E2E_TB_VERSION")) {
+		t.Logf("mail_archive gave no new id on Thunderbird %s", os.Getenv("MFT_E2E_TB_VERSION"))
+		archived, _ := searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Archives"}, subj)
+		if p := find(archived, subj); p.Folder != "Archives" && p.Folder != "/Archives" {
+			t.Fatalf("archived message is in %q", p.Folder)
+		}
+		return
+	}
+	archived := o.movedTo(t, "mail_archive", one.ID, "Archives", id)
+	text, isErr := call(t, cs, "mail_read", map[string]any{"id": archived})
+	var r readResult
+	if isErr || json.Unmarshal([]byte(text), &r) != nil || r.Headers.Subject != subj {
+		t.Fatalf("mail_read of the archived id: %v %s", isErr, text)
+	}
+}
+
+// archiveEnabledScript turns archiving on or off for identity id1 and
+// returns whether it was on.
+const archiveEnabledScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const id = MailServices.accounts.getIdentity("id1");
+const before = id.archiveEnabled;
+id.archiveEnabled = %s;
+return before;
+`
+
+// TestE2ETags lists Thunderbird's tags: a new profile has the five default
+// tags, and the one TestE2EOrganise adds by label is among them.
+func TestE2ETags(t *testing.T) {
+	cs := httpSession(t)
+	var out struct {
+		Tags []struct {
+			Key   string  `json:"key"`
+			Label string  `json:"label"`
+			Color *string `json:"color"`
+		} `json:"tags"`
+	}
+	callOK(t, cs, "mail_tags", map[string]any{}, &out)
+	found := false
+	for _, tg := range out.Tags {
+		if tg.Key == "$label1" {
+			found = true
+			if tg.Label != "Important" || tg.Color == nil || !regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`).MatchString(*tg.Color) {
+				t.Fatalf("$label1 = %+v", tg)
+			}
+		}
+	}
+	if !found || len(out.Tags) < 5 {
+		t.Fatalf("mail_tags = %+v", out)
 	}
 }
 

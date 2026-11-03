@@ -63,7 +63,7 @@ test("hello carries protocol 1, version, instance, enabled tools and attachmentD
     protocol: 1,
     version: "1.2.3",
     instance: s.instance,
-    tools: ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"],
+    tools: ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags", "mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"],
     attachmentDir: "/home/u/MCP",
   });
 });

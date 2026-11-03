@@ -11,7 +11,7 @@ export const STORAGE_KEY = "settings";
 
 // Tool groups, in catalogue order (Shared contracts).
 export const GROUPS = Object.freeze({
-  read: Object.freeze(["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"]),
+  read: Object.freeze(["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"]),
   contacts: Object.freeze(["mail_contacts"]),
   organise: Object.freeze(["mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"]),
   compose: Object.freeze(["mail_draft", "mail_compose"]),

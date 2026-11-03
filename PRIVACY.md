@@ -50,7 +50,7 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `messagesRead` | Searching and reading messages and their attachments. |
 | `messagesMove` | Moving, copying, archiving and moving to Trash. MCP for Thunderbird never deletes mail for good. |
 | `messagesUpdate` | Marking as read or flagged, and adding or removing tags. |
-| `messagesTagsList` | Finding tags by name. |
+| `messagesTagsList` | Listing your tags and finding them by name. |
 | `messagesImport` | Saving reply and forward drafts into your Drafts folder with their threading kept. |
 | `messages.save` | Saving new drafts. |
 | `compose` | Opening a filled-in compose window for you to check and send. |

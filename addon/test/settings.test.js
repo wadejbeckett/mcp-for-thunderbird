@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { install, fetchFrom } from "./mocks/messenger.js";
 import { DEFAULTS, LEVELS, GROUPS, load, save, enabledTools } from "../src/settings.js";
 
-const READ = ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest"];
+const READ = ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"];
 const ORGANISE = ["mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"];
 const COMPOSE = ["mail_draft", "mail_compose"];
 
