@@ -39,7 +39,6 @@
     "messagesUpdate",
     "messagesTagsList",
     "messagesImport",
-    "messages.save",
     "compose",
     "scripting",
     "addressBooks",

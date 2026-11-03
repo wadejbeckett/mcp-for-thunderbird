@@ -77,7 +77,7 @@ The add-on sends the host program mail data only as the results of tool calls an
 
 REQUIREMENTS
 
-Thunderbird 140 ESR or later on Windows, macOS or Linux; the host program; and an AI app that supports MCP. On 140 ESR the two tools that save a draft or send without a window are not offered, because the mail app gained those interfaces in version 153; the compose window works on every supported version.
+Thunderbird 140 ESR or later on Windows, macOS or Linux; the host program; and an AI app that supports MCP. On 140 ESR the two tools that save a draft or send without a window are not offered; they are offered from version 153 on, and the compose window works on every supported version.
 
 MCP for Thunderbird is free software under the Mozilla Public License 2.0, with its source at https://github.com/wadejbeckett/mcp-for-thunderbird. It is not made by, endorsed by or affiliated with Mozilla or MZLA Technologies.
 ```

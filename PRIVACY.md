@@ -52,7 +52,6 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `messagesUpdate` | Marking as read or flagged, and adding or removing tags. |
 | `messagesTagsList` | Listing your tags and finding them by name. |
 | `messagesImport` | Saving drafts into your Drafts folder, with the threading of replies and forwards kept. |
-| `messages.save` | Telling MCP for Thunderbird that this Thunderbird (153 or later) can save and send without a window, so it offers `mail_draft` and `mail_send` there. It saves no mail with it. |
 | `compose` | Opening a filled-in compose window for you to check and send. |
 | `scripting` | Putting the text at the top of a compose window it opened, so the signature and its images stay as Thunderbird laid them out. |
 | `addressBooks` | Looking up contacts, only when the contacts group is on. MCP for Thunderbird does not change contacts. |
@@ -60,7 +59,7 @@ Thunderbird describes these in its own words when you install the add-on. Each i
 | `storage` | Your settings and the activity log. |
 | `messages.send` (optional) | Direct sending. Thunderbird asks you for it only when you turn on direct sending in the options, and it is not used otherwise. |
 
-Thunderbird 140 ESR does not know `messages.save` or `messages.send` and ignores them. There MCP for Thunderbird does not offer the tools that need them (`mail_draft` and `mail_send`), and the options page keeps direct sending off.
+Thunderbird 140 ESR does not know `messages.send` and ignores it. There MCP for Thunderbird offers neither `mail_draft` nor `mail_send`, which it offers only on Thunderbird 153 or later, and the options page keeps direct sending off.
 
 ## Your choices
 

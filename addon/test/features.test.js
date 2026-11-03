@@ -39,7 +39,7 @@ test("a tool this Thunderbird cannot run is refused with not_supported", () => {
 
 test("support is read from the API given, not from the version", () => {
   install({ release: 153 });
-  const m = { messages: { saveMessage() {} } };
+  const m = { messages: { getHeaders() {} } };
   assert.equal(supported("mail_draft", m), true);
   assert.equal(supported("mail_send", m), true);
   assert.equal(supported("mail_draft", {}), false);
@@ -49,7 +49,7 @@ test("support is read from the API given, not from the version", () => {
 
 test("on 153 mail_send is supported before messages.send is granted", () => {
   // sendMessage appears only with the optional permission; support is
-  // read from saveMessage, which the required messages.save brings.
+  // read from messages.getHeaders, the sign of 153 or later.
   const mock = install({ release: 153 });
   assert.equal(typeof mock.messenger.messages.sendMessage, "undefined");
   assert.equal(supported("mail_send"), true);

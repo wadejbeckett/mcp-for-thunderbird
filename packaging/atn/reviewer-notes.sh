@@ -56,7 +56,6 @@ The handlers (src/handlers/read.js, organise.js, compose.js) reach the add-on AP
 - messagesUpdate: messages.update for read, flagged and tags (src/handlers/organise.js).
 - messagesTagsList: messages.tags.list (src/handlers/read.js, tagList).
 - messagesImport: messages.import, which saves a reply or forward draft with its threading headers (src/handlers/compose.js, replyDraft).
-- messages.save: messages.saveMessage for a new draft (src/handlers/compose.js, newDraft).
 - compose: compose.beginNew, beginReply, beginForward, getComposeDetails and setComposeDetails (src/handlers/compose.js, mailCompose).
 - scripting: scripting.executeScript into the compose window the add-on itself opened, to put the text above the signature (src/handlers/compose.js, insertAtTop).
 - addressBooks: addressBooks.contacts.query and list (src/handlers/contacts.js).
@@ -66,7 +65,7 @@ The handlers (src/handlers/read.js, organise.js, compose.js) reach the add-on AP
 
 OTHER POINTS A REVIEW MAY RAISE
 
-- Thunderbird 140 ESR: messages.saveMessage and sendMessage exist from version 153. src/features.js detects them at run time; on 140 the two tools that need them are not in the tool list the host offers, so a call to either by name fails as an unknown tool (features.js also refuses them with not_supported if one ever reached the add-on).
+- Thunderbird 140 ESR: messages.sendMessage exists from version 153, and mail_draft is offered from 153 too (its drafts, saved with messages.import, are tested there). src/features.js tells a 153 Thunderbird by the presence of messages.getHeaders, which the 153 ESR line gained in 153 and which needs only messagesRead; on 140 the two tools are not in the tool list the host offers, so a call to either by name fails as an unknown tool (features.js also refuses them with not_supported if one ever reached the add-on).
 - ui/setup.html is opened by src/background.js on first install and by the options page's "Open the setup page" button, and loads ui/setup.js.
 - settings-seed.json is an empty object in every release build; the end-to-end test build fills it with test settings (packaging/build-xpi.mjs and packaging/check.sh enforce the empty object in releases).
 - Data over native messaging: the privacy policy in the listing says exactly what is exchanged. Neither the add-on nor the host sends anything off the computer; the user's own AI app sends what it reads to its vendor.
