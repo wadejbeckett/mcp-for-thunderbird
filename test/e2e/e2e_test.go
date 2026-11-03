@@ -1244,12 +1244,16 @@ func TestE2EArchive(t *testing.T) {
 		return
 	}
 	archived := o.movedTo(t, "mail_archive", one.ID, "Archives", id)
-	// Thunderbird's own list of Archives can trail the event by a moment
-	// on IMAP, so the read is tried for a few seconds.
+	// The new id is read at once: the add-on learns the message's numeric
+	// id from Thunderbird's move event (ids.js, primeFromEvent). Were that
+	// to fail, a search of Archives finds the message only once Thunderbird
+	// has synchronised the folder, on a slow runner tens of seconds later,
+	// so the read is tried for a minute and the time it took is logged.
 	var text string
 	var isErr bool
 	var r readResult
-	for i := 0; i < 40; i++ {
+	readStart := time.Now()
+	for i := 0; i < 240; i++ {
 		text, isErr = call(t, cs, "mail_read", map[string]any{"id": archived})
 		if !isErr && json.Unmarshal([]byte(text), &r) == nil && r.Headers.Subject == subj {
 			break
@@ -1258,6 +1262,9 @@ func TestE2EArchive(t *testing.T) {
 	}
 	if isErr || r.Headers.Subject != subj {
 		t.Fatalf("mail_read of the archived id: %v %s", isErr, text)
+	}
+	if took := time.Since(readStart); took > time.Second {
+		t.Logf("mail_read of the archived id took %v", took.Round(time.Millisecond))
 	}
 
 	// Archiving it again: Thunderbird leaves a message that is already in

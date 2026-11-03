@@ -14,6 +14,13 @@ import { fail } from "./errors.js";
 const PREFIX = "m1.";
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const cache = new Map();
+// MAX_CACHE bounds the cache; the oldest entries go first.
+const MAX_CACHE = 5000;
+
+function remember(id, num) {
+  if (!cache.has(id) && cache.size >= MAX_CACHE) cache.delete(cache.keys().next().value);
+  cache.set(id, num);
+}
 
 function toB64url(text) {
   const bytes = new TextEncoder().encode(text);
@@ -86,6 +93,27 @@ export function clearIdCache() {
   cache.clear();
 }
 
+// primeFromEvent, a listener for messages.onMoved and messages.onCopied,
+// keeps the cache abreast of Thunderbird's own word on moved and copied
+// messages. The header such an event gives for a message's new place
+// carries the numeric id under which Thunderbird knows the message at
+// once, while a search of the folder (messages.query, which resolveId
+// falls back to) can miss it until Thunderbird has synchronised the
+// folder with the server, on IMAP until its next check of that folder.
+// Only the first page of each list is read; a list with more pages is
+// ended, as Thunderbird keeps it until its last page is read.
+export function primeFromEvent(from, to) {
+  for (const list of [from, to]) {
+    if (list && typeof list.id === "string") endList(list.id);
+  }
+  const dst = to && Array.isArray(to.messages) ? to.messages : [];
+  for (const h of dst) {
+    if (!h || typeof h.id !== "number" || typeof h.headerMessageId !== "string" || h.headerMessageId === "") continue;
+    if (!h.folder || typeof h.folder.accountId !== "string" || typeof h.folder.path !== "string") continue;
+    remember(encodeId(h.folder.accountId, h.folder.path, h.headerMessageId), h.id);
+  }
+}
+
 function matches(h, accountId, folderPath, headerMessageId) {
   return (
     h &&
@@ -128,6 +156,6 @@ export async function resolveId(id) {
   }
   if (page.id) await endList(page.id);
   if (!found) notFound();
-  cache.set(id, found.id);
+  remember(id, found.id);
   return found;
 }

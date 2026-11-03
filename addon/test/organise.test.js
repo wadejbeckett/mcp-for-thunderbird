@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { install, fetchFrom } from "./mocks/messenger.js";
 import { dispatch } from "../src/rpc.js";
 import { save } from "../src/settings.js";
-import { encodeId, clearIdCache } from "../src/ids.js";
+import { encodeId, clearIdCache, primeFromEvent } from "../src/ids.js";
 import { SEARCH } from "../src/handlers/read.js";
 import "../src/handlers/organise.js";
 
@@ -614,6 +614,25 @@ test("mail_archive reports a message briefly out of sight after a re-archive as 
   const r = await call("mail_archive", { ids: [flat.id] });
   assert.deepEqual(r.content, { done: [flat.id], failed: [], moved: [{ from: flat.id, to: flat.id }] });
   assert.equal(mock.calls.archive.length, 1);
+});
+
+test("a message Thunderbird reports moved is read by its new id at once, before a search of its folder finds it", async () => {
+  // On IMAP a search of the new folder (messages.query) can miss a moved
+  // message until Thunderbird has synchronised the folder; the event's
+  // header carries the numeric id, under which it is known at once, and
+  // the background keeps the id cache abreast of these events.
+  mock.messenger.messages.onMoved.addListener(primeFromEvent);
+  mock.behaviour.queryBlind = (h) => h.folder.path === "Archives";
+  const m = add("a1", "INBOX", 1, { subject: "Primed" });
+  const r = await call("mail_archive", { ids: [m.id] });
+  const to = r.content.moved[0].to;
+  assert.equal(to, encodeId("a1", "Archives", "msg1@example.org"));
+  const read = await call("mail_read", { id: to });
+  assert.equal(read.error, undefined, JSON.stringify(read.error));
+  assert.equal(read.content.headers.subject, "Primed");
+  // without the event's word, the search of the folder is all there is
+  clearIdCache();
+  assert.equal((await call("mail_read", { id: to })).error.code, "not_found");
 });
 
 test("mail_archive reports a message Thunderbird archived as a copy under copied", async () => {

@@ -18,6 +18,7 @@ import { load, save, update, enabledTools, STORAGE_KEY } from "./settings.js";
 import { followFolder, reconcile, forgetAccount } from "./exclusions.js";
 import { list as logList, clear as logClear } from "./log.js";
 import { dispatch } from "./rpc.js";
+import { primeFromEvent } from "./ids.js";
 import { supportedTools } from "./features.js";
 // Handler modules register themselves in rpc.HANDLERS.
 import "./handlers/read.js";
@@ -677,6 +678,12 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
       on(f.onDeleted, onFolderChanged);
     }
     if (m().accounts && m().accounts.onDeleted) on(m().accounts.onDeleted, onAccountDeleted);
+    // Thunderbird's word on moved and copied messages keeps the id cache
+    // abreast (ids.js), so a message just moved is found by its new id at
+    // once, before a search of its new folder would find it.
+    const msgs = m().messages;
+    if (msgs && msgs.onMoved) on(msgs.onMoved, primeFromEvent);
+    if (msgs && msgs.onCopied) on(msgs.onCopied, primeFromEvent);
     if (f) folderWork(checkAll);
     await connect();
   }

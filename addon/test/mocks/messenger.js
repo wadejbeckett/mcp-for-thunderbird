@@ -199,6 +199,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // message into; by default the account's archive folder. As Thunderbird
   // does, archive leaves a message already in that folder where it is, and
   // copies one from a noDelete folder or a newsgroup (an nntp account).
+  // queryBlind(header) true hides that message from messages.query, not
+  // from messages.get, as an IMAP folder not yet synchronised does.
   // archiveHide(id) gives the ms for which archive, when it leaves that
   // message where it is, takes it out of sight and then puts it back under
   // a new number (as IMAP can renumber a message), or 0.
@@ -219,6 +221,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     archiveSkip: null,
     archiveTo: null,
     archiveHide: null,
+    queryBlind: null,
     movedDelay: 0,
   };
   // pages read per query (index into calls.query), first page included
@@ -358,6 +361,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const all = [...store.values()]
           .filter(
             (h) =>
+              !(behaviour.queryBlind && behaviour.queryBlind(h)) &&
               (!accs || accs.includes(h.folder.accountId)) &&
               inFolder(h) &&
               (q.headerMessageId == null || h.headerMessageId === q.headerMessageId) &&
