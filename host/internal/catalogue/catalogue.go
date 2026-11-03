@@ -49,7 +49,11 @@ func schema(required []string, props m) m {
 
 // bodyDesc tells callers how the plain-text body becomes the HTML message
 // (addon/src/handlers/compose.js, textToHtml).
-const bodyDesc = "Plain-text body. A blank line starts a new paragraph. A paragraph whose lines all start with \"- \" or \"* \" becomes a bulleted list, and one whose lines all start with \"1. \", \"2. \" and so on becomes a numbered list; an indented line continues the item above it. Put a blank line between a list and the text around it."
+const bodyDesc = "Plain-text body. A blank line starts a new paragraph. A paragraph whose lines all start with \"- \" or \"* \" becomes a bulleted list, and one whose lines all start with \"1. \", \"2. \" and so on becomes a numbered list; an indented line continues the item above it. Put a blank line between a list and the text around it. With html set to true, the body is HTML instead."
+
+// htmlDesc tells callers which HTML a body with html: true may use
+// (addon/src/handlers/compose.js, cleanHtml).
+const htmlDesc = "true when body is HTML rather than plain text. Allowed: p, br, ul, ol, li, strong, em (b and i become strong and em), a with an http, https or mailto href, and table, thead, tbody, tr, th, td (colspan and rowspan). Tables get a border and cell padding. Any other element keeps only its text; scripts, styles and images are removed, as are all other attributes. The signature and, for replies and forwards, the quoted original still follow the body."
 
 func composeProps() m {
 	return m{
@@ -61,6 +65,7 @@ func composeProps() m {
 		"bcc":         strs("Bcc recipients."),
 		"subject":     str("Subject; defaults to the original's for replies and forwards."),
 		"body":        str(bodyDesc),
+		"html":        boolean(htmlDesc),
 		"attachments": attachments(),
 	}
 }
@@ -152,7 +157,7 @@ var tools = []Tool{
 		Description: "Sends a new message directly, and only to recipients on the user's allowed list; any other recipient refuses the whole message. Direct send accepts only simple addresses (letters, digits, . _ + -) before the @ and a plain ASCII domain; use mail_draft for any other address.",
 		Input: schema([]string{"to", "subject", "body"}, m{
 			"account": account(), "to": strs("To recipients."), "cc": strs("Cc recipients."), "bcc": strs("Bcc recipients."),
-			"subject": str("Subject."), "body": str(bodyDesc), "attachments": attachments(),
+			"subject": str("Subject."), "body": str(bodyDesc), "html": boolean(htmlDesc), "attachments": attachments(),
 		})},
 }
 

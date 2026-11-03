@@ -9,7 +9,7 @@ import { install, fetchFrom, COMPOSE_NEW_BODY } from "./mocks/messenger.js";
 import { dispatch, HANDLERS } from "../src/rpc.js";
 import { load, save } from "../src/settings.js";
 import { encodeId, decodeId, clearIdCache } from "../src/ids.js";
-import { isAllowed, baseName, insertAtTop, textToHtml, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
+import { isAllowed, baseName, insertAtTop, textToHtml, cleanHtml, COMPOSE, LOOKUP } from "../src/handlers/compose.js";
 
 // Thunderbird's background page has DOMParser as a global.
 globalThis.DOMParser = DOMParser;
@@ -754,4 +754,84 @@ test("mail_compose and mail_draft send a list body as HTML lists", async () => {
   r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "S", body: "1. a\n2. b" });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(mock.calls.saveMessage[0][0].body, "<ol><li>a</li><li>b</li></ol>");
+});
+
+// ---- HTML bodies ----
+
+const TABLE = ' border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; border: 1px solid #999999; margin: 0 0 1em 0;"';
+const TH = ' style="border: 1px solid #999999; padding: 6px 10px; text-align: left; font-weight: bold;"';
+const TD = ' style="border: 1px solid #999999; padding: 6px 10px; text-align: left;"';
+
+test("cleanHtml keeps the allowed elements and gives tables a border and padding", () => {
+  assert.equal(
+    cleanHtml("<p>Hi <strong>A</strong> <em>b</em><br>c</p><ul><li>one</li></ul><ol start=\"3\"><li>x</li></ol>"),
+    '<p>Hi <strong>A</strong> <em>b</em><br>c</p><ul><li>one</li></ul><ol start="3"><li>x</li></ol>',
+  );
+  assert.equal(
+    cleanHtml("<table><thead><tr><th>Mailbox</th><th>Size</th></tr></thead><tbody><tr><td colspan=2>a@b 2 GB</td></tr></tbody></table>"),
+    `<table${TABLE}><thead><tr><th${TH}>Mailbox</th><th${TH}>Size</th></tr></thead><tbody><tr><td${TD} colspan="2">a@b 2 GB</td></tr></tbody></table>`,
+  );
+  assert.equal(cleanHtml("<b>x</b><i>y</i>"), "<strong>x</strong><em>y</em>");
+});
+
+test("cleanHtml drops scripts, styles, images, unknown elements and attributes", () => {
+  assert.equal(cleanHtml('<script>alert(1)</script><style>p{}</style><img src="https://x/y.png"><p>t</p>'), "<p>t</p>");
+  assert.equal(cleanHtml('<div class="x"><span style="color:red" onclick="z()">kept</span></div>'), "kept");
+  assert.equal(cleanHtml('<p style="display:none" id="a">p</p>'), "<p>p</p>");
+  assert.equal(cleanHtml("<ol start=\"x\"><li>a</li></ol>"), "<ol><li>a</li></ol>");
+  assert.equal(cleanHtml('<table><tbody><tr><td colspan="1 onclick">b</td></tr></tbody></table>'), `<table${TABLE}><tbody><tr><td${TD}>b</td></tr></tbody></table>`);
+});
+
+test("cleanHtml keeps only http, https and mailto links", () => {
+  assert.equal(cleanHtml('<a href="https://noiz.co.za/?a=1&b=2">s</a>'), '<a href="https://noiz.co.za/?a=1&amp;b=2">s</a>');
+  assert.equal(cleanHtml('<a href="mailto:info@noiz.co.za">m</a>'), '<a href="mailto:info@noiz.co.za">m</a>');
+  assert.equal(cleanHtml('<a href="javascript:alert(1)">j</a><a href=" data:text/html,x">d</a><a>n</a>'), "<a>j</a><a>d</a><a>n</a>");
+});
+
+test("cleanHtml escapes text again and strips invisible characters", () => {
+  assert.equal(cleanHtml("<p>a &lt;b&gt; &amp; \"c\"</p>"), "<p>a &lt;b&gt; &amp; &quot;c&quot;</p>");
+  assert.equal(cleanHtml("<p>a\u200bb\u202ec</p>"), "<p>abc</p>");
+  assert.equal(cleanHtml("plain 1 < 2 &amp; 3"), "plain 1 &lt; 2 &amp; 3");
+});
+
+test("mail_compose, mail_draft and mail_send take an HTML body with html: true", async () => {
+  const body = "<p>Hi</p><table><tbody><tr><td>a</td></tr></tbody></table><script>x()</script>";
+  const want = `<p>Hi</p><table${TABLE}><tbody><tr><td${TD}>a</td></tr></tbody></table>`;
+  let r = await call("mail_compose", { kind: "new", to: ["x@example.test"], subject: "S", body, html: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const ins = mock.calls.compose.find(([f]) => f === "executeScript");
+  assert.deepEqual(ins[1][0].args, [want]);
+
+  r = await call("mail_draft", { kind: "new", to: ["x@example.test"], subject: "S", body, html: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.match(mock.calls.saveMessage[0][0].body, /^<p>Hi<\/p><table border="1"/);
+  assert.doesNotMatch(mock.calls.saveMessage[0][0].body, /script/);
+
+  // without html the same body is text, escaped
+  r = await call("mail_compose", { kind: "new", to: ["x@example.test"], subject: "S", body: "<p>Hi</p>" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const ins2 = mock.calls.compose.filter(([f]) => f === "executeScript").at(-1);
+  assert.deepEqual(ins2[1][0].args, ["<p>&lt;p&gt;Hi&lt;/p&gt;</p>"]);
+
+  r = await call("mail_compose", { kind: "new", to: ["x@example.test"], subject: "S", body, html: "yes" });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, "invalid_argument");
+});
+
+test("mail_compose reply with html: true puts the HTML above the quote", async () => {
+  const o = original();
+  const r = await call("mail_compose", { kind: "reply", id: o.id, body: "<ul><li>one</li></ul>", html: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(mock.calls.compose.find(([f]) => f === "beginReply"));
+  const ins = mock.calls.compose.find(([f]) => f === "executeScript");
+  assert.deepEqual(ins[1][0].args, ["<ul><li>one</li></ul>"]);
+});
+
+test("mail_draft reply with html: true imports the HTML above the quote", async () => {
+  const o = original();
+  const r = await call("mail_draft", { kind: "reply", id: o.id, body: "<p>Hi</p><table><tbody><tr><td>a</td></tr></tbody></table>", html: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const { body: b } = parse(mock.calls.import[0].raw);
+  const html = Buffer.from(b.replace(/\s+/g, ""), "base64").toString("utf8");
+  assert.match(html, /<body><p>Hi<\/p><table border="1"[^>]*>.*<td style="border: 1px solid #999999;[^>]*>a<\/td>.*<blockquote type="cite"/);
 });

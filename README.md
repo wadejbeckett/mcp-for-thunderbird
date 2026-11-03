@@ -29,6 +29,8 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 
 AI apps write the body of a message as plain text, and the add-on turns it into an HTML message: a blank line starts a new paragraph, a paragraph of lines that start with `- ` or `* ` becomes a bulleted list, and a paragraph of lines that start with `1. `, `2. ` and so on becomes a numbered list. An indented line continues the list item above it. A list needs a blank line between it and the text around it; otherwise its lines stay as typed.
 
+An AI app can send the body as HTML instead, with `html` set to true, when it needs tables or formatting. The add-on keeps paragraphs, line breaks, bulleted and numbered lists, bold and italic, links to web and mail addresses, and tables, and gives each table a border and cell padding so it reads the same in Thunderbird and in the recipient's mail program. Everything else is removed: scripts, styles, images and any other markup. The identity's signature and, in a reply or forward, the quoted original still follow the text.
+
 ## What it cannot do
 
 - **Delete mail for good.** The organise tools can move mail to Trash, but no tool empties Trash or Junk, deletes a folder or changes account settings.

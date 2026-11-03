@@ -18,7 +18,9 @@
 // optional messages.send permission is checked before any send (ruling R7).
 //
 // The body is plain text from the client; it becomes minimal HTML, with
-// "- ", "* " and "1. " paragraphs as lists (textToHtml). Body,
+// "- ", "* " and "1. " paragraphs as lists (textToHtml). With html: true
+// the body is HTML, rebuilt from an allowlist of elements and attributes
+// (cleanHtml), with tables given a border and cell padding inline. Body,
 // subject, recipients and attachment names lose invisible characters
 // (ruling R21), and line breaks in header values become spaces, so a value
 // cannot add a header of its own.
@@ -149,6 +151,12 @@ function attachmentsArg(args) {
   return out;
 }
 
+function htmlArg(args) {
+  const v = args.html;
+  if (v !== undefined && typeof v !== "boolean") fail("invalid_argument", "html must be true or false.");
+  return v === true;
+}
+
 function common(args, { needTo = false } = {}) {
   const to = listArg(args, "to");
   if (needTo && (!to || to.length === 0)) fail("invalid_argument", "to must list at least one recipient.");
@@ -158,6 +166,7 @@ function common(args, { needTo = false } = {}) {
     bcc: listArg(args, "bcc"),
     subject: textArg(args, "subject", needTo),
     body: textArg(args, "body", true),
+    html: htmlArg(args),
     attachments: attachmentsArg(args),
   };
 }
@@ -199,6 +208,60 @@ export function textToHtml(text) {
     .map((p) => listHtml(p) ?? `<p>${esc(p).replace(/\n/g, "<br>")}</p>`)
     .join("");
 }
+
+// ALLOWED maps each element an HTML body may keep to the attributes it may
+// keep; b and i become strong and em. DROPPED elements go with everything
+// inside them; any other element is replaced by its contents.
+const ALLOWED = {
+  p: [], br: [], ul: [], ol: ["start"], li: [], strong: [], em: [], a: ["href"],
+  table: [], thead: [], tbody: [], tr: [], th: ["colspan", "rowspan"], td: ["colspan", "rowspan"],
+};
+const RENAMED = { b: "strong", i: "em" };
+const DROPPED = new Set(["script", "style", "head", "title", "template", "iframe", "object", "embed", "noscript", "svg", "math", "select", "textarea"]);
+const VOID = new Set(["br"]);
+// Inline, so the table shows ruled in Thunderbird and in the recipient's
+// client; border and cellpadding also for clients that drop styles.
+const TABLE_STYLE = {
+  table: ' border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; border: 1px solid #999999; margin: 0 0 1em 0;"',
+  th: ' style="border: 1px solid #999999; padding: 6px 10px; text-align: left; font-weight: bold;"',
+  td: ' style="border: 1px solid #999999; padding: 6px 10px; text-align: left;"',
+};
+
+function attrValue(tag, name, v) {
+  v = stripInvisible(v).trim();
+  if (name === "href") return /^(https?:|mailto:)/i.test(v) ? v : null;
+  return /^\d{1,4}$/.test(v) ? v : null;
+}
+
+function cleanNode(node) {
+  if (node.nodeType === 3) return esc(stripInvisible(node.nodeValue));
+  if (node.nodeType !== 1) return "";
+  const raw = node.localName.toLowerCase();
+  if (DROPPED.has(raw)) return "";
+  const inner = Array.from(node.childNodes, cleanNode).join("");
+  const tag = RENAMED[raw] ?? raw;
+  if (!Object.hasOwn(ALLOWED, tag)) return inner;
+  let attrs = TABLE_STYLE[tag] ?? "";
+  for (const name of ALLOWED[tag]) {
+    const v = node.getAttribute(name);
+    const ok = v === null ? null : attrValue(tag, name, v);
+    if (ok !== null) attrs += ` ${name}="${esc(ok)}"`;
+  }
+  return VOID.has(tag) ? `<${tag}${attrs}>` : `<${tag}${attrs}>${inner}</${tag}>`;
+}
+
+// cleanHtml rebuilds an HTML body from the elements and attributes in
+// ALLOWED: text is escaped again and loses invisible characters, a link
+// keeps only an http, https or mailto address, and nothing else (styles,
+// classes, event handlers, images) is kept. The document is parsed inert
+// (see clean.js).
+export function cleanHtml(src) {
+  const doc = new globalThis.DOMParser().parseFromString(`<!DOCTYPE html><html><body>${src}</body></html>`, "text/html");
+  return Array.from(doc.body.childNodes, cleanNode).join("").trim();
+}
+
+// bodyHtml is the HTML of the client's body: cleaned HTML or converted text.
+const bodyHtml = (a) => (a.html ? cleanHtml(a.body) : textToHtml(a.body));
 
 const quoteHtml = (text) => esc(text.replace(/\r\n?/g, "\n").replace(/\s+$/, "")).replace(/\n/g, "<br>");
 
@@ -448,7 +511,7 @@ async function replyDraft(run, kind, h, a, who, drafts) {
       `<div class="moz-cite-prefix">On ${esc(whenText)}, ${esc(author)} wrote:<br></div>` +
       `<blockquote type="cite" cite="mid:${esc(origMid)}">${quoteHtml(o.text)}</blockquote>`;
   }
-  const html = htmlDoc(textToHtml(a.body) + quoted);
+  const html = htmlDoc(bodyHtml(a) + quoted);
 
   const atts = kind === "forward" ? [...a.attachments, ...(await forwardedAttachments(run, h, a.attachments.reduce((n, x) => n + x.data.byteLength, 0)))] : a.attachments;
 
@@ -520,7 +583,7 @@ async function newDraft(run, a, identity, drafts) {
     cc: await norm(a.cc),
     bcc: await norm(a.bcc),
     subject: oneLine(a.subject ?? ""),
-    body: textToHtml(a.body),
+    body: bodyHtml(a),
     customHeaders: [{ name: "X-MFT-Draft", value: tag }],
   };
   if (a.attachments.length) details.attachments = files(a.attachments);
@@ -582,7 +645,7 @@ async function mailCompose(args, ctx) {
   const run = newRun(COMPOSE.budgetMs);
   const h = kind === "new" ? null : await message(run, args.id, s);
   const { identity } = await identityOf(run, accountFor(args, s, h));
-  const html = textToHtml(a.body);
+  const html = bodyHtml(a);
   const subject = a.subject === undefined ? undefined : oneLine(a.subject);
 
   // The body is never passed to beginNew, beginReply or beginForward: a
@@ -619,7 +682,8 @@ async function mailCompose(args, ctx) {
     if (!tab || tab.id === undefined) throw openedWithoutText("Thunderbird did not report the window it opened, so the text was not put in it");
     const d = await intoOpenWindow(run, () => tb().compose.getComposeDetails(tab.id));
     if (d && d.isPlainText) {
-      const upd = { plainTextBody: stripInvisible(a.body) + "\n\n" + (d.plainTextBody || "") };
+      const text = a.html ? htmlToText(html) : stripInvisible(a.body);
+      const upd = { plainTextBody: text + "\n\n" + (d.plainTextBody || "") };
       await intoOpenWindow(run, () => tb().compose.setComposeDetails(tab.id, upd));
     } else {
       // An HTML text is inserted into the open document, not set as a new
@@ -659,7 +723,7 @@ async function mailSend(args, ctx) {
   }
 
   const { identity } = await identityOf(run, accountFor(args, s, null));
-  const details = { identityId: identity.id, to: checked.to, cc: checked.cc, bcc: checked.bcc, subject: oneLine(a.subject), body: textToHtml(a.body) };
+  const details = { identityId: identity.id, to: checked.to, cc: checked.cc, bcc: checked.bcc, subject: oneLine(a.subject), body: bodyHtml(a) };
   if (a.attachments.length) details.attachments = files(a.attachments);
   await changing(run, () => tb().messages.sendMessage(details, { mode: "sendNow" }), "the message may have been sent");
   return { sent: true };

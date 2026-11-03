@@ -242,3 +242,18 @@ func TestBodyDescribesLists(t *testing.T) {
 		}
 	}
 }
+
+func TestHTMLBodyOption(t *testing.T) {
+	for _, n := range []string{"mail_draft", "mail_compose", "mail_send"} {
+		h := props(t, n)["html"]
+		if h["type"] != "boolean" {
+			t.Fatalf("%s html type = %v, want boolean", n, h["type"])
+		}
+		d, _ := h["description"].(string)
+		for _, want := range []string{"table", "ul", "strong", "href", "signature"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s html description must mention %s", n, want)
+			}
+		}
+	}
+}

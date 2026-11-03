@@ -1802,6 +1802,82 @@ func TestE2EComposeLists(t *testing.T) {
 	t.Logf("compose window lists: ul %q, ol %q", got.UL, got.OL)
 }
 
+// composeHTMLScript finds the reply compose window once its editor holds
+// TEXT, reads its first table, its list items, whether the quote and the
+// signature follow the table, and closes it.
+const composeHTMLScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let win = null;
+  for (let i = 0; i < 40 && !win; i++) {
+    win = [...Services.wm.getEnumerator("msgcompose")].find((w) =>
+      w.GetCurrentEditor().document.body.textContent.includes(TEXT));
+    if (!win) await sleep(250);
+  }
+  if (!win) return { error: "no compose window with the text" };
+  const doc = win.GetCurrentEditor().document;
+  const table = doc.querySelector("body > table");
+  const quote = doc.querySelector("blockquote[type=cite]");
+  const sig = doc.querySelector(".moz-signature");
+  const out = {
+    cells: table ? [...table.querySelectorAll("th, td")].map((c) => c.textContent) : [],
+    border: table ? table.getAttribute("border") + "|" + (doc.querySelector("body > table td") || {}).style?.border : "",
+    li: [...doc.querySelectorAll("body > ul > li")].map((li) => li.textContent),
+    script: doc.querySelectorAll("script").length,
+    quoteAfter: Boolean(table && quote && (table.compareDocumentPosition(quote) & 4)),
+    sigAfter: Boolean(table && sig && (table.compareDocumentPosition(sig) & 4)),
+  };
+  win.close();
+  return out;
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2EComposeHTMLReply opens a reply whose body is HTML (html: true)
+// with a table and a list, and checks that the compose window shows them,
+// above the quoted original and the identity's HTML signature, without the
+// script the body carried.
+func TestE2EComposeHTMLReply(t *testing.T) {
+	cs := httpSession(t)
+	var sigBefore string
+	var htmlBefore bool
+	marionette(t, fmt.Sprintf(identitySignatureScript, "<p>E2E HTML reply signature</p>"), &sigBefore)
+	marionette(t, fmt.Sprintf(identityHTMLSigScript, true), &htmlBefore)
+	t.Cleanup(func() {
+		var ignoredS string
+		var ignoredB bool
+		marionette(t, fmt.Sprintf(identitySignatureScript, sigBefore), &ignoredS)
+		marionette(t, fmt.Sprintf(identityHTMLSigScript, htmlBefore), &ignoredB)
+	})
+	res, _ := searchUntil(t, cs, map[string]any{"text": "invoice"}, invoiceSubj)
+	inv := find(res, invoiceSubj)
+	const text = "Your mailboxes from 1 January:"
+	body := "<p>" + text + "</p><table><thead><tr><th>Mailbox</th><th>Size</th></tr></thead><tbody><tr><td>info@example.org</td><td>2 GB</td></tr></tbody></table><ul><li>Basic</li><li>Pro</li></ul><script>alert(1)</script>"
+	var opened struct{ Opened bool }
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": inv.ID, "body": body, "html": true}, &opened)
+	script := strings.NewReplacer("TEXT", fmt.Sprintf("%q", text)).Replace(composeHTMLScript)
+	var got struct {
+		Cells      []string `json:"cells"`
+		Border     string   `json:"border"`
+		LI         []string `json:"li"`
+		Script     int      `json:"script"`
+		QuoteAfter bool     `json:"quoteAfter"`
+		SigAfter   bool     `json:"sigAfter"`
+		Error      string   `json:"error"`
+	}
+	marionette(t, script, &got)
+	if got.Error != "" {
+		t.Fatalf("reading the compose window: %s", got.Error)
+	}
+	if strings.Join(got.Cells, "|") != "Mailbox|Size|info@example.org|2 GB" || strings.Join(got.LI, "|") != "Basic|Pro" {
+		t.Fatalf("compose window table cells %q, list %q", got.Cells, got.LI)
+	}
+	if !strings.HasPrefix(got.Border, "1|") || got.Script != 0 || !got.QuoteAfter || !got.SigAfter {
+		t.Fatalf("compose window: border %q, scripts %d, quote after the table %v, signature after the table %v", got.Border, got.Script, got.QuoteAfter, got.SigAfter)
+	}
+	t.Logf("compose window: cells %q, list %q, border %q", got.Cells, got.LI, got.Border)
+}
+
 // Thunderbird restarts: a plain restart (new token, R33), a removed
 // connection file, and a new port; and a quick restart the proxy's 5 s
 // poll may not notice. A clean stop clears the port and token in the file.
