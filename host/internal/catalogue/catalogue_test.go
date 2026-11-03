@@ -13,7 +13,7 @@ import (
 
 var wantGroups = map[string]string{
 	"mail_accounts": "read", "mail_folders": "read", "mail_search": "read", "mail_read": "read",
-	"mail_thread": "read", "mail_attachment": "read", "mail_filter_suggest": "read",
+	"mail_thread": "read", "mail_attachment": "read", "mail_filter_suggest": "read", "mail_tags": "read",
 	"mail_contacts": "contacts",
 	"mail_mark":     "organise", "mail_tag": "organise", "mail_move": "organise", "mail_archive": "organise", "mail_trash": "organise",
 	"mail_draft": "compose", "mail_compose": "compose",
@@ -33,8 +33,8 @@ func byName(t *testing.T, name string) catalogue.Tool {
 
 func TestNamesAndGroups(t *testing.T) {
 	all := catalogue.All()
-	if len(all) != 16 {
-		t.Fatalf("want 16 tools, got %d", len(all))
+	if len(all) != 17 {
+		t.Fatalf("want 17 tools, got %d", len(all))
 	}
 	for _, tl := range all {
 		g, ok := wantGroups[tl.Name]
@@ -213,9 +213,10 @@ func TestLimits(t *testing.T) {
 func TestAccountAndIdArguments(t *testing.T) {
 	for _, tl := range catalogue.All() {
 		_, has := props(t, tl.Name)["account"]
-		if tl.Name == "mail_accounts" {
+		// Accounts and tags belong to the whole profile.
+		if tl.Name == "mail_accounts" || tl.Name == "mail_tags" {
 			if has {
-				t.Error("mail_accounts must not take account")
+				t.Errorf("%s must not take account", tl.Name)
 			}
 			continue
 		}
@@ -265,7 +266,7 @@ func TestSearchBodyOfflineAndMoveTrashResults(t *testing.T) {
 		t.Errorf("mail_search must say body text is found only in mail stored offline: %s", d)
 	}
 	for _, n := range []string{"mail_move", "mail_trash"} {
-		if d := byName(t, n).Description; !strings.Contains(d, "{done: ids changed, failed: [{id, code}]}") {
+		if d := byName(t, n).Description; !strings.Contains(d, "{done: ids changed, failed: [{id, code}]") {
 			t.Errorf("%s must describe its {done, failed} result: %s", n, d)
 		}
 	}
@@ -395,5 +396,43 @@ func TestSearchArgumentsFromCoverageAudit(t *testing.T) {
 		if !strings.Contains(td, s) {
 			t.Errorf("mail_thread description lacks %q: %s", s, td)
 		}
+	}
+}
+
+func TestOrganiseDescriptions(t *testing.T) {
+	for _, n := range []string{"mail_move", "mail_archive", "mail_trash"} {
+		if d := byName(t, n).Description; !strings.Contains(d, "moved: [{from, to}]") {
+			t.Errorf("%s description must name the new ids it returns: %s", n, d)
+		}
+	}
+	mv := byName(t, "mail_move").Description
+	for _, s := range []string{"copied", "own folder", "cannot hold messages"} {
+		if !strings.Contains(mv, s) {
+			t.Errorf("mail_move description lacks %q: %s", s, mv)
+		}
+	}
+	ar := byName(t, "mail_archive").Description
+	for _, s := range []string{"not_enabled", "not enabled or is excluded", "already in its archive folder", "copied: [{from, to}]", "refused and mayHaveCompleted"} {
+		if !strings.Contains(ar, s) {
+			t.Errorf("mail_archive description lacks %q: %s", s, ar)
+		}
+	}
+}
+
+func TestTagsTool(t *testing.T) {
+	tl := byName(t, "mail_tags")
+	if !tl.ReadOnly || !tl.Idempotent || tl.Destructive {
+		t.Errorf("mail_tags ReadOnly/Idempotent/Destructive = %v/%v/%v", tl.ReadOnly, tl.Idempotent, tl.Destructive)
+	}
+	if len(props(t, "mail_tags")) != 0 || tl.Input["additionalProperties"] != false {
+		t.Errorf("mail_tags must take no arguments: %v", tl.Input)
+	}
+	for _, s := range []string{"key", "label", "color", "no account is enabled"} {
+		if !strings.Contains(tl.Description, s) {
+			t.Errorf("mail_tags description lacks %q", s)
+		}
+	}
+	if !strings.Contains(byName(t, "mail_tag").Description, "mail_tags") {
+		t.Error("mail_tag description must point to mail_tags")
 	}
 }

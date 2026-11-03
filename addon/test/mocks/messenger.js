@@ -16,6 +16,8 @@
 // `release` below 153 takes away what Thunderbird 140 ESR lacks. Message
 // lists, the address, junk, me and tag filters, getHeaders and priority
 // follow Thunderbird 153.6 (ExtensionMessages.sys.mjs).
+// The organise handlers' tests added messages.onMoved and onCopied,
+// archive skipping and copying, and folders.getFolderCapabilities.
 
 export function event() {
   const listeners = [];
@@ -102,7 +104,10 @@ function checkSpecialUse(uses, where) {
 // createMessenger returns a fresh mock. `accounts` is a list of
 // {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]},
 // draftsIn?: account id whose Drafts folder saveMessage uses,
-// favorites?: [path, ...], folderInfo?: {path: {newMessageCount, quota, lastUsed, ...}}}.
+// favorites?: [path, ...], folderInfo?: {path: {newMessageCount, quota, lastUsed, ...}},
+// noMessages?: [path, ...], noDelete?: [path, ...]}; a noMessages folder
+// cannot hold messages (getFolderCapabilities says canAddMessages: false),
+// and a noDelete folder cannot delete them (canDeleteMessages: false).
 // accounts.getDefault gives the account `defaultAccount` names (an id), or
 // none when it is not given.
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
@@ -120,6 +125,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const folderList = [];
   // folder id -> extra MailFolderInfo fields
   const folderInfo = new Map();
+  const noMessages = new Set();
+  const noDelete = new Set();
   for (const a of accounts) {
     for (const path of a.folders || []) {
       folderList.push({
@@ -132,6 +139,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         specialUse: (a.specialUse && a.specialUse[path]) || [],
       });
       if (a.folderInfo && a.folderInfo[path]) folderInfo.set(folderList.at(-1).id, a.folderInfo[path]);
+      if ((a.noMessages || []).includes(path)) noMessages.add(folderList.at(-1).id);
+      if ((a.noDelete || []).includes(path)) noDelete.add(folderList.at(-1).id);
       checkSpecialUse(folderList.at(-1).specialUse, `fixture ${a.id}:${path}`);
     }
   }
@@ -175,10 +184,30 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // query's answer time in ms.
   // fail(op, id) true makes that organise call reject; stall(op) true makes
   // it never settle.
+  // archiveSkip(id) true: archive leaves that message where it is, as
+  // Thunderbird does when its identity has archiving turned off.
+  // archiveTo(header) gives the folder (accountId, path) archive files the
+  // message into; by default the account's archive folder. As Thunderbird
+  // does, archive leaves a message already in that folder where it is, and
+  // copies one from a noDelete folder or a newsgroup (an nntp account).
+  // movedDelay is the time in ms before messages.onMoved or
+  // messages.onCopied fires (null: neither fires).
   // saveReturns: saveMessage returns the saved header (Local Folders);
   // by default it returns none, as on IMAP (docs/SPIKES.md §2).
   // importReturns false: messages.import returns no header.
-  const behaviour = { hang: null, delay: null, fail: null, stall: null, inFlight: 0, maxInFlight: 0, saveReturns: false, importReturns: true };
+  const behaviour = {
+    hang: null,
+    delay: null,
+    fail: null,
+    stall: null,
+    inFlight: 0,
+    maxInFlight: 0,
+    saveReturns: false,
+    importReturns: true,
+    archiveSkip: null,
+    archiveTo: null,
+    movedDelay: 0,
+  };
   // pages read per query (index into calls.query), first page included
   const pagesByQuery = new Map();
   const lists = new Map();
@@ -252,6 +281,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const f = folderList.find((x) => x.id === id);
         if (!f) throw new Error(`Folder not found: ${id}`);
         return clone(f);
+      },
+      getFolderCapabilities: async (id) => {
+        const f = folderList.find((x) => x.id === id);
+        if (!f) throw new Error(`Folder not found: ${id}`);
+        return { canAddMessages: !noMessages.has(id), canAddSubfolders: true, canBeDeleted: true, canBeRenamed: true, canDeleteMessages: !noDelete.has(id) };
       },
       getFolderInfo: async (id) => {
         calls.getFolderInfo.push(id);
@@ -357,7 +391,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          h.folder = { ...f };
+          moveTo(h, f);
         }
       },
       copy: async (ids, dest) => {
@@ -368,8 +402,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          const nid = nextId++;
-          store.set(nid, { ...clone(h), id: nid, folder: { ...f } });
+          copyTo(h, f);
         }
       },
       archive: async (ids) => {
@@ -378,8 +411,15 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          const f = folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
-          if (f) h.folder = { ...f };
+          if (behaviour.archiveSkip && behaviour.archiveSkip(id)) continue;
+          const want = behaviour.archiveTo ? behaviour.archiveTo(clone(h)) : null;
+          const f = want
+            ? folderList.find((x) => x.accountId === want.accountId && x.path === want.path)
+            : folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
+          if (!f || f.id === h.folder.id) continue;
+          const news = accounts.some((a) => a.id === h.folder.accountId && a.type === "nntp");
+          if (news || noDelete.has(h.folder.id)) copyTo(h, f);
+          else moveTo(h, f);
         }
       },
       delete: async (ids) => {
@@ -417,6 +457,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         calls.sendMessage.push([details, options]);
         return { mode: "sendNow", headerMessageId: "sent-1@example.org", messages: [] };
       },
+      onMoved: event(),
+      onCopied: event(),
       tags: {
         list: async () => [
           { key: "$label1", tag: "Important", color: "#FF0000", ordinal: "" },
@@ -613,6 +655,31 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
     if (atts !== undefined) attachments.set(id, atts);
     if (references !== undefined || inReplyTo !== undefined) refs.set(id, { references, inReplyTo });
     return clone(h);
+  }
+
+  // moveTo puts the message in folder f and fires messages.onMoved with its
+  // header before and after, as Thunderbird does (after movedDelay ms; on
+  // IMAP once the message is seen in the new folder).
+  function moveTo(h, f) {
+    const before = clone(h);
+    h.folder = { ...f };
+    tell(messenger.messages.onMoved, before, clone(h));
+  }
+
+  // copyTo puts a copy of the message in folder f, with an id of its own,
+  // and fires messages.onCopied with the original and the copy.
+  function copyTo(h, f) {
+    const nid = nextId++;
+    const copy = { ...clone(h), id: nid, folder: { ...f } };
+    store.set(nid, copy);
+    tell(messenger.messages.onCopied, clone(h), clone(copy));
+  }
+
+  function tell(ev, before, after) {
+    if (behaviour.movedDelay == null) return;
+    const fire = () => ev.fire({ id: null, messages: [before] }, { id: null, messages: [after] });
+    if (behaviour.movedDelay > 0) setTimeout(fire, behaviour.movedDelay);
+    else fire();
   }
 
   async function organiseGate(op, id) {
