@@ -1142,3 +1142,25 @@ func TestCodexHeaderInsideStringRefused(t *testing.T) {
 		t.Fatalf("removal changed the file:\n%s", b)
 	}
 }
+
+// A TOML nan decodes to a NaN float, which never equals itself; a file
+// holding one must still be upgraded and cleaned like any other.
+func TestCodexNaNValueAllowed(t *testing.T) {
+	home, _ := sandbox(t)
+	other := "[floats]\nx = nan\ny = [1.5, nan]\n"
+	orig := "[mcp_servers.mcp-for-thunderbird]\ncommand = " + tomlString(oldBin) + "\nargs = [\"connect\"]\n\n" + other
+	p := codexSetup(t, home, orig)
+	if s := status(t, Configure([]string{"codex"}, binPath), "codex"); !s.Configured || s.Error != "" {
+		t.Fatalf("upgrade: %+v", s)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), other) || !strings.Contains(string(b), "command = "+binTOML+"\n") {
+		t.Fatalf("upgrade wrote:\n%s", b)
+	}
+	if err := codexRemove(); err != nil {
+		t.Fatalf("removal: %v", err)
+	}
+	if b, _ := os.ReadFile(p); !strings.Contains(string(b), other) || strings.Contains(string(b), EntryName) {
+		t.Fatalf("removal left:\n%s", b)
+	}
+}

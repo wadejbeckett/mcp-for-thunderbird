@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -840,7 +841,7 @@ func checkCodex(old, b []byte, binPath string, want bool) error {
 		return bad
 	}
 	after, err := codexRest(b)
-	if err != nil || !reflect.DeepEqual(before, after) {
+	if err != nil || !tomlEqual(before, after) {
 		return bad
 	}
 	return nil
@@ -860,6 +861,44 @@ func codexRest(b []byte) (map[string]any, error) {
 		}
 	}
 	return doc, nil
+}
+
+// tomlEqual reports whether a and b, as decoded by go-toml, hold the same
+// values. It walks maps and slices and compares everything else as
+// reflect.DeepEqual does, except that two NaN floats count as equal: a
+// TOML nan decodes to math.NaN(), which never equals itself, and would
+// otherwise make any file holding one look changed.
+func tomlEqual(a, b any) bool {
+	switch x := a.(type) {
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := y[k]
+			if !ok || !tomlEqual(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !tomlEqual(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case float64:
+		if y, ok := b.(float64); ok && math.IsNaN(x) && math.IsNaN(y) {
+			return true
+		}
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // tomlString quotes s as a TOML basic string.

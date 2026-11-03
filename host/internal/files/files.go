@@ -51,16 +51,19 @@ func checkDir(dir string) error {
 }
 
 // sanitise reduces name to a safe base name. It drops control characters,
-// characters Windows does not allow in names, and Unicode format
-// characters (such as a right-to-left override), which can make a name
-// show as something it is not.
+// characters Windows does not allow in names, the bidirectional controls
+// (such as a right-to-left override) and the invisible zero width space
+// and byte order mark, all of which can make a name show as something it
+// is not. Other format characters stay: the zero width non-joiner is part
+// of correct Persian, Urdu and Indic spellings, and the zero width joiner
+// builds emoji sequences.
 func sanitise(name string) string {
 	name = strings.NewReplacer(`\`, "/").Replace(name)
 	if i := strings.LastIndex(name, "/"); i >= 0 {
 		name = name[i+1:]
 	}
 	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || strings.ContainsRune(`:*?"<>|`, r) {
+		if unicode.IsControl(r) || disguise(r) || strings.ContainsRune(`:*?"<>|`, r) {
 			return -1
 		}
 		return r
@@ -73,6 +76,19 @@ func sanitise(name string) string {
 		name = "_" + name
 	}
 	return name
+}
+
+// disguise reports whether r is a bidirectional control (U+061C,
+// U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), the zero width
+// space U+200B or the byte order mark U+FEFF.
+func disguise(r rune) bool {
+	switch {
+	case r == 0x061c, r == 0x200b, r == 0x200e, r == 0x200f, r == 0xfeff:
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }
 
 // reserved reports whether Windows would open a device for name: CON,

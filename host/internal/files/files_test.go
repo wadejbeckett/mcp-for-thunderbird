@@ -27,6 +27,9 @@ func TestSaveSanitises(t *testing.T) {
 		"///":                  "attachment",
 		"invoice\u202efdp.exe": "invoicefdp.exe",
 		"\u202e\u200b\ufeff":   "attachment",
+		"\u200b\ufeff":         "attachment",
+		"\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645.txt": "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645.txt",
+		"\U0001f469\u200d\U0001f4bb.png":                       "\U0001f469\u200d\U0001f4bb.png",
 	}
 	for in, want := range cases {
 		dir := t.TempDir()
