@@ -1959,3 +1959,340 @@ func TestE2EConnectRestart(t *testing.T) {
 	}
 	restart("quick restart, same file, no call while closed", false, func(connFile, string) {})
 }
+
+// imapFoldersScript changes account1's folders in Thunderbird and returns
+// every folder path under its root. "rename" renames folder a to b,
+// "move" moves folder a into folder b, both as the folder pane does;
+// "discover" asks the server for its folders, as Thunderbird does when it
+// connects, and waits until folder a is there and folder b is not ("" for
+// either means no wait); "drop" removes folder a as discovery does when the
+// server no longer has it, which a discovery started from here does not
+// get to within the test's time.
+const imapFoldersScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const { setTimeout } = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+  const root = MailServices.accounts.getAccount("account1").incomingServer.rootFolder;
+  const pathOf = (f) => decodeURIComponent(f.URI.slice(root.URI.length));
+  const all = () => root.descendants.map(pathOf);
+  const has = (p) => all().includes(p);
+  const wait = async (ok) => {
+    for (let i = 0; i < 250 && !ok(); i++) await new Promise((r) => setTimeout(r, 100));
+    if (!ok()) throw new Error("timed out; folders now " + JSON.stringify(all()));
+  };
+  const [action, a, b] = %s;
+  const byPath = (p) => root.descendants.find((f) => pathOf(f) === p);
+  if (action === "rename") {
+    byPath(a).rename(b.split("/").pop(), null);
+    await wait(() => has(b) && !has(a));
+  } else if (action === "move") {
+    const src = byPath(a);
+    MailServices.copy.copyFolder(src, byPath(b), true, null, null);
+    await wait(() => has(b + "/" + src.name) && !has(a));
+  } else if (action === "drop") {
+    // What folder discovery does with a local folder the server no longer
+    // has (nsImapIncomingServer::DeleteNonVerifiedFolders).
+    const f = byPath(a);
+    if (f) f.parent.propagateDelete(f, true);
+    await wait(() => !has(a));
+  } else if (action === "discover") {
+    MailServices.imap.discoverAllFolders(root, null, null);
+    const done = () => (a === "" || has(a)) && (b === "" || !has(b));
+    for (let j = 0; j < 50 && !done(); j++) await new Promise((r) => setTimeout(r, 100));
+  }
+  return all();
+})().then(resolve, (e) => resolve(["error: " + e]));
+`
+
+// imapFolders runs imapFoldersScript; "discover" is repeated for up to a
+// minute.
+func imapFolders(t *testing.T, action, a, b string) []string {
+	t.Helper()
+	if action == "discover" {
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			got := imapFoldersOnce(t, action, a, b)
+			if (a == "" || contains(got, a)) && (b == "" || !contains(got, b)) {
+				return got
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("discover: want %q and not %q, Thunderbird has %v", a, b, got)
+			}
+		}
+	}
+	return imapFoldersOnce(t, action, a, b)
+}
+
+func imapFoldersOnce(t *testing.T, action, a, b string) []string {
+	t.Helper()
+	arg, _ := json.Marshal([]string{action, a, b})
+	cmd := exec.Command(os.Getenv("MFT_E2E_TB"), "marionette", "-")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(imapFoldersScript, arg))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	b2, err := cmd.Output()
+	var out []string
+	if err != nil || json.Unmarshal(b2, &out) != nil {
+		t.Fatalf("%s %q %q: marionette: %v: %s %s", action, a, b, err, b2, stderr.String())
+	}
+	for _, p := range out {
+		if strings.HasPrefix(p, "error: ") {
+			t.Fatalf("%s %q %q: %s", action, a, b, p)
+		}
+	}
+	return out
+}
+
+// serverMailbox returns GreenMail's name for the mailbox whose last level
+// is leaf (the server's hierarchy separator may not be "/").
+func serverMailbox(t *testing.T, leaf string) string {
+	t.Helper()
+	run, done := imapSession(t)
+	defer done()
+	lines, ok := run(`LIST "" "*"`)
+	if !ok {
+		t.Fatalf("imap list failed: %v", lines)
+	}
+	for _, l := range lines {
+		if strings.HasSuffix(l, `"`+leaf+`"`) || strings.HasSuffix(l, `.`+leaf+`"`) || strings.HasSuffix(l, `/`+leaf+`"`) {
+			i := strings.LastIndex(l[:len(l)-1], ` "`)
+			return l[i+2 : len(l)-1]
+		}
+	}
+	t.Fatalf("no mailbox %q on the server: %v", leaf, lines)
+	return ""
+}
+
+// folderHidden checks that mail_folders leaves path out of account1 and
+// that mail_search in it is refused as excluded.
+func folderHidden(t *testing.T, cs *mcp.ClientSession, path string) {
+	t.Helper()
+	var folders struct {
+		Folders []struct{ Account, Path string } `json:"folders"`
+	}
+	callOK(t, cs, "mail_folders", map[string]any{"account": "account1"}, &folders)
+	inbox := false
+	for _, f := range folders.Folders {
+		if f.Path == path {
+			t.Fatalf("mail_folders lists the excluded folder %s: %+v", path, folders)
+		}
+		inbox = inbox || f.Path == "/INBOX"
+	}
+	if !inbox {
+		t.Fatalf("mail_folders lost the inbox: %+v", folders)
+	}
+	text, isErr := call(t, cs, "mail_search", map[string]any{"account": "account1", "folder": path})
+	if !isErr || !strings.HasPrefix(text, "excluded:") {
+		t.Fatalf("mail_search in %s: %v %s", path, isErr, text)
+	}
+}
+
+// settingsUntil polls the add-on's settings until ok accepts them.
+func settingsUntil(t *testing.T, what string, ok func(map[string]any) bool) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		s := addonSettings(t, nil)
+		if ok(s) {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: settings now %v", what, s)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func excludedPaths(s map[string]any) []string {
+	var out []string
+	list, _ := s["excludedFolders"].([]any)
+	for _, e := range list {
+		if m, ok := e.(map[string]any); ok {
+			out = append(out, fmt.Sprintf("%v:%v", m["accountId"], m["path"]))
+		}
+	}
+	return out
+}
+
+// TestE2EExcludedFolderFollows excludes an IMAP folder and checks that it
+// stays hidden from AI apps when it is renamed in Thunderbird, moved in
+// Thunderbird, and renamed on the server as webmail does, which reaches
+// Thunderbird as a new folder and a deleted one; that last case is also
+// flagged in the toolbar.
+func TestE2EExcludedFolderFollows(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	delete(orig, "knownFolders")
+
+	run, done := imapSession(t)
+	for _, c := range []string{`CREATE "E2E Private"`, `SUBSCRIBE "E2E Private"`} {
+		if lines, ok := run(c); !ok {
+			done()
+			t.Fatalf("imap %s: %v", c, lines)
+		}
+	}
+	done()
+	t.Cleanup(func() {
+		run, done := imapSession(t)
+		defer done()
+		lines, _ := run(`LIST "" "*"`)
+		for _, l := range lines {
+			if strings.Contains(l, "E2E ") {
+				i := strings.LastIndex(l[:len(l)-1], ` "`)
+				name := l[i+2 : len(l)-1]
+				run(`UNSUBSCRIBE %q`, name)
+				run(`DELETE %q`, name)
+			}
+		}
+		for _, p := range []string{"/Sorted/E2E Webmail", "/Sorted/E2E Renamed", "/Sorted/E2E Private", "/E2E Renamed", "/E2E Private"} {
+			imapFolders(t, "drop", p, "")
+		}
+		addonSettings(t, orig)
+		// The toolbar goes back to connected once nothing is missing.
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			st := toolbarState(t)
+			if st.Title == "MCP for Thunderbird: connected" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("toolbar after cleanup = %+v", st)
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	})
+	imapFolders(t, "discover", "/E2E Private", "")
+
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{map[string]any{"accountId": "account1", "path": "/E2E Private"}}
+	addonSettings(t, next)
+	settingsUntil(t, "folders seen", func(s map[string]any) bool {
+		k, _ := s["knownFolders"].(map[string]any)
+		seen, _ := k["account1"].(map[string]any)
+		_, ok := seen["/INBOX"]
+		return ok
+	})
+	folderHidden(t, cs, "/E2E Private")
+
+	// Renamed in Thunderbird: the exclusion moves to the new name.
+	imapFolders(t, "rename", "/E2E Private", "/E2E Renamed")
+	settingsUntil(t, "rename followed", func(s map[string]any) bool {
+		return strings.Join(excludedPaths(s), ",") == "account1:/E2E Renamed"
+	})
+	folderHidden(t, cs, "/E2E Renamed")
+
+	// Moved in Thunderbird into another folder: it follows again.
+	imapFolders(t, "move", "/E2E Renamed", "/Sorted")
+	settingsUntil(t, "move followed", func(s map[string]any) bool {
+		return strings.Join(excludedPaths(s), ",") == "account1:/Sorted/E2E Renamed"
+	})
+	folderHidden(t, cs, "/Sorted/E2E Renamed")
+
+	// Renamed on the server, as webmail does: Thunderbird sees a new folder
+	// and the excluded one gone. The new one stays hidden, past the wait a
+	// new folder gets, and the toolbar says an excluded folder is missing.
+	// The new name stays under Sorted: GreenMail keeps a renamed mailbox
+	// under its parent whatever name it is given.
+	old := serverMailbox(t, "E2E Renamed")
+	renamed := strings.TrimSuffix(old, "E2E Renamed") + "E2E Webmail"
+	run, done = imapSession(t)
+	if lines, ok := run("RENAME %q %q", old, renamed); !ok {
+		done()
+		t.Fatalf("imap rename: %v", lines)
+	}
+	// GreenMail may move the subscription with the mailbox, and then
+	// refuses these; either way only the new name is subscribed.
+	run("SUBSCRIBE %q", renamed)
+	run("UNSUBSCRIBE %q", old)
+	lsub, _ := run(`LSUB "" "*"`)
+	t.Logf("renamed %q to %q on the server; subscribed: %v", old, renamed, lsub)
+	done()
+	imapFolders(t, "discover", "/Sorted/E2E Webmail", "")
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	imapFolders(t, "drop", "/Sorted/E2E Renamed", "")
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	time.Sleep(35 * time.Second)
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	if got := strings.Join(excludedPaths(addonSettings(t, nil)), ","); got != "account1:/Sorted/E2E Renamed" {
+		t.Fatalf("the exclusion of the missing folder was not kept: %s", got)
+	}
+	if st := toolbarState(t); !strings.Contains(st.Title, "excluded folder was not found") || st.Badge != "!" {
+		t.Fatalf("toolbar = %+v", st)
+	}
+}
+
+type toolbar struct{ Title, Badge, Error string }
+
+// toolbarState reads the toolbar button with toolbarScript.
+func toolbarState(t *testing.T) toolbar {
+	t.Helper()
+	var st toolbar
+	marionette(t, toolbarScript, &st)
+	if st.Error != "" {
+		t.Fatalf("toolbar state: %s", st.Error)
+	}
+	return st
+}
+
+// missingHostScript starts a native host no manifest names, with the
+// add-on's background context, through Thunderbird's own NativeApp (what
+// runtime.connectNative uses), and returns the error it closes the port
+// with; the add-on receives that error's message as port.error.
+const missingHostScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { NativeApp } = ChromeUtils.importESModule("resource://gre/modules/NativeMessaging.sys.mjs");
+  const ext = WebExtensionPolicy.getByID("mcp-for-thunderbird@wadejbeckett.github.io").extension;
+  const ctx = [...ext.views].find((v) => v.viewType === "background");
+  return await new Promise((done) => {
+    const app = new NativeApp(ctx, "mcp_for_thunderbird_e2e_missing");
+    app.once("disconnect", (_, err) => done({ message: String(err && err.message) }));
+  });
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2EMissingHostText checks the words Thunderbird uses when no native
+// messaging manifest names a host: the background matches them to show
+// "host program not installed" (addon/src/background.js, NO_HOST).
+func TestE2EMissingHostText(t *testing.T) {
+	var got struct{ Message, Error string }
+	marionette(t, missingHostScript, &got)
+	if got.Error != "" {
+		t.Fatalf("missing host: %s", got.Error)
+	}
+	if !regexp.MustCompile(`No such native application`).MatchString(got.Message) {
+		t.Fatalf("port error for a missing host = %q", got.Message)
+	}
+}
+
+// hostLogScript returns the host's log lines that Thunderbird has put in
+// its error console (NativeMessaging.sys.mjs logs each stderr line).
+const hostLogScript = `
+return Services.console.getMessageArray()
+  .map((m) => m.message || "")
+  .filter((m) => m.startsWith("stderr output from native app mcp_for_thunderbird: "));
+`
+
+// TestE2EHostLogsThunderbirdVersion checks that the hello tells the host
+// Thunderbird's version (runtime.getBrowserInfo), which the host writes
+// to its log for diagnostics.
+func TestE2EHostLogsThunderbirdVersion(t *testing.T) {
+	version := strings.TrimSuffix(os.Getenv("MFT_E2E_TB_VERSION"), "esr")
+	if version == "" {
+		t.Skip("MFT_E2E_TB_VERSION not set")
+	}
+	var lines []string
+	marionette(t, hostLogScript, &lines)
+	want := regexp.MustCompile(`started, add-on \S+, Thunderbird ` + regexp.QuoteMeta(version) + `\S*, protocol 1$`)
+	for _, l := range lines {
+		if want.MatchString(l) {
+			return
+		}
+	}
+	t.Fatalf("no host start line naming Thunderbird %s in the console: %q", version, lines)
+}

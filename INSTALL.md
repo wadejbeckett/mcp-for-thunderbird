@@ -125,13 +125,17 @@ The **MCP for Thunderbird** button on Thunderbird's toolbar shows the state:
 
 - **connected:** AI apps can use the tools;
 - **paused** (badge "II"): you paused it, and every request is refused until you resume;
+- **connected, with an excluded folder not found** (badge "!"): an excluded folder of a ticked account no longer exists under its name, for example because it was renamed in webmail. Open the options: the folder is listed as not found, and new folders in that account stay hidden from AI apps until you check the excluded folders and save. Renames and moves made in Thunderbird itself are followed without this.
 - **not connected** (badge "!"): the add-on cannot reach the host. Check that the host is installed, then restart Thunderbird.
+- **host program not installed** (badge "!"): Thunderbird found no host program for the add-on. Install the host (step 2); the add-on keeps trying and connects once it is there, or restart Thunderbird.
 - **Update needed** (badge "!"): the add-on and the host are too far apart in version to work together, and every request is refused. Update the older one; see [Upgrading](#upgrading).
 - **Host program problem** (badge "!"): the host started but could not serve AI apps, and the button names the reason, such as no free port between 47110 and 47119. The add-on tries again by itself; if the reason is a busy port, close the program using it or restart the computer.
 
 <!-- screenshot: docs/images/toolbar-connected.png -->
 
 Everything on the setup page can be changed later in the add-on's options: open **Add-ons and Themes**, find MCP for Thunderbird, and choose **Options** (or choose **Open options** from the toolbar button). The options also hold the contacts switch, direct sending, the attachment folder, folders to hide from AI apps, the pause switch, the access key and the activity log. To find and set up AI apps again, choose **Open the setup page** under **AI apps** in the options; it starts from your current choices, and **Finish** changes only what that page shows.
+
+**Excluded folders follow renames.** An excluded folder stays excluded when you rename or move it in Thunderbird, also into another account. A folder renamed in webmail or by another mail program reaches Thunderbird as a new folder, so in an account with excluded folders every new folder is hidden from AI apps for about half a minute; if an excluded folder has gone missing by then, new folders stay hidden until you check the excluded folders in the options and save.
 
 **Excluded folders on Gmail.** Gmail shows the same message in several folders: All Mail, Important and Starred, and one folder for each label. Excluding one folder hides only that copy, so for a Gmail account exclude All Mail, Important and Starred too, or do not rely on excluded folders. The options page reminds you of this when an enabled account has an All Mail folder.
 
@@ -235,6 +239,7 @@ Each release also has a software bill of materials for every archive (the `.spdx
 
 ## Troubleshooting
 
+- **The toolbar button says "host program not installed".** Thunderbird did not find the host's registration. Install the host (step 2); on Linux and macOS, run `mcp-for-thunderbird setup` again as your own user.
 - **The toolbar button says "not connected".** The host is missing or Thunderbird cannot start it. Install the host (step 2), then restart Thunderbird. On Linux, run `mcp-for-thunderbird setup` again as your own user. If Thunderbird is a Snap or Flatpak, see the note in step 2.
 - **The AI app says "Thunderbird is not running".** Start Thunderbird. The AI app reconnects by itself.
 - **The AI app does not show new tools after you change the options.** Some AI apps do not notice when the tools change. Restart the AI app.

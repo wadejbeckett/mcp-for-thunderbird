@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULTS } from "../src/settings.js";
-import { check, assertFolderAllowed, isExcluded } from "../src/policy.js";
+import { check, assertFolderAllowed, isExcluded, UNSEEN_MESSAGE } from "../src/policy.js";
 import { encodeId } from "../src/ids.js";
 
 const base = {
@@ -127,4 +127,16 @@ test("mail_send needs direct send on and a non-empty allowlist", () => {
 test("a forged id is invalid_argument", () => {
   assert.throws(() => check("mail_read", { id: "m2.abc" }, s()), { code: "invalid_argument" });
   assert.throws(() => check("mail_mark", { ids: ["m1.!!"] }, s()), { code: "invalid_argument" });
+});
+
+test("in an account with a folders-seen list, a folder not in it is excluded with its own message", () => {
+  const seen = s({ knownFolders: { a1: { INBOX: 0, Private: 0 } } });
+  assert.equal(isExcluded("a1", "Legal 2026", seen), true);
+  assert.equal(isExcluded("a1", "INBOX", seen), false);
+  assert.equal(isExcluded("a2", "Legal 2026", seen), false, "an account without a list");
+  assert.throws(() => assertFolderAllowed("a1", "Legal 2026", seen), { code: "excluded", message: UNSEEN_MESSAGE });
+  assert.throws(() => assertFolderAllowed("a1", "Private", seen), { code: "excluded", message: "This folder is excluded in MCP for Thunderbird settings." });
+  assert.throws(() => check("mail_read", { id: encodeId("a1", "Legal 2026", "x@y") }, seen), { code: "excluded" });
+  assert.throws(() => check("mail_search", { account: "a1", folder: "Legal 2026" }, seen), { code: "excluded" });
+  check("mail_search", { account: "a1", folder: "INBOX" }, seen);
 });

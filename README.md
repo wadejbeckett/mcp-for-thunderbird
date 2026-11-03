@@ -48,7 +48,8 @@ An AI app can send the body as HTML instead, with `html` set to true, when it ne
 - **Search never returns message text.** Search results are pointers: sender, subject, date, folder, flags. An AI app reads the text of a message only by asking for that one message.
 - **Message text is marked as untrusted.** Hidden text, scripts and invisible characters are removed as far as practical, and what remains is wrapped in a block that tells the AI app it is data from the sender, never instructions.
 - **Local only, with an access key.** The host listens only on 127.0.0.1 and answers only requests that carry its access key. The AI apps that setup connects read the key by themselves, so you never copy it by hand.
-- **You can see and stop it.** The toolbar button shows whether MCP for Thunderbird is connected, paused or not connected, and its menu has a Pause button that refuses every request until you resume. The activity log in the options lists the last 500 requests (time, app, tool and outcome), without message text or addresses.
+- **Excluded folders stay excluded.** A folder you exclude in the options stays hidden from AI apps when it is renamed or moved in Thunderbird, and a folder renamed in webmail, which Thunderbird sees as a new folder, stays hidden until you check the excluded folders; [SECURITY.md](SECURITY.md#known-limits) has the details.
+- **You can see and stop it.** The toolbar button shows whether MCP for Thunderbird is connected, paused or not connected, whether its host program is missing, and when an excluded folder was not found, and its menu has a Pause button that refuses every request until you resume. The activity log in the options lists the last 500 requests (time, app, tool and outcome), without message text or addresses.
 
 [SECURITY.md](SECURITY.md) describes the threats and the protections in detail, including their limits.
 

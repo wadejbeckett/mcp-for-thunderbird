@@ -4,14 +4,18 @@
 
 // Background: keeps the native port to the host open, says hello, answers
 // tool calls, keeps the host's tool list current and shows the state in
-// the toolbar button.
+// the toolbar button. It also keeps excluded folders on their folder when
+// Thunderbird reports a rename, move or copy, keeps the list of folders
+// seen in accounts with exclusions (exclusions.js), and removes a deleted
+// account's settings.
 //
 // MV3 event page (ruling R6): an open native port keeps the page alive.
 // Without one the page suspends after about 30 s and loses its timers, so
 // the first reconnect is immediate (docs/SPIKES.md §1) and the backoff is
 // capped at 25 s (ruling R17).
 
-import { load, save, enabledTools, STORAGE_KEY } from "./settings.js";
+import { load, save, update, enabledTools, STORAGE_KEY } from "./settings.js";
+import { followFolder, reconcile, forgetAccount } from "./exclusions.js";
 import { list as logList, clear as logClear } from "./log.js";
 import { dispatch } from "./rpc.js";
 import { supportedTools } from "./features.js";
@@ -25,6 +29,8 @@ export const HOST_NAME = "mcp_for_thunderbird";
 export const PROTOCOL = 1;
 export const BACKOFF_SECONDS = Object.freeze([0, 1, 2, 4, 8, 16, 25]);
 const REPLY_TIMEOUT_MS = 30_000;
+// A call waits at most this long for folder bookkeeping already under way.
+const FOLDER_WAIT_MS = 5_000;
 const ROTATE_REFUSED = "The host program refused to rotate the access key and now refuses every request. Restart Thunderbird to give it a new key.";
 
 const TOOLBAR = {
@@ -33,7 +39,20 @@ const TOOLBAR = {
   not_connected: { title: "MCP for Thunderbird: not connected", badge: "!", color: "#b00020" },
   mismatch: { title: "Update needed", badge: "!", color: "#b00020" },
   host_error: { title: "MCP for Thunderbird: host program problem", badge: "!", color: "#b00020" },
+  not_installed: { title: "MCP for Thunderbird: host program not installed", badge: "!", color: "#b00020" },
 };
+
+// REVIEW replaces the connected look while an excluded folder of an
+// enabled account names no folder.
+const REVIEW = {
+  title: "MCP for Thunderbird: connected. An excluded folder was not found; check the excluded folders in the options.",
+  badge: "!",
+  color: "#8a6d00",
+};
+
+// Thunderbird's own words when no native messaging manifest names the
+// host (NativeMessaging.sys.mjs).
+const NO_HOST = /No such native application/;
 
 // hostMessage keeps a host-supplied welcome error to one short printable
 // line for the toolbar and the pages.
@@ -44,6 +63,7 @@ function hostMessage(v) {
 
 const UPDATE_NEEDED = "MCP for Thunderbird and its host program need updating to matching versions.";
 const NOT_CONNECTED = "MCP for Thunderbird is not connected to its host program.";
+const NOT_INSTALLED = "The host program of MCP for Thunderbird is not installed. Install it, then restart Thunderbird.";
 const GENERIC = "Thunderbird could not complete the request.";
 
 function b64ToBytes(s) {
@@ -61,7 +81,7 @@ function concat(chunks) {
   return out;
 }
 
-export function createBackground({ setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout } = {}) {
+export function createBackground({ setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout, now = () => Date.now() } = {}) {
   const m = () => globalThis.messenger;
   let port = null;
   let welcomed = false;
@@ -70,6 +90,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   // across a disconnect: an update is needed either way.
   let mismatch = false;
   let hostError = null; // the last same-protocol welcome ok:false, until a good welcome
+  let hostMissing = false; // the last disconnect said the host is not installed, until a welcome
   let paused = false;
   let attempt = 0;
   let timer = null;
@@ -83,6 +104,14 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   const tokenWaiters = [];
   const clientWaiters = new Map(); // req -> {resolve, reject}
   const listeners = [];
+  // Folder bookkeeping (exclusions.js): one step at a time.
+  let folderChain = Promise.resolve();
+  const firstSeen = new Map();
+  const missing = new Map(); // enabled account id -> excluded paths not found
+  let dueAt = null;
+  let dueTimer = null;
+  let lastWatched = null; // excluded folders and accounts last checked
+  let thunderbird; // Thunderbird's version, read once
 
   function on(ev, fn) {
     ev.addListener(fn);
@@ -92,13 +121,14 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   function state() {
     if (mismatch) return "mismatch";
     if (hostError && (!port || !welcomed)) return "host_error";
+    if (hostMissing && !welcomed) return "not_installed";
     if (!port || !welcomed) return "not_connected";
     return paused ? "paused" : "connected";
   }
 
   async function showState() {
     const st = state();
-    const t = TOOLBAR[st];
+    const t = st === "connected" && missing.size > 0 ? REVIEW : TOOLBAR[st];
     const action = m().action;
     if (!action) return;
     try {
@@ -154,6 +184,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     const s = await load();
     paused = s.paused;
     const tools = await currentTools(s);
+    const tbVersion = await thunderbirdVersion();
     if (port !== p) return;
     lastTools = JSON.stringify(tools);
     lastDir = s.attachmentDir;
@@ -164,6 +195,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
       instance: s.instance,
       tools,
       attachmentDir: s.attachmentDir,
+      thunderbird: tbVersion,
     });
     helloSent = true;
     await showState();
@@ -174,6 +206,20 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     // read before.
     await refreshTools(await load());
     syncConfig(await load());
+  }
+
+  // thunderbirdVersion is Thunderbird's version for the host's log, or ""
+  // when Thunderbird does not say.
+  async function thunderbirdVersion() {
+    if (thunderbird === undefined) {
+      try {
+        const info = await m().runtime.getBrowserInfo();
+        thunderbird = info && typeof info.version === "string" ? info.version : "";
+      } catch {
+        thunderbird = "";
+      }
+    }
+    return thunderbird;
   }
 
   function scheduleReconnect() {
@@ -193,6 +239,9 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
 
   function onDisconnect(p) {
     if (port !== p) return;
+    // Thunderbird says why the port closed only as text; a host that is
+    // not installed is told apart from one that stopped.
+    hostMissing = Boolean(p.error && NO_HOST.test(String(p.error.message)));
     port = null;
     welcomed = false;
     endpointPort = null;
@@ -216,6 +265,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
           endpointPort = null;
         } else {
           hostError = null;
+          hostMissing = false;
           welcomed = true;
           attempt = 0;
           endpointPort = !mismatch && Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536 ? msg.port : null;
@@ -299,6 +349,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
       for (const id of Array.isArray(call.blobs) ? call.blobs : []) blobs.delete(id);
     }
     try {
+      await foldersSettled();
       return await dispatch(ready);
     } catch {
       return refuse({ code: "thunderbird_error", message: GENERIC });
@@ -314,7 +365,110 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     // The folder goes first, before the tool check waits on Thunderbird,
     // so a later change cannot be overtaken by this one.
     syncConfig(s);
+    if (watchKey(s) !== lastWatched) folderWork(checkAll);
     await refreshTools(s);
+  }
+
+  // ---- excluded folders (exclusions.js) ----
+
+  // folderWork runs one step of folder bookkeeping after the others, so a
+  // rename and the check after it never interleave. A failed step is
+  // dropped; the next event or check starts again from Thunderbird.
+  function folderWork(fn) {
+    const next = folderChain.then(fn, fn);
+    folderChain = next.catch(() => {});
+    return folderChain;
+  }
+
+  // foldersSettled lets a call wait for bookkeeping under way, and adopts
+  // new folders whose wait is over, as the timer would have.
+  async function foldersSettled() {
+    if (dueAt !== null && now() >= dueAt) folderWork(checkAll);
+    let t;
+    await Promise.race([folderChain, new Promise((r) => (t = setT(r, FOLDER_WAIT_MS)))]);
+    clearT(t);
+  }
+
+  const watchKey = (s) => JSON.stringify([s.excludedFolders || [], s.accounts || {}]);
+
+  async function foldersOf(accountId) {
+    try {
+      const list = await m().folders.query({ accountId });
+      return Array.isArray(list) ? list : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // checkAccount compares one account's exclusions and folders seen with
+  // its folders now.
+  async function checkAccount(accountId) {
+    if (typeof accountId !== "string") return;
+    const folders = await foldersOf(accountId);
+    if (!folders) return;
+    let r = null;
+    const s = await update((cur) => {
+      r = reconcile(cur, accountId, folders, now(), firstSeen);
+      return r.patch;
+    });
+    const before = missing.size;
+    if (r.missing.length > 0 && s.accounts && s.accounts[accountId] === true) missing.set(accountId, r.missing);
+    else missing.delete(accountId);
+    if (r.due !== null) scheduleDue(r.due);
+    if (missing.size !== before) showState();
+  }
+
+  // checkAll checks every account with exclusions or a folders-seen list.
+  async function checkAll() {
+    const s = await load();
+    lastWatched = watchKey(s);
+    const ids = new Set(Object.keys(s.knownFolders || {}));
+    for (const ex of s.excludedFolders || []) if (ex && typeof ex.accountId === "string") ids.add(ex.accountId);
+    for (const id of [...missing.keys()]) {
+      if (!ids.has(id)) missing.delete(id);
+    }
+    for (const id of ids) await checkAccount(id);
+    showState();
+  }
+
+  function scheduleDue(at) {
+    if (stopped || (dueAt !== null && dueAt <= at)) return;
+    if (dueTimer) clearT(dueTimer);
+    dueAt = at;
+    dueTimer = setT(
+      () => {
+        dueTimer = null;
+        dueAt = null;
+        folderWork(checkAll);
+      },
+      Math.max(0, at - now()) + 100,
+    );
+  }
+
+  // onFolderMoved follows a rename, a move or (keep) a copy.
+  function onFolderMoved(from, to, keep) {
+    if (!from || typeof from.accountId !== "string") return;
+    folderWork(async () => {
+      const cross = to && typeof to.accountId === "string" && to.accountId !== from.accountId;
+      const targetFolders = cross ? await foldersOf(to.accountId) : null;
+      if (to) await update((s) => followFolder(s, from, to, { keep, targetFolders }));
+      await checkAccount(from.accountId);
+      if (cross) await checkAccount(to.accountId);
+    });
+  }
+
+  function onFolderChanged(f) {
+    if (f && typeof f.accountId === "string") folderWork(() => checkAccount(f.accountId));
+  }
+
+  function onAccountDeleted(accountId) {
+    if (typeof accountId !== "string") return;
+    folderWork(async () => {
+      await update((s) => forgetAccount(s, accountId));
+      missing.delete(accountId);
+      for (const k of [...firstSeen.keys()]) if (k.startsWith(`${accountId}\u0000`)) firstSeen.delete(k);
+      showState();
+    });
   }
 
   // syncConfig tells the host the attachment folder when it differs from
@@ -361,6 +515,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   // unusable says why the host cannot serve a UI request now, or null.
   function unusable() {
     if (mismatch) return new Error(UPDATE_NEEDED);
+    if (hostMissing && !welcomed) return new Error(NOT_INSTALLED);
     if (!port || !welcomed) return new Error(hostError ? `${NOT_CONNECTED} ${hostError}` : NOT_CONNECTED);
     return null;
   }
@@ -413,10 +568,23 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   // UI pages (setup, options, popup) reach the background through
   // runtime messaging and never touch the native port. The reply is a
   // promise, or undefined for a message that is not ours.
+  // getState also names what the user should look at: excluded folders
+  // of enabled accounts that were not found, and accounts added since the
+  // settings were last saved, which are not enabled.
   async function getState() {
     const st = state();
-    const out = { state: st, paused: (await load()).paused };
+    const s = await load();
+    const out = { state: st, paused: s.paused, missing: [], newAccounts: [] };
     if (st === "host_error") out.error = hostError;
+    let accounts = [];
+    try {
+      accounts = (await m().accounts.list(false)) || [];
+    } catch {
+      accounts = [];
+    }
+    const name = new Map(accounts.map((a) => [a.id, a.name]));
+    for (const [id, paths] of missing) for (const path of paths) out.missing.push({ account: name.get(id) || id, path });
+    if (s.setupDone) out.newAccounts = accounts.filter((a) => !Object.hasOwn(s.accounts || {}, a.id)).map((a) => a.name);
     return out;
   }
 
@@ -486,6 +654,18 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
       on(m().permissions.onAdded, () => refreshTools().catch(() => {}));
       on(m().permissions.onRemoved, () => refreshTools().catch(() => {}));
     }
+    // Folder and account events (Thunderbird 91 and 98, so on every
+    // supported version), registered here at once so they wake the page.
+    const f = m().folders;
+    if (f && f.onRenamed) {
+      on(f.onRenamed, (from, to) => onFolderMoved(from, to, false));
+      on(f.onMoved, (from, to) => onFolderMoved(from, to, false));
+      on(f.onCopied, (from, to) => onFolderMoved(from, to, true));
+      on(f.onCreated, onFolderChanged);
+      on(f.onDeleted, onFolderChanged);
+    }
+    if (m().accounts && m().accounts.onDeleted) on(m().accounts.onDeleted, onAccountDeleted);
+    if (f) folderWork(checkAll);
     await connect();
   }
 
@@ -493,6 +673,9 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     stopped = true;
     if (timer) clearT(timer);
     timer = null;
+    if (dueTimer) clearT(dueTimer);
+    dueTimer = null;
+    dueAt = null;
     for (const [ev, fn] of listeners.splice(0)) ev.removeListener(fn);
     if (port) {
       const p = port;
@@ -516,6 +699,8 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     configureClients,
     rotateToken,
     blobCount: () => blobs.size,
+    // foldersIdle resolves when folder bookkeeping has caught up (tests).
+    foldersIdle: () => folderChain,
   };
 }
 
