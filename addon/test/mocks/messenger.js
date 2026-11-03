@@ -979,6 +979,20 @@ function encodeHeader(name, value) {
 }
 
 // install sets the global `messenger` (and `browser`) to a fresh mock.
+// webLocks is a stand-in for navigator.locks (the Web Locks API): one
+// request at a time per lock name, in the order they were made.
+export function webLocks() {
+  const held = new Map();
+  return {
+    request(name, cb) {
+      const prev = held.get(name) || Promise.resolve();
+      const run = prev.then(() => cb({ name, mode: "exclusive" }));
+      held.set(name, run.catch(() => {}));
+      return run;
+    },
+  };
+}
+
 export function install(opts) {
   const mock = createMessenger(opts);
   globalThis.messenger = mock.messenger;

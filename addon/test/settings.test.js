@@ -4,7 +4,7 @@
 
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { install, fetchFrom } from "./mocks/messenger.js";
+import { install, fetchFrom, webLocks } from "./mocks/messenger.js";
 import { DEFAULTS, LEVELS, GROUPS, load, save, update, enabledTools } from "../src/settings.js";
 
 const READ = ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"];
@@ -127,4 +127,37 @@ test("update saves what its function returns from the settings of the same turn"
   const same = await update(() => null);
   assert.deepEqual(same.accounts, { a1: true, a2: true, a3: true });
   await assert.rejects(update(() => ({ excludedFolders: [{ accountId: "a1", path: "/" }] })), { code: "invalid_argument" });
+});
+
+// Each of the add-on's pages loads its own copy of settings.js: two copies
+// stand for the background page and the options page.
+test("updates from two pages' copies of the module do not lose each other's changes", async () => {
+  const pageA = await import("../src/settings.js?page=background");
+  const pageB = await import("../src/settings.js?page=options");
+  assert.notEqual(pageA.update, pageB.update);
+  await save({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // storage answers a little later, as the real one does, so the two
+  // loads would both run before either save
+  const local = mock.messenger.storage.local;
+  const { get, set } = local;
+  const later = () => new Promise((r) => setTimeout(r, 5));
+  local.get = async (k) => (await later(), get(k));
+  local.set = async (v) => (await later(), set(v));
+  const had = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: { locks: webLocks() }, configurable: true, writable: true });
+  try {
+    await Promise.all([
+      pageA.update((cur) => ({ knownFolders: { ...cur.knownFolders, a1: { INBOX: true, Private: true, New: true } } })),
+      pageB.update((cur) => ({ excludedFolders: [...cur.excludedFolders, { accountId: "a1", path: "Secret" }], groups: { compose: true } })),
+    ]);
+  } finally {
+    if (had) Object.defineProperty(globalThis, "navigator", had);
+    else delete globalThis.navigator;
+    local.get = get;
+    local.set = set;
+  }
+  const s = await load();
+  assert.deepEqual(s.excludedFolders, [{ accountId: "a1", path: "Private" }, { accountId: "a1", path: "Secret" }]);
+  assert.equal(s.groups.compose, true);
+  assert.deepEqual(s.knownFolders, { a1: { INBOX: true, Private: true, New: true } });
 });
