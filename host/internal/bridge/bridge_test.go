@@ -492,3 +492,29 @@ func TestTokenRequestAfterRotateSeesNewKey(t *testing.T) {
 		t.Fatalf("token after rotate = %v, want the new key", m)
 	}
 }
+
+// A later hello, even one with another protocol, changes nothing once a
+// hello has been accepted: rotation and token requests keep working.
+func TestLaterHelloIgnored(t *testing.T) {
+	b, f := newPair(t)
+	rot := make(chan struct{}, 1)
+	b.OnRotate(func() { rot <- struct{}{} })
+	b.OnTokenRequest(func() (string, string) { return "tok", "http://127.0.0.1:47110/mcp" })
+	go f.hello(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := b.WaitHello(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.hello(99)
+	f.send(map[string]any{"type": "rotate_token"})
+	select {
+	case <-rot:
+	case <-time.After(3 * time.Second):
+		t.Fatal("rotate_token ignored after a second hello")
+	}
+	f.send(map[string]any{"type": "token_request"})
+	if m := f.recv(); m["type"] != "token" || m["token"] != "tok" {
+		t.Fatalf("token after a second hello = %v", m)
+	}
+}

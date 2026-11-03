@@ -50,14 +50,17 @@ func checkDir(dir string) error {
 	return nil
 }
 
-// sanitise reduces name to a safe base name.
+// sanitise reduces name to a safe base name. It drops control characters,
+// characters Windows does not allow in names, and Unicode format
+// characters (such as a right-to-left override), which can make a name
+// show as something it is not.
 func sanitise(name string) string {
 	name = strings.NewReplacer(`\`, "/").Replace(name)
 	if i := strings.LastIndex(name, "/"); i >= 0 {
 		name = name[i+1:]
 	}
 	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || strings.ContainsRune(`:*?"<>|`, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || strings.ContainsRune(`:*?"<>|`, r) {
 			return -1
 		}
 		return r

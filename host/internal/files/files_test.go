@@ -18,13 +18,15 @@ import (
 
 func TestSaveSanitises(t *testing.T) {
 	cases := map[string]string{
-		"../../etc/passwd":   "passwd",
-		`..\..\win\x.txt`:    "x.txt",
-		`a:b*c?d"e<f>g|h`:    "abcdefgh",
-		"tab\x00\x07\nx.pdf": "tabx.pdf",
-		"":                   "attachment",
-		"..":                 "attachment",
-		"///":                "attachment",
+		"../../etc/passwd":     "passwd",
+		`..\..\win\x.txt`:      "x.txt",
+		`a:b*c?d"e<f>g|h`:      "abcdefgh",
+		"tab\x00\x07\nx.pdf":   "tabx.pdf",
+		"":                     "attachment",
+		"..":                   "attachment",
+		"///":                  "attachment",
+		"invoice\u202efdp.exe": "invoicefdp.exe",
+		"\u202e\u200b\ufeff":   "attachment",
 	}
 	for in, want := range cases {
 		dir := t.TempDir()

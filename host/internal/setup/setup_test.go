@@ -1091,3 +1091,54 @@ func TestRenamedProgramOwnsItsEntry(t *testing.T) {
 		}
 	}
 }
+
+// A backup keeps the original's mode exactly, whatever the umask.
+func TestBackupKeepsMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file modes")
+	}
+	for _, mode := range []os.FileMode{0o664, 0o666} {
+		p := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := backup(p); err != nil {
+			t.Fatal(err)
+		}
+		bk := backups(t, p)
+		if len(bk) != 1 {
+			t.Fatalf("backups: %v", bk)
+		}
+		fi, err := os.Stat(bk[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := fi.Mode().Perm(); m != mode {
+			t.Errorf("backup of a %o file has mode %o", mode, m)
+		}
+	}
+}
+
+// A line inside another table's multi-line string that looks like our
+// table header is not our table: setup refuses rather than cut the
+// string, both on an upgrade and on removal.
+func TestCodexHeaderInsideStringRefused(t *testing.T) {
+	home, _ := sandbox(t)
+	orig := "[mcp_servers.mcp-for-thunderbird]\ncommand = \"/old/mcp-for-thunderbird\"\nargs = [\"connect\"]\n\n[notes]\ntext = \"\"\"\nline one\n[mcp_servers.mcp-for-thunderbird]\nSECRET PART\n[end]\n\"\"\"\n"
+	p := codexSetup(t, home, orig)
+	if s := status(t, Configure([]string{"codex"}, binPath), "codex"); s.Error == "" {
+		t.Fatalf("upgrade not refused: %+v", s)
+	}
+	if b, _ := os.ReadFile(p); string(b) != orig {
+		t.Fatalf("upgrade changed the file:\n%s", b)
+	}
+	if err := codexRemove(); err == nil {
+		t.Fatal("removal not refused")
+	}
+	if b, _ := os.ReadFile(p); string(b) != orig {
+		t.Fatalf("removal changed the file:\n%s", b)
+	}
+}
