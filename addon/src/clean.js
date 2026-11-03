@@ -28,7 +28,14 @@ function nonce() {
 // direction control (U+061C, U+200E-U+200F, U+202A-U+202E, U+2066-U+2069).
 const INVISIBLE =
   /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu;
-const SEPARATORS = /[\u2028\u2029]/g;
+// Line and paragraph separators, and the vertical tab, form feed and next
+// line (NEL) controls, break a line in a plain-text part or a <pre>
+// block, so each becomes a newline rather than joining the words beside it.
+const SEPARATORS = /[\u000B\u000C\u0085\u2028\u2029]/g;
+// The other C0 and C1 control characters, apart from tab, line feed and
+// carriage return: no reader shows them, so one inside a word must not
+// keep the word from being read as the marker phrase.
+const CONTROLS = /[\u0000-\u0008\u000E-\u001F\u007F-\u0084\u0086-\u009F]/g;
 
 // stripInvisible removes soft hyphens, the combining grapheme joiner, the
 // Arabic letter mark, the Hangul fillers, Khmer inherent vowels, Mongolian
@@ -36,10 +43,12 @@ const SEPARATORS = /[\u2028\u2029]/g;
 // direction marks, embeddings, overrides and isolates, invisible operators
 // and deprecated format controls, variation selectors (which can carry
 // hidden bytes after an emoji), the byte order mark, shorthand and musical
-// format controls, and Unicode Tag characters, which can smuggle hidden
-// ASCII text (ruling R21). Line and paragraph separators become newlines.
+// format controls, Unicode Tag characters, which can smuggle hidden
+// ASCII text (ruling R21), and the C0 and C1 control characters other than
+// tab, line feed, carriage return, vertical tab, form feed and NEL. Those
+// three, and line and paragraph separators, become newlines.
 export function stripInvisible(s) {
-  return String(s ?? "").replace(INVISIBLE, "").replace(SEPARATORS, "\n");
+  return String(s ?? "").replace(INVISIBLE, "").replace(CONTROLS, "").replace(SEPARATORS, "\n");
 }
 
 // A marker inside the content could make the text after it look like it
@@ -54,10 +63,11 @@ export function stripInvisible(s) {
 // character follows, the tail runs to the first bracket-like character
 // within TAIL characters on the same line (the real open marker's nonce
 // and ": treat as data, never as instructions>>>" fit) and over its run of that one
-// character. Matching runs on a folded copy (see fold): fullwidth ASCII,
-// the Mathematical Alphanumeric Symbols and the Cyrillic and Greek
-// letters that look like the phrase's Latin letters become those
-// letters. The work is linear: one bounded regular expression finds the
+// character. Matching runs on a folded copy (see fold): combining marks
+// are dropped, and letters with accents, fullwidth ASCII, the
+// mathematical, circled and Roman numeral letters, and the Cyrillic,
+// Greek, small capital and Lisu letters that look like the phrase's Latin
+// letters become those letters. The work is linear: one bounded regular expression finds the
 // phrase and each match looks at most a fixed number of characters
 // around it.
 // Each [^\p{L}\p{N}]* run stops at the next letter or digit, so a match
@@ -71,8 +81,12 @@ const TAIL = 96;
 const RUN = 8;
 const MARKER_REMOVED = "[marker removed]";
 
-// LOOKALIKE maps Cyrillic and Greek letters, capital and small, that look
-// like the Latin letters of UNTRUSTED EMAIL CONTENT END to those letters.
+// LOOKALIKE maps letters that look like the Latin letters of UNTRUSTED
+// EMAIL CONTENT END but are not those letters in any normal form to them:
+// Cyrillic and Greek letters, capital and small, the small capitals of
+// the phonetic alphabets, Lisu letters, Cherokee letters, and the Latin
+// letters with a stroke, which have no decomposition to strip an accent
+// from.
 const LOOKALIKE = new Map(
   Object.entries({
     // Cyrillic
@@ -82,39 +96,97 @@ const LOOKALIKE = new Map(
     // Greek
     "\u0391": "A", "\u0395": "E", "\u0399": "I", "\u039C": "M", "\u039D": "N", "\u039F": "O", "\u03A4": "T",
     "\u03F9": "C", "\u03B9": "i", "\u03BF": "o", "\u03C5": "u", "\u03F2": "c",
+    // small capitals: \u1D1C U, \u0274 N, \u1D1B T, \u0280 R, \uA731 S, \u1D07 E,
+    // \u1D05 D, \u1D0D M, \u1D00 A, \u026A I, \u029F L, \u1D04 C, \u1D0F O
+    "\u1D1C": "U", "\u0274": "N", "\u1D1B": "T", "\u0280": "R", "\uA731": "S", "\u1D07": "E", "\u1D05": "D",
+    "\u1D0D": "M", "\u1D00": "A", "\u026A": "I", "\u029F": "L", "\u1D04": "C", "\u1D0F": "O",
+    // Lisu, in the same order
+    "\uA4F4": "U", "\uA4E0": "N", "\uA4D4": "T", "\uA4E3": "R", "\uA4E2": "S", "\uA4F0": "E", "\uA4D3": "D",
+    "\uA4DF": "M", "\uA4EE": "A", "\uA4F2": "I", "\uA4E1": "L", "\uA4DA": "C", "\uA4F3": "O",
+    // Latin letters with a stroke
+    "\u00D8": "O", "\u00F8": "o", "\u0141": "L", "\u0142": "l", "\u0110": "D", "\u0111": "d",
+    "\u0166": "T", "\u0167": "t", "\u0197": "I",
+    // Cherokee: \u13A0 D, \u13A2 T, \u13AA A, \u13AC E, \u13BE O, \u13B7 M,
+    // \u13C1 N, \u13D2 R, \u13DA S, \u13DE L, \u13DF C
+    "\u13A0": "D", "\u13A2": "T", "\u13AA": "A", "\u13AC": "E", "\u13BE": "O", "\u13B7": "M",
+    "\u13C1": "N", "\u13D2": "R", "\u13DA": "S", "\u13DE": "L", "\u13DF": "C",
   }),
 );
-// MATH maps each Mathematical Alphanumeric Symbol (U+1D400-U+1D7FF) whose
-// NFKC form is one Latin letter or digit, or one of the look-alikes, to it.
-const MATH = new Map();
-for (let cp = 0x1d400; cp <= 0x1d7ff; cp++) {
-  const n = String.fromCodePoint(cp).normalize("NFKC");
-  const c = LOOKALIKE.get(n) ?? n;
-  if (/^[A-Za-z0-9]$/.test(c)) MATH.set(cp, c);
+// The Cherokee small letters (U+AB70 to U+ABBF, 0x97D0 above their
+// capitals) look like small capitals of the same Latin letters, so each
+// capital above brings its small letter with it.
+for (const [k, v] of [...LOOKALIKE]) {
+  const cp = k.codePointAt(0);
+  if (cp >= 0x13a0 && cp <= 0x13ef) LOOKALIKE.set(String.fromCodePoint(cp + 0x97d0), v);
 }
-const FOLDABLE = /[\uFF01-\uFF5E\uD835\u0391-\u03F9\u0405-\u0501]/;
+// FOLDABLE finds text that may need folding: anything outside ASCII.
+const FOLDABLE = /[^\x00-\x7F]/;
+const MARK = /^\p{Mn}$/u;
+const ALNUM = /^[A-Za-z0-9]$/;
+
+// FOLDED caches what each code point outside ASCII folds to: "" for a
+// combining mark (Unicode category Mn), one ASCII letter or digit, or null
+// to copy it as it is. It fills as code points are met, so it never holds
+// more than one entry per code point.
+const FOLDED = new Map();
+
+// folded works out a code point's entry. Its NFKD form without combining
+// marks is taken: when that is one ASCII letter or digit, or one
+// LOOKALIKE, the code point folds to that letter. This covers letters
+// with accents (\u00C9 is E), fullwidth ASCII, the mathematical letters
+// and digits, circled letters and Roman numerals; anything else is copied.
+function folded(cp) {
+  let r = FOLDED.get(cp);
+  if (r !== undefined) return r;
+  const c = String.fromCodePoint(cp);
+  if (MARK.test(c)) r = "";
+  else {
+    const base = c.normalize("NFKD").replace(/\p{Mn}/gu, "").normalize("NFC");
+    const n = LOOKALIKE.get(base) ?? base;
+    r = ALNUM.test(n) ? n : null;
+  }
+  FOLDED.set(cp, r);
+  return r;
+}
 
 // fold gives the copy the marker phrase is matched on, and at, which maps
 // an index in the copy to the index in s it came from (at(f.length) is
-// s.length). Fullwidth ASCII (U+FF01-U+FF5E) becomes ASCII, a
-// mathematical letter or digit (two UTF-16 units) becomes one ASCII
-// letter or digit, and a LOOKALIKE its Latin letter; everything else is
-// copied, so text outside a defused marker is sliced from s unchanged.
+// s.length). A LOOKALIKE becomes its Latin letter, a combining mark is
+// dropped (it adds nothing to the copy, so the text after it maps on
+// unchanged), and any other code point outside ASCII that folds (see
+// folded) becomes one ASCII letter or digit, one unit for one or two
+// UTF-16 units (a surrogate pair); everything else is copied unit by unit,
+// so text outside a defused marker is sliced from s unchanged. Each code
+// point is looked at once, so the work is linear.
 function fold(s) {
   if (!FOLDABLE.test(s)) return { f: s, at: (k) => k };
   let f = "";
   const map = [];
   for (let i = 0; i < s.length; i++) {
     const u = s.charCodeAt(i);
-    map.push(i);
-    if (u >= 0xff01 && u <= 0xff5e) f += String.fromCharCode(u - 0xfee0);
-    else if (u === 0xd835 && i + 1 < s.length && MATH.has(s.codePointAt(i))) {
-      f += MATH.get(s.codePointAt(i));
-      i++;
-    } else f += LOOKALIKE.get(s[i]) ?? s[i];
+    if (u < 0x80) {
+      map.push(i);
+      f += s[i];
+      continue;
+    }
+    const cp = s.codePointAt(i);
+    const width = cp > 0xffff ? 2 : 1;
+    const r = LOOKALIKE.get(s[i]) ?? folded(cp);
+    if (r === null) {
+      for (let k = 0; k < width; k++) {
+        map.push(i + k);
+        f += s[i + k];
+      }
+    } else if (r !== "") {
+      map.push(i);
+      f += r;
+    }
+    i += width - 1;
   }
   map.push(s.length);
-  return { f, at: (k) => map[k] };
+  // at(0) is 0, not the first kept unit: combining marks at the very start
+  // map to no copy index, and the text before the first marker must keep them.
+  return { f, at: (k) => (k === 0 ? 0 : map[k]) };
 }
 
 // bracketLike is one UTF-16 unit that reads as a bracket or a rule:
@@ -338,7 +410,9 @@ function colorIn(value) {
 }
 
 // parseDecls reads CSS declarations into prop -> {v, imp} (imp: marked
-// !important).
+// !important). CSS takes !important only at the end of a value and
+// discards a declaration that has it anywhere else, so such a declaration
+// is skipped here too.
 function parseDecls(text) {
   const out = new Map();
   if (!text) return out;
@@ -351,16 +425,18 @@ function parseDecls(text) {
     if (i <= 0) continue;
     const prop = decl.slice(0, i).trim().toLowerCase();
     let value = decl.slice(i + 1);
-    const imp = /!\s*important/i.test(value);
-    value = value.replace(/!\s*important/i, "").trim().toLowerCase();
+    const imp = /!\s*important\s*$/i.test(value);
+    if (imp) value = value.replace(/!\s*important\s*$/i, "");
+    if (/!\s*important/i.test(value)) continue;
+    value = value.trim().toLowerCase();
     if (prop) out.set(prop, { v: value, imp });
   }
   return out;
 }
 
 // CONFLICT stands for a property that style sheet rules set to different
-// values for one element (or an !important rule against the inline
-// style). Without weighing specificity the winner is unknown, so a
+// values for one element (or an !important rule against a different
+// !important inline value). Without weighing specificity the winner is unknown, so a
 // conflicting property never hides anything (ruling R29: losing real text
 // is worse than leaving crafted hidden text inside the wrapper).
 const CONFLICT = Symbol("conflict");
@@ -410,6 +486,96 @@ function fontPx(v, parent) {
     default:
       return DEFAULT_PX;
   }
+}
+
+// SYSTEM_FONTS are the font shorthand values that name a font of the
+// system's own, whose size this cannot know.
+const SYSTEM_FONTS = new Set(["caption", "icon", "menu", "message-box", "small-caption", "status-bar"]);
+const ANGLE = /^-?[\d.]+(?:deg|g?rad|turn)$/;
+
+// FONT_WORDS are the words a font shorthand may hold before its size:
+// style, variant, weight and stretch keywords.
+const FONT_WORDS = new Set([
+  "normal", "italic", "oblique", "small-caps", "bold", "bolder", "lighter", "ultra-condensed", "extra-condensed",
+  "condensed", "semi-condensed", "semi-expanded", "expanded", "extra-expanded", "ultra-expanded",
+]);
+
+// isSize says a word is a font size: a size keyword, smaller, larger, 0,
+// a percentage or a length with a unit (a bare number there is a weight,
+// and an angle, as in oblique 10deg, is not a size).
+const isSize = (w) =>
+  Object.hasOwn(KEYWORD_PX, w) || w === "smaller" || w === "larger" || w === "0" || (/^[\d.]+(?:[a-z]+|%)$/.test(w) && !ANGLE.test(w));
+
+// fontShorthandSize finds the size in a font shorthand ("italic bold
+// 14px/20px Arial"), with any "/line-height" after it left off. CSS keeps
+// the declaration only when every word before the size is a style,
+// variant, weight or stretch keyword (or a weight from 1 to 1000, or an
+// angle after oblique) and a family follows the size; otherwise Gecko
+// discards it and the element keeps its inherited size, so that gives
+// null. inherit, unset, initial and the revert keywords are passed on for
+// sizeOf. A system font, or a value with a function in it (var(), calc())
+// whose size this cannot read, gives undefined: unknown, which shows.
+function fontShorthandSize(v) {
+  if (typeof v !== "string" || SYSTEM_FONTS.has(v)) return undefined;
+  if (/^(?:inherit|unset|initial|revert|revert-layer)$/.test(v)) return v;
+  if (v.includes("(")) return undefined;
+  // "14px / 20px" is read like "14px/20px"
+  const words = v.replace(/\s*\/\s*/g, "/").split(/\s+/).filter(Boolean);
+  for (let i = 0; i < words.length; i++) {
+    const [w, lineHeight] = words[i].split("/");
+    if (isSize(w)) {
+      if (lineHeight === "") return null;
+      return i + 1 < words.length ? w : null;
+    }
+    if (words[i].includes("/")) return null;
+    const weight = /^\d+(?:\.\d+)?$/.test(w) && parseFloat(w) >= 1 && parseFloat(w) <= 1000;
+    const angle = ANGLE.test(w) && words[i - 1] === "oblique";
+    if (!FONT_WORDS.has(w) && !weight && !angle) return null;
+  }
+  return null;
+}
+
+// shorthandPx gives the size a font shorthand sets, or undefined when the
+// declaration is discarded (see fontShorthandSize).
+function shorthandPx(f, parent) {
+  if (f === CONFLICT) return fontPx(CONFLICT, parent);
+  const size = fontShorthandSize(f);
+  if (size === null) return undefined;
+  if (size === undefined || size === "initial") return DEFAULT_PX;
+  if (/^(?:inherit|unset|revert|revert-layer)$/.test(size)) return parent;
+  return fontPx(size, parent);
+}
+
+// FONT_SIZE_PX gives the size in px of <font size="1"> to <font size="7">.
+const FONT_SIZE_PX = [10, 13, 16, 18, 24, 32, 48];
+
+// fontAttrPx reads the size attribute of <font>: 1 to 7, or a number with
+// a sign that counts from 3 ("+1" is 4); values outside 1 to 7 are taken
+// as the nearest one. A value this cannot read gives undefined.
+function fontAttrPx(raw) {
+  const m = /^\s*([+-]?)(\d+)/.exec(String(raw ?? ""));
+  if (!m) return undefined;
+  let n = parseInt(m[2], 10);
+  if (m[1] === "+") n = 3 + n;
+  else if (m[1] === "-") n = 3 - n;
+  return FONT_SIZE_PX[Math.max(1, Math.min(7, n)) - 1];
+}
+
+// sizeOf gives an element's font size in px: from font-size and the size
+// in a font shorthand (a shorthand whose size this cannot read counts as
+// unknown, DEFAULT_PX; a discarded one as not there), else from the size
+// attribute of <font>, else the parent's size. A style declaration
+// overrides the attribute. When font-size and font are both set and give
+// different sizes, the later one wins in CSS, but the declarations are
+// kept without their order, so the size is unknown and hides nothing.
+function sizeOf(node, tag, st, parent) {
+  const fromSize = st.has("font-size") ? fontPx(st.get("font-size"), parent) : undefined;
+  const fromFont = st.has("font") ? shorthandPx(st.get("font"), parent) : undefined;
+  if (fromSize !== undefined && fromFont !== undefined && fromSize !== fromFont) return fontPx(CONFLICT, parent);
+  if (fromSize !== undefined) return fromSize;
+  if (fromFont !== undefined) return fromFont;
+  if (tag === "font") return fontAttrPx(node.getAttribute("size")) ?? parent;
+  return parent;
 }
 
 const FAR = 1000; // px: moved this far off (left or up), a box is off-screen
@@ -487,6 +653,27 @@ function clipPathHides(v) {
   return Boolean(round);
 }
 
+// DISPLAY_WORDS are the keywords a display value is made of.
+const DISPLAY_WORDS = new Set([
+  "block", "inline", "inline-block", "flex", "inline-flex", "grid", "inline-grid", "table", "inline-table",
+  "table-row-group", "table-header-group", "table-footer-group", "table-row", "table-cell", "table-column-group",
+  "table-column", "table-caption", "list-item", "flow", "flow-root", "contents", "run-in", "ruby", "ruby-base",
+  "ruby-text", "ruby-base-container", "ruby-text-container",
+]);
+
+// liftsHidden says a display value overrides the hidden attribute's
+// [hidden]{display:none}: inherit, unset, initial, none (which prunes the
+// element anyway) or one or two display keywords. Gecko discards an empty
+// or invalid value, and revert and revert-layer roll back to that very
+// rule, so those keep the element hidden; so does CONFLICT, since a rule
+// inside @media may not apply on screen.
+function liftsHidden(v) {
+  if (typeof v !== "string") return false;
+  if (/^(?:inherit|unset|initial|none)$/.test(v)) return true;
+  const words = v.split(/\s+/).filter(Boolean);
+  return words.length >= 1 && words.length <= 2 && words.every((w) => DISPLAY_WORDS.has(w));
+}
+
 // prunes says an element hides its whole subtree whatever its children
 // declare: display:none, visibility hidden or collapse (a child could set
 // visibility:visible again; that is not followed, best effort), opacity 0
@@ -525,7 +712,7 @@ function prunes(st, em) {
 
 // Style sheet rules count as far as hiding goes: a rule's declarations
 // reach the elements its selectors match through querySelectorAll, inline
-// style over them. Rules that disagree on a property for one element make
+// style over them unless a rule is !important (see styleOf). Rules that disagree on a property for one element make
 // it CONFLICT (specificity is not weighed). A rule inside @media,
 // @supports or @container applies only on some screens or in some
 // readers, so every property it sets on an element is CONFLICT: unknown,
@@ -542,7 +729,7 @@ const MAX_RULES = 500;
 const MAX_SELECTOR = 200;
 export const STYLE_BUDGET = { query: 1_000_000, apply: 200_000 };
 const SHEET_PROPS = new Set([
-  "display", "visibility", "opacity", "font-size", "color", "background", "background-color", "background-image", "background-clip", "-webkit-background-clip", "-webkit-text-fill-color", "width", "height",
+  "display", "visibility", "opacity", "font-size", "font", "color", "background", "background-color", "background-image", "background-clip", "-webkit-background-clip", "-webkit-text-fill-color", "width", "height",
   "max-height", "max-width", "overflow", "overflow-x", "overflow-y", "position", "left", "top", "right", "bottom",
   "margin-left", "margin-top", "text-indent", "clip", "clip-path", "transform", "scale", "translate",
 ]);
@@ -552,10 +739,11 @@ const CONDITIONAL = /^@(?:media|supports|container)\b/i;
 
 // rules splits style sheet text into [selector, declarations, conditional]
 // triples, conditional for a rule inside an @media, @supports or
-// @container block (at any depth); other @-rules are skipped with their
+// @container block (at any depth), or for every rule when cond is set (a
+// <style> element for some media only); other @-rules are skipped with their
 // blocks. Matching braces are found in one pass first, so the scan is
 // linear however deeply blocks nest.
-function rules(css) {
+function rules(css, cond) {
   const close = new Map();
   const opens = [];
   for (let k = 0; k < css.length; k++) {
@@ -564,7 +752,7 @@ function rules(css) {
   }
   for (const k of opens) close.set(k, css.length); // unclosed: to the end
   const out = [];
-  const frames = [{ i: 0, end: css.length, cond: false }];
+  const frames = [{ i: 0, end: css.length, cond }];
   while (frames.length > 0 && out.length < MAX_RULES) {
     const f = frames[frames.length - 1];
     let k = f.i;
@@ -593,24 +781,36 @@ function rules(css) {
   return out;
 }
 
+// forScreen says a <style> element's media attribute applies on a reading
+// pane: absent, empty, all or screen, or a comma list holding all or
+// screen. Any other media query may not apply, so the sheet's rules are
+// treated like rules inside @media.
+function forScreen(media) {
+  if (media === null || media.trim() === "") return true;
+  return media.split(",").some((m) => /^(?:all|screen)$/.test(m.trim().toLowerCase()));
+}
+
 // sheetStyles maps each element a <style> rule reaches to prop ->
 // {v, imp}, CONFLICT or STRONG (only the properties that can hide text).
 function sheetStyles(doc) {
   const out = new Map();
-  let css = "";
+  const all = [];
+  let room = MAX_SHEET;
   for (const el of doc.querySelectorAll("style")) {
-    css += String(el.textContent || "") + "\n";
-    if (css.length >= MAX_SHEET) break;
+    if (room <= 0 || all.length >= MAX_RULES) break;
+    // A sheet of a type other than CSS is not applied at all.
+    const type = el.getAttribute("type");
+    if (type !== null && type.trim() !== "" && type.trim().toLowerCase() !== "text/css") continue;
+    const text = String(el.textContent || "").slice(0, room);
+    room -= text.length + 1;
+    // Comments, and the HTML comment delimiters old mail wraps sheets in.
+    const css = text.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ").replace(/<!--|-->/g, " ");
+    all.push(...rules(css, !forScreen(el.getAttribute("media"))));
   }
-  // Comments, and the HTML comment delimiters old mail wraps sheets in.
-  css = css
-    .slice(0, MAX_SHEET)
-    .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ")
-    .replace(/<!--|-->/g, " ");
   const size = doc.getElementsByTagName("*").length;
   let query = STYLE_BUDGET.query;
   let apply = STYLE_BUDGET.apply;
-  for (const [selector, body, cond] of rules(css)) {
+  for (const [selector, body, cond] of all.slice(0, MAX_RULES)) {
     const decls = [...parseDecls(body)].filter(([k]) => SHEET_PROPS.has(k));
     // :has() can cost a scan per element; very long selectors are skipped too.
     if (decls.length === 0 || !selector || selector.length > MAX_SELECTOR || /:has\s*\(/i.test(selector)) continue;
@@ -641,60 +841,83 @@ function sheetStyles(doc) {
 }
 
 // styleOf gives an element's declarations, prop -> value or CONFLICT:
-// inline style over the sheet, except that an !important sheet value the
-// inline style disagrees with, or a STRONG one, is a CONFLICT.
+// inline style over the sheet, as in CSS, except that an !important sheet
+// value beats an inline value that is not !important. When both are
+// !important and differ, or the sheet value is STRONG, the winner depends
+// on more than this weighs, so the property is a CONFLICT.
 function styleOf(node, sheet) {
   const st = new Map();
   const fromSheet = sheet.get(node);
   if (fromSheet) for (const [k, d] of fromSheet) st.set(k, d === CONFLICT || d === STRONG ? CONFLICT : d.v);
   for (const [k, d] of parseDecls(node.getAttribute("style"))) {
     const s = fromSheet && fromSheet.get(k);
-    st.set(k, s === STRONG || (s && s !== CONFLICT && s.imp && s.v !== d.v) ? CONFLICT : d.v);
+    const known = s !== undefined && s !== CONFLICT && s !== STRONG;
+    if (s === STRONG || (known && s.imp && d.imp && s.v !== d.v)) st.set(k, CONFLICT);
+    else if (known && s.imp && !d.imp) st.set(k, s.v);
+    else st.set(k, d.v);
   }
   return st;
 }
 
 // Text is built line by line: whitespace collapses as in HTML (except in
-// <pre>), blocks start new lines, <br> ends one.
+// <pre>), blocks start new lines, <br> ends one. The current line is kept
+// as a list of pieces, with its length, its last character and whether it
+// holds anything but white space, and is joined only when it ends or a
+// link asks what was written since a mark: one long line (a mail of tens
+// of thousands of links with no block between them) would otherwise be
+// copied or scanned again for every piece, which is quadratic.
 class Lines {
   constructor() {
     this.done = [];
-    this.line = "";
     this.chars = 0; // characters other than white space written so far
+    this.clear();
+  }
+  clear() {
+    this.parts = [];
+    this.len = 0;
+    this.last = "";
+    this.ink = false; // the line holds a character other than white space
+  }
+  add(t) {
+    if (t === "") return;
+    this.parts.push(t);
+    this.len += t.length;
+    this.last = t[t.length - 1];
+    if (!this.ink && /\S/.test(t)) this.ink = true;
   }
   text(s, pre) {
     this.chars += s.replace(/\s+/g, "").length;
     if (pre) {
       const parts = s.split(/\r?\n/);
-      this.line += parts[0];
+      this.add(parts[0]);
       for (const p of parts.slice(1)) {
         this.newline();
-        this.line += p;
+        this.add(p);
       }
       return;
     }
     let t = s.replace(/\s+/g, " ");
-    if (this.line === "" || this.line.endsWith(" ")) t = t.replace(/^ /, "");
-    this.line += t;
+    if (this.len === 0 || this.last === " ") t = t.replace(/^ /, "");
+    this.add(t);
   }
   newline() {
     // trimEnd, not /\s+$/: that regular expression is quadratic on a long
     // run of white space (in <pre>) that does not end the line.
-    this.done.push(this.line.trimEnd());
-    this.line = "";
+    this.done.push(this.parts.join("").trimEnd());
+    this.clear();
   }
   block() {
-    if (this.line.trim() !== "") this.newline();
-    else this.line = "";
+    if (this.ink) this.newline();
+    else this.clear();
   }
   mark() {
-    return { n: this.done.length, col: this.line.length, chars: this.chars };
+    return { n: this.done.length, part: this.parts.length, chars: this.chars };
   }
   since(m) {
-    return this.done.length === m.n ? this.line.slice(m.col) : null;
+    return this.done.length === m.n ? this.parts.slice(m.part).join("") : null;
   }
   result() {
-    if (this.line !== "") this.newline();
+    if (this.len !== 0) this.newline();
     return this.done.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
 }
@@ -758,9 +981,14 @@ export function htmlToText(html) {
     if (node.nodeType === 1) {
       const tag = String(node.localName || "").toLowerCase();
       if (REMOVE.has(tag)) continue;
-      if (node.hasAttribute("hidden")) continue;
       const st = styleOf(node, sheet);
-      const px = fontPx(st.get("font-size"), ctx.px);
+      // The hidden attribute only gives the element a default of
+      // display:none, which a valid display value its style declares
+      // overrides (see liftsHidden); hidden="until-found" hides another way
+      // (content-visibility), which a display value does not undo.
+      const hidden = node.getAttribute("hidden");
+      if (hidden !== null && (hidden.trim().toLowerCase() === "until-found" || !liftsHidden(st.get("display")))) continue;
+      const px = sizeOf(node, tag, st, ctx.px);
       if (prunes(st, px)) continue;
 
       // Colours: CONFLICT or an unreadable value make the colour unknown.

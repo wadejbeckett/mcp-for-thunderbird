@@ -61,7 +61,7 @@ elif path.endswith((".zip", ".xpi", ".mcpb")):
             zi.external_attr = attr
             z.writestr(zi, d)
         if add and not key:
-            z.writestr(name, b"x")
+            z.writestr(name, os.environ.get("ARCHIVE_CONTENT", "x").encode())
 elif path.endswith(".deb"):
     d = tempfile.mkdtemp()
     subprocess.run(["dpkg-deb", "-R", path, d], check=True)
@@ -99,7 +99,7 @@ expect_fail() {
 # Excluded paths at the archive root and inside it, in every archive type.
 for f in "$N-$version-linux-amd64.tar.gz" "$N-$version-windows-amd64.zip" "$N-$version.xpi" \
   "$N-$version-darwin-all.mcpb" "${N}_${debver}_amd64.deb"; do
-  for entry in .superpowers/x spikes/x e2e-settings.json node_modules/x/y.js test/a.test.js; do
+  for entry in .superpowers/x spikes/x node_modules/x/y.js test/a.test.js; do
     fresh
     python3 -I "$work/archive.py" add "$work/d/$f" "$entry"
     resign
@@ -111,6 +111,17 @@ fresh
 python3 -I "$work/archive.py" add "$work/d/$N-$version.xpi" - experiment_apis
 resign
 expect_fail "experiment_apis in the XPI manifest"
+
+# A release XPI must carry settings-seed.json, and it must be empty.
+fresh
+python3 -I "$work/archive.py" drop "$work/d/$N-$version.xpi" settings-seed.json
+resign
+expect_fail "XPI without settings-seed.json"
+fresh
+python3 -I "$work/archive.py" drop "$work/d/$N-$version.xpi" settings-seed.json
+ARCHIVE_CONTENT='{"accounts": {"account1": true}}' python3 -I "$work/archive.py" add "$work/d/$N-$version.xpi" settings-seed.json
+resign
+expect_fail "seeded settings in the XPI"
 
 fresh
 printf x >>"$work/d/$N-$version.xpi"

@@ -138,6 +138,7 @@ type Bridge struct {
 	pending     map[string]chan outcome
 	closed      bool
 	mismatched  bool // the add-on speaks another protocol: serve nothing
+	helloed     bool // a hello was accepted; later ones are ignored
 	callTimeout time.Duration
 	onTools     func([]string)
 	onConfig    func(string)
@@ -491,6 +492,17 @@ func (b *Bridge) dispatch(f frame) {
 
 	switch f.Type {
 	case "hello":
+		// Once a hello has been accepted, a later one changes nothing,
+		// whatever protocol it names.
+		b.mu.Lock()
+		if b.helloed {
+			b.mu.Unlock()
+			return
+		}
+		if f.Protocol == ProtocolVersion && !b.mismatched {
+			b.helloed = true
+		}
+		b.mu.Unlock()
 		if f.Protocol != ProtocolVersion {
 			b.mu.Lock()
 			b.mismatched = true

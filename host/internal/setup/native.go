@@ -213,6 +213,13 @@ func backup(path string) error {
 		if err != nil {
 			return err
 		}
+		// The umask may have narrowed the mode given to OpenFile; the
+		// backup keeps the original's mode exactly.
+		if err := f.Chmod(fi.Mode().Perm()); err != nil {
+			f.Close()
+			os.Remove(name)
+			return err
+		}
 		if _, err := f.Write(b); err != nil {
 			f.Close()
 			os.Remove(name)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -725,6 +726,7 @@ func codexAdd(binPath string) error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	orig := old
 	if ok {
 		if !e.ourShape() {
 			return errors.New("config.toml already has an mcp-for-thunderbird entry that setup did not write, or one with settings added to it; it was left unchanged (remove that table and set up again to replace it)")
@@ -740,7 +742,7 @@ func codexAdd(binPath string) error {
 		b.WriteByte('\n')
 	}
 	fmt.Fprintf(&b, "%s\ncommand = %s\nargs = [\"connect\"]\n", codexHeader, tomlString(binPath))
-	if err := checkCodex(b.Bytes(), binPath, true); err != nil {
+	if err := checkCodex(orig, b.Bytes(), binPath, true); err != nil {
 		return err
 	}
 	return replace(p, b.Bytes(), 0o600)
@@ -766,7 +768,7 @@ func codexRemove() error {
 		return err
 	}
 	nb := codexWithout(old)
-	if err := checkCodex(nb, "", false); err != nil {
+	if err := checkCodex(old, nb, "", false); err != nil {
 		return err
 	}
 	return replace(p, nb, 0o600)
@@ -823,13 +825,80 @@ func codexWithout(old []byte) []byte {
 }
 
 // checkCodex parses new content and confirms our entry is present with
-// binPath (want) or absent (!want) before anything is written.
-func checkCodex(b []byte, binPath string, want bool) error {
+// binPath (want) or absent (!want) before anything is written. It also
+// confirms that everything else in the file means what it meant in old:
+// the text edit finds our table by its header line, and a line that only
+// looks like that header (inside a multi-line string, say) must not cost
+// the user any of their settings.
+func checkCodex(old, b []byte, binPath string, want bool) error {
+	bad := errors.New("config.toml has a layout setup cannot change safely; it was left unchanged")
 	e, ok, err := codexParse(b)
 	if err != nil || ok != want || (want && (e.other || !e.matches(binPath))) {
-		return errors.New("config.toml has a layout setup cannot change safely; it was left unchanged")
+		return bad
+	}
+	before, err := codexRest(old)
+	if err != nil {
+		return bad
+	}
+	after, err := codexRest(b)
+	if err != nil || !tomlEqual(before, after) {
+		return bad
 	}
 	return nil
+}
+
+// codexRest parses config.toml content without our entry (and without
+// mcp_servers when ours was its only entry).
+func codexRest(b []byte) (map[string]any, error) {
+	doc := map[string]any{}
+	if err := toml.Unmarshal(b, &doc); err != nil {
+		return nil, err
+	}
+	if ms, ok := doc["mcp_servers"].(map[string]any); ok {
+		delete(ms, EntryName)
+		if len(ms) == 0 {
+			delete(doc, "mcp_servers")
+		}
+	}
+	return doc, nil
+}
+
+// tomlEqual reports whether a and b, as decoded by go-toml, hold the same
+// values. It walks maps and slices and compares everything else as
+// reflect.DeepEqual does, except that two NaN floats count as equal: a
+// TOML nan decodes to math.NaN(), which never equals itself, and would
+// otherwise make any file holding one look changed.
+func tomlEqual(a, b any) bool {
+	switch x := a.(type) {
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := y[k]
+			if !ok || !tomlEqual(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !tomlEqual(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case float64:
+		if y, ok := b.(float64); ok && math.IsNaN(x) && math.IsNaN(y) {
+			return true
+		}
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // tomlString quotes s as a TOML basic string.

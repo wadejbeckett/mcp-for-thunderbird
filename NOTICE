@@ -10,10 +10,12 @@ following files are derived from it, in whole or in part:
 
   - addon/src/thread-utils.js
   - addon/test/mocks/messenger.js
-  - parts of the handlers in addon/src/handlers/
+  - addon/src/handlers/read.js (in part)
+  - addon/src/handlers/contacts.js (in part)
   - the threat model in SECURITY.md
 
-Those files keep this notice. The original licence text follows.
+Each of those files carries a credit line pointing to this notice. The
+original licence text follows.
 
 ----------------------------------------------------------------------
 

@@ -62,7 +62,8 @@ test("build-xpi zips the add-on without tests or package files", () => {
     assert.ok(!name.startsWith("test/") && !name.startsWith("node_modules/"), name);
     assert.ok(!/^package(-lock)?\.json$/.test(name), name);
   }
-  assert.ok(!e.has("e2e-settings.json"), "release builds never carry e2e settings");
+  // The seed file ships, empty: release builds never carry seeded settings.
+  assert.deepEqual(JSON.parse(e.get("settings-seed.json").toString()), {});
 });
 
 test("build-xpi includes the licence and the third-party notice", () => {
@@ -74,20 +75,21 @@ test("build-xpi includes the licence and the third-party notice", () => {
   assert.equal(e.get("NOTICE")?.toString(), readFileSync(join(repo, "NOTICE"), "utf8"));
 });
 
-test("build-xpi --e2e-settings embeds the file as e2e-settings.json", () => {
+test("build-xpi --e2e-settings puts the file in the package as settings-seed.json", () => {
   const settings = { accounts: { account1: true }, setupDone: true };
   const e = build((dir) => {
     const f = join(dir, "s.json");
     writeFileSync(f, JSON.stringify(settings));
     return ["--e2e-settings", f];
   });
-  assert.deepEqual(JSON.parse(e.get("e2e-settings.json").toString()), settings);
+  assert.deepEqual(JSON.parse(e.get("settings-seed.json").toString()), settings);
+  assert.ok(!e.has("e2e-settings.json"));
 });
 
 test("build-xpi --version sets the manifest version (release mode)", () => {
   const e = build(() => ["--version", "1.2.3"]);
   assert.equal(JSON.parse(e.get("manifest.json").toString()).version, "1.2.3");
-  assert.ok(!e.has("e2e-settings.json"));
+  assert.deepEqual(JSON.parse(e.get("settings-seed.json").toString()), {});
 });
 
 test("build-xpi --version keeps the numeric core of a snapshot version", () => {

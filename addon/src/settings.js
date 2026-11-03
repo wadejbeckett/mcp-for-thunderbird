@@ -79,11 +79,13 @@ function merge(base, patch = {}) {
   return out;
 }
 
-// e2eSettings reads e2e-settings.json from the add-on package. Release
-// builds never contain it (ruling R2), so this returns null there.
-async function e2eSettings() {
+// seedSettings reads settings-seed.json from the add-on package: the
+// initial settings of an end-to-end test build. A release build carries
+// the file with an empty object (packaging/build-xpi.mjs and
+// packaging/check.sh hold it to that, ruling R2), so nothing is seeded there.
+async function seedSettings() {
   try {
-    const res = await globalThis.fetch(globalThis.messenger.runtime.getURL("e2e-settings.json"));
+    const res = await globalThis.fetch(globalThis.messenger.runtime.getURL("settings-seed.json"));
     if (!res || !res.ok) return null;
     const v = await res.json();
     return v && typeof v === "object" && !Array.isArray(v) ? v : null;
@@ -124,7 +126,7 @@ async function loadNow() {
   if (stored && typeof stored === "object") {
     s = merge(DEFAULTS, stored);
   } else {
-    s = merge(DEFAULTS, (await e2eSettings()) || {});
+    s = merge(DEFAULTS, (await seedSettings()) || {});
     dirty = true;
   }
   if (typeof s.instance !== "string" || !/^[0-9a-f]{32}$/.test(s.instance)) {

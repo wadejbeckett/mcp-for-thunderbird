@@ -15,7 +15,7 @@
 ;        /DSourceDir=dist\host_windows_amd64_v1 /DDocDir=. ^
 ;        /DOutputDir=dist packaging\windows\installer.iss
 ; Arch is amd64 or arm64. SourceDir holds mcp-for-thunderbird.exe; DocDir
-; holds LICENSE, NOTICE and README.md. If registration fails, Setup logs
+; holds LICENSE, NOTICE, THIRD_PARTY_LICENSES and README.md. If registration fails, Setup logs
 ; it and exits with code 100 (also under /SILENT and /VERYSILENT).
 
 #ifndef AppVersion

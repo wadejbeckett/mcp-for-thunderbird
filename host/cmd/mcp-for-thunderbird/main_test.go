@@ -24,6 +24,7 @@ import (
 
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/connfile"
 	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/nativemsg"
+	"github.com/wadejbeckett/mcp-for-thunderbird/host/internal/server"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -35,6 +36,23 @@ func TestVersionCommand(t *testing.T) {
 	want := "mcp-for-thunderbird 0.0.0-dev\n"
 	if got := out.String(); got != want {
 		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+// The MCP server of connect mode reports server.Version, which only main
+// knows: run sets it before any mode starts, so connect does not report
+// the package default "0.0.0-dev" to MCP clients.
+func TestRunSetsServerVersionForConnect(t *testing.T) {
+	oldMain, oldServer := Version, server.Version
+	t.Cleanup(func() { Version, server.Version = oldMain, oldServer })
+	Version = "9.9.9-test"
+	server.Version = "0.0.0-dev"
+	var out bytes.Buffer
+	if code := run([]string{"version"}, &out); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if server.Version != "9.9.9-test" {
+		t.Fatalf("server.Version = %q after run, want the build version", server.Version)
 	}
 }
 

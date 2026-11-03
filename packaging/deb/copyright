@@ -1,0 +1,24 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mcp-for-thunderbird
+Upstream-Contact: https://github.com/wadejbeckett/mcp-for-thunderbird/issues
+Source: https://github.com/wadejbeckett/mcp-for-thunderbird
+Comment: This package holds the host program of MCP for Thunderbird. The
+ program statically links the Go standard library and runtime and the Go
+ modules named in /usr/share/doc/mcp-for-thunderbird/THIRD_PARTY_LICENSES,
+ which carries the full text of each of their licences (BSD-3-Clause, MIT
+ and Apache-2.0). NOTICE in the same folder credits the MIT-licensed
+ project that parts of the Thunderbird add-on derive from; the add-on is
+ not part of this package.
+
+Files: *
+Copyright: 2026 Wade J. Beckett and contributors
+License: MPL-2.0
+
+License: MPL-2.0
+ This Source Code Form is subject to the terms of the Mozilla Public
+ License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ You can obtain one at https://mozilla.org/MPL/2.0/.
+ .
+ On Debian systems, the complete text of the Mozilla Public License 2.0
+ can be found in /usr/share/common-licenses/MPL-2.0. It is also installed
+ as /usr/share/doc/mcp-for-thunderbird/LICENSE.

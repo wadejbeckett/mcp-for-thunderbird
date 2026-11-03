@@ -8,13 +8,19 @@
 # Writes THIRD_PARTY_LICENSES at the repository root: the licence of the Go
 # toolchain (its standard library and runtime are linked into the host) and
 # of every Go module linked into the host binary on Linux, macOS or Windows,
-# each with its version and the full text of every licence file at its
-# root (LICENSE*, LICENCE*, COPYING*). A module that host/go.mod replaces
-# is listed with its replacement ("path version => replacement") and its
-# licences are read from the replacement's directory, local paths included.
-# The MIT and BSD licences of those modules require their notices to travel
-# with binary copies, so every host package (archives, .deb, .mcpb, Windows
-# installer, macOS pkg) ships this file next to LICENSE and NOTICE.
+# each with its version and the full text of every licence and notice file
+# at its root (LICENSE*, LICENCE*, COPYING*, NOTICE*). A module that
+# host/go.mod replaces is listed with its replacement ("path version =>
+# replacement") and its licences are read from the replacement's directory,
+# local paths included. The Apache-2.0, MIT and BSD licences of those
+# modules require their notices to travel with binary copies, so every host
+# package (archives, .deb, .mcpb, Windows installer, macOS pkg) ships this
+# file next to LICENSE and NOTICE.
+#
+# A module under a copyleft licence (GPL, LGPL, AGPL, SSPL) could not be
+# linked into an MPL-2.0 program distributed this way: the script fails
+# when any licence text it gathers is one of those, so such a module cannot
+# slip in through a dependency update.
 #
 # Run it after changing host/go.mod and commit the result. With --check it
 # writes nothing and exits 1 when the tracked file differs from a fresh one;
@@ -66,7 +72,7 @@ rule="======================================================================"
     name="$path $version"
     [ -z "$replace" ] || name="$name => $replace"
     [ -n "$dir" ] && [ -d "$dir" ] || { echo "third-party-licenses: no module directory for $name" >&2; exit 1; }
-    find "$dir" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \) | LC_ALL=C sort >"$files"
+    find "$dir" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) | LC_ALL=C sort >"$files"
     [ -s "$files" ] || { echo "third-party-licenses: no licence file in $name ($dir)" >&2; exit 1; }
     count=$(wc -l <"$files")
     echo
@@ -86,6 +92,16 @@ rule="======================================================================"
     done <"$files"
   done <"$mods"
 } >"$tmp"
+
+# The titles of the copyleft licences, as their licence files carry them.
+# The MPL-2.0 text names the GNU licences in mixed case (its definition of
+# a Secondary License), so only the upper-case titles count.
+copyleft='^[[:space:]]*(GNU (LESSER |LIBRARY |AFFERO )?GENERAL PUBLIC LICENSE|Server Side Public License)'
+if grep -qE "$copyleft" "$tmp"; then
+  echo "third-party-licenses: a linked module is under a copyleft licence, which MCP for Thunderbird cannot ship:" >&2
+  grep -nE "$copyleft" "$tmp" | head -n 5 >&2
+  exit 1
+fi
 
 if [ "${1:-}" = "--check" ]; then
   if cmp -s "$tmp" "$out"; then

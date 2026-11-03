@@ -26,6 +26,11 @@ const MaxBody = 1 << 20
 const (
 	rateLimit = 20 // requests a second per client
 	rateBurst = 40
+	// The per-client buckets keep clients fair with each other; the shared
+	// bucket bounds what the host as a whole, and so the add-on behind it,
+	// is asked to do, however many sessions a client opens.
+	rateLimitAll = 200 // requests a second for all clients together
+	rateBurstAll = 400
 	// Idle limiters are dropped once there are this many, so a stream of
 	// session ids cannot grow the table without bound.
 	maxLimiters = 1024
@@ -50,54 +55,60 @@ func guard(token func() string, port int, next http.Handler) http.Handler {
 	hosts := []string{"127.0.0.1:" + strconv.Itoa(port), "localhost:" + strconv.Itoa(port)}
 	lim := &limiters{m: map[string]*limiter{}}
 	known := &sessions{m: map[string]time.Time{}}
+	all := rate.NewLimiter(rateLimitAll, rateBurstAll)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reading the body has a deadline from the start, so neither a
+		// client that stalls mid body nor one refused before its body is
+		// read can hold the connection: after a refusal the server would
+		// otherwise wait, without limit, for the body it was promised. It
+		// is lifted for every request that is let through: a whole-request
+		// ReadTimeout would also cancel the long-lived streams and calls
+		// that follow. After a refusal or a failed read it stays, and the
+		// connection is closed.
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+		refuse := func(msg string, code int) {
+			w.Header().Set("Connection", "close")
+			http.Error(w, msg, code)
+		}
 		// A browser always sends Origin on cross-origin and on POST requests;
 		// MCP clients never do. Its presence, even empty, is refused.
 		if _, ok := r.Header["Origin"]; ok {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			refuse("Forbidden", http.StatusForbidden)
 			return
 		}
 		if !hostAllowed(r.Host, hosts) {
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			refuse("Forbidden", http.StatusForbidden)
 			return
 		}
 		if !authorised(r.Header.Get("Authorization"), token()) {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			refuse("Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if !lim.allow(clientKey(r, known)) {
+		if !lim.allow(clientKey(r, known)) || !all.Allow() {
 			w.Header().Set("Retry-After", "1")
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			refuse("Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
 		if r.ContentLength > MaxBody {
-			http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+			refuse("Request Entity Too Large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		if r.Body != nil && r.Body != http.NoBody {
-			// Reading the body has a deadline, so a client that stalls mid
-			// body cannot hold the connection. It is lifted once the body
-			// is in: a whole-request ReadTimeout would also cancel the
-			// long-lived streams and calls that follow. After a failed
-			// read it stays expired, and the connection is closed.
-			rc := http.NewResponseController(w)
-			_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 			body, err := io.ReadAll(io.LimitReader(r.Body, MaxBody+1))
+			r.Body.Close()
 			if err != nil {
-				r.Body.Close()
-				w.Header().Set("Connection", "close")
-				http.Error(w, "Bad Request", http.StatusBadRequest)
+				refuse("Bad Request", http.StatusBadRequest)
 				return
 			}
-			_ = rc.SetReadDeadline(time.Time{})
-			r.Body.Close()
 			if len(body) > MaxBody {
-				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+				refuse("Request Entity Too Large", http.StatusRequestEntityTooLarge)
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
 		}
+		_ = rc.SetReadDeadline(time.Time{})
 		next.ServeHTTP(&sessionWriter{ResponseWriter: w, known: known}, r)
 	})
 }

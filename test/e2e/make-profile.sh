@@ -21,12 +21,16 @@
 #     account (TestE2EArchive), with no year or month subfolders.
 #
 # usage: make-profile.sh <xpi> <host-binary>
-# Environment as tb.sh (MFT_E2E_DIR, MFT_E2E_PROFILE).
+# Environment as tb.sh (MFT_E2E_DIR, MFT_E2E_PROFILE), and the test
+# server's ports, MFT_E2E_IMAP_PORT (3143) and MFT_E2E_SMTP_PORT (3025),
+# for a run beside another that holds the usual ones.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 : "${MFT_E2E_DIR:=${TMPDIR:-/tmp}/mft-e2e}"
 : "${MFT_E2E_PROFILE:=${TMPDIR:-/tmp}/mft-e2e-profile}"
+: "${MFT_E2E_IMAP_PORT:=3143}"
+: "${MFT_E2E_SMTP_PORT:=3025}"
 export MFT_E2E_DIR MFT_E2E_PROFILE
 
 ADDON_ID=mcp-for-thunderbird@wadejbeckett.github.io
@@ -131,7 +135,7 @@ for kv in \
   'mail.account.account2.server "server2"' \
   'mail.server.server1.type "imap"' \
   'mail.server.server1.hostname "127.0.0.1"' \
-  'mail.server.server1.port 3143' \
+  "mail.server.server1.port $MFT_E2E_IMAP_PORT" \
   'mail.server.server1.userName "test"' \
   'mail.server.server1.name "test@localhost"' \
   'mail.server.server1.socketType 0' \
@@ -148,7 +152,7 @@ for kv in \
   'mail.account.account3.server "server3"' \
   'mail.server.server3.type "imap"' \
   'mail.server.server3.hostname "127.0.0.1"' \
-  'mail.server.server3.port 3143' \
+  "mail.server.server3.port $MFT_E2E_IMAP_PORT" \
   'mail.server.server3.userName "other"' \
   'mail.server.server3.name "other@localhost"' \
   'mail.server.server3.socketType 0' \
@@ -173,7 +177,7 @@ for kv in \
   'mail.smtpservers "smtp1"' \
   'mail.smtp.defaultserver "smtp1"' \
   'mail.smtpserver.smtp1.hostname "127.0.0.1"' \
-  'mail.smtpserver.smtp1.port 3025' \
+  "mail.smtpserver.smtp1.port $MFT_E2E_SMTP_PORT" \
   'mail.smtpserver.smtp1.authMethod 1' \
   'mail.smtpserver.smtp1.try_ssl 0' \
   'mail.smtpserver.smtp1.username ""' \

@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -277,5 +279,102 @@ func TestSessionBuckets(t *testing.T) {
 	r.Header.Set("Mcp-Session-Id", "abc")
 	if k := clientKey(r, known); k == "s:unknown" || len(k) > 64 {
 		t.Fatalf("issued session key = %q", k)
+	}
+}
+
+// A request refused before its body is read (here for want of a token)
+// is answered with "Connection: close", and the body it announced but
+// never sends cannot hold the connection open: the server gives up on it
+// after bodyReadTimeout.
+func TestRefusedRequestDoesNotHoldConnection(t *testing.T) {
+	var reached bool
+	g := Guard(testToken, testPort, okHandler(&reached))
+	r := goodRequest("{}")
+	r.Header.Del("Authorization")
+	if w := serve(g, r); w.Code != http.StatusUnauthorized || w.Header().Get("Connection") != "close" {
+		t.Errorf("status %d Connection %q, want 401 and close", w.Code, w.Header().Get("Connection"))
+	}
+
+	old := bodyReadTimeout
+	bodyReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	hs := httptest.NewUnstartedServer(nil)
+	addr := hs.Listener.Addr().String()
+	hs.Config.Handler = guard(func() string { return testToken }, hs.Listener.Addr().(*net.TCPAddr).Port, okHandler(&reached))
+	hs.Start()
+	t.Cleanup(hs.Close)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "POST /mcp HTTP/1.1\r\nHost: %s\r\nContent-Length: 100000\r\n\r\n", addr)
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("no response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || !resp.Close {
+		t.Fatalf("status %d close %v, want 401 and Connection: close", resp.StatusCode, resp.Close)
+	}
+	_, err = br.ReadByte()
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("connection still open 3 s after a refused request")
+	}
+	if err == nil {
+		t.Fatal("server sent more after a refusal")
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("closed after %v", el)
+	}
+	if reached {
+		t.Fatal("a refused request reached the handler")
+	}
+}
+
+// Every authorised request also draws on one bucket shared by all
+// clients, so many sessions together cannot ask more of the host than it
+// allows as a whole.
+func TestSharedRateLimit(t *testing.T) {
+	var n atomic.Int64
+	g := Guard(testToken, testPort, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Mcp-Session-Id") == "" {
+			w.Header().Set("Mcp-Session-Id", "issued-"+strconv.FormatInt(n.Add(1), 10))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	const clients, each = 20, 30 // each stays inside its own burst of 40
+	ids := make([]string, clients)
+	for i := range ids {
+		w := serve(g, goodRequest("{}"))
+		if w.Code != http.StatusOK {
+			t.Fatalf("initialize %d: status %d", i, w.Code)
+		}
+		ids[i] = w.Header().Get("Mcp-Session-Id")
+	}
+	var limited atomic.Int64
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				r := goodRequest("{}")
+				r.Header.Set("Mcp-Session-Id", id)
+				if serve(g, r).Code == http.StatusTooManyRequests {
+					limited.Add(1)
+				}
+			}
+		}(id)
+	}
+	wg.Wait()
+	// 600 requests against a shared burst of 400 (less the 20 initialize
+	// requests), refilling at 200 a second: about 200 are refused.
+	if l := limited.Load(); l < 100 || l > 220 {
+		t.Fatalf("%d of %d limited, want about 200 (shared burst 400)", l, clients*each)
 	}
 }

@@ -85,7 +85,7 @@ A reply or forward goes out from the identity the original was addressed to, as 
 - **Attachments stored outside a message**, such as a FileLink or a detached file, are only a placeholder in the message. A forward draft that would carry one is refused; forward the whole message as an attachment instead, or open the forward with `mail_compose`.
 - **Direct sending needs Thunderbird online.** While Thunderbird is set to Work Offline, `mail_send` sends nothing and says so; it does not queue the message to send later.
 - **Direct sending accepts only simple addresses**: letters, digits and `. _ + -` before the `@`, and a plain domain. Write a draft for any other address. [SECURITY.md](SECURITY.md) explains why.
-- **The host is not code-signed yet**, so Windows and macOS warn when you install it. The add-on on the releases page is unsigned too; Thunderbird installs an unsigned add-on from a file, and it will be signed by addons.thunderbird.net once listed there.
+- **The host is not code-signed yet**, so Windows and macOS warn when you install it. Thunderbird does not require add-ons to be signed, so the add-on installs from the file without a warning; a listing on addons.thunderbird.net, to follow, will update it by itself.
 
 ## Links
 
@@ -111,6 +111,6 @@ You can also help by reporting bugs, sending fixes or starring the repository.
 
 MCP for Thunderbird is published by Wade J. Beckett ([wadejbeckett](https://github.com/wadejbeckett) on GitHub) under the Mozilla Public License 2.0 ([LICENSE](LICENSE)).
 
-Parts of the add-on and the threat model in [SECURITY.md](SECURITY.md) are adapted from [thunderbird-cli](https://github.com/vitalio-sh/thunderbird-cli) by Vitalii Ionov, used under the MIT License. [NOTICE](NOTICE) lists the files and keeps that licence. The host links Go libraries under the MIT and BSD licences; [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES) carries their notices and ships inside every host package.
+Parts of the add-on and the threat model in [SECURITY.md](SECURITY.md) are adapted from [thunderbird-cli](https://github.com/vitalio-sh/thunderbird-cli) by Vitalii Ionov, used under the MIT License. [NOTICE](NOTICE) lists the files and keeps that licence. The host links Go libraries under the Apache-2.0, MIT and BSD licences; [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES) carries their notices and ships inside every host package.
 
 Thunderbird is a trademark of the Mozilla Foundation. Claude, Codex and Cursor are the names of products of Anthropic, OpenAI and Anysphere; they appear here only to say which apps MCP for Thunderbird works with, and none of those companies makes, endorses or is affiliated with it.
