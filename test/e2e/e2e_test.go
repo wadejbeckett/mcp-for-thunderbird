@@ -1637,6 +1637,156 @@ func TestE2EInjectionDefaults(t *testing.T) {
 	t.Logf("GreenMail SMTP received %d messages before and after; users %v", smtpAfter, usersAfter)
 }
 
+// contactsSeedScript adds (SEED true) or removes (SEED false) the contacts
+// TestE2EContacts looks up: in the Personal Address Book, Quinn with two
+// addresses, Rae, and the mailing list "Econtact board" holding both; in
+// Collected Addresses, a second copy of Quinn. It returns the two books'
+// names and the number of seeded cards and lists it found afterwards.
+const contactsSeedScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const { VCardUtils } = ChromeUtils.importESModule("resource:///modules/VCardUtils.sys.mjs");
+  const seed = SEED;
+  const pab = MailServices.ab.getDirectory("jsaddrbook://abook.sqlite");
+  const history = MailServices.ab.getDirectory("jsaddrbook://history.sqlite");
+  const card = (fn, emails) =>
+    VCardUtils.vCardToAbCard(["BEGIN:VCARD", "VERSION:4.0", "FN:" + fn, ...emails.map((e) => "EMAIL:" + e), "END:VCARD", ""].join("\r\n"));
+  const ours = (dir) => dir.childCards.filter((c) => !c.isMailList && /e2econtact\.test/.test(c.primaryEmail));
+  const lists = () => pab.childNodes.filter((l) => l.dirName === "Econtact board");
+  for (const l of lists()) pab.deleteDirectory(l);
+  for (const dir of [pab, history]) {
+    const old = ours(dir);
+    if (old.length) dir.deleteCards(old);
+  }
+  if (seed) {
+    const quinn = pab.addCard(card("Quinn Econtact", ["quinn@e2econtact.test", "quinn@work.e2econtact.test"]));
+    const rae = pab.addCard(card("Rae Econtact", ["rae@e2econtact.test"]));
+    history.addCard(card("Quinn E.", ["QUINN@work.e2econtact.test", "quinn@e2econtact.test"]));
+    const ml = Cc["@mozilla.org/addressbook/directoryproperty;1"].createInstance(Ci.nsIAbDirectory);
+    ml.isMailList = true;
+    ml.dirName = "Econtact board";
+    ml.listNickName = "ecboard";
+    ml.description = "";
+    const list = pab.addMailList(ml);
+    list.addCard(quinn);
+    list.addCard(rae);
+  }
+  return { pab: pab.dirName, history: history.dirName, cards: ours(pab).length + ours(history).length, lists: lists().length };
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+type contactsSeed struct {
+	PAB     string `json:"pab"`
+	History string `json:"history"`
+	Cards   int    `json:"cards"`
+	Lists   int    `json:"lists"`
+	Error   string `json:"error"`
+}
+
+type contactResult struct {
+	Contacts []struct {
+		Name   string   `json:"name"`
+		Emails []string `json:"emails"`
+		Books  []string `json:"books"`
+	} `json:"contacts"`
+	Lists []struct {
+		Name     string `json:"name"`
+		NickName string `json:"nickName"`
+		Book     string `json:"book"`
+		Members  []struct {
+			Name   string   `json:"name"`
+			Emails []string `json:"emails"`
+		} `json:"members"`
+		MembersTruncated bool `json:"membersTruncated"`
+	} `json:"lists"`
+	Truncated bool `json:"truncated"`
+}
+
+// TestE2EContacts looks people up with mail_contacts in Thunderbird's own
+// address books: a person in the Personal Address Book and in Collected
+// Addresses comes back once with both book names, truncated says when
+// more people matched than the limit, book limits the search to one book,
+// include_lists returns the mailing list with its members, and an account
+// is refused.
+func TestE2EContacts(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	origTools := toolNames(t, cs)
+	t.Cleanup(func() {
+		var ignored contactsSeed
+		marionette(t, strings.Replace(contactsSeedScript, "SEED", "false", 1), &ignored)
+		addonSettings(t, orig)
+		waitTools(t, cs, origTools)
+	})
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	groups := map[string]any{}
+	for k, v := range orig["groups"].(map[string]any) {
+		groups[k] = v
+	}
+	groups["contacts"] = true
+	next["groups"] = groups
+	addonSettings(t, next)
+	waitTools(t, cs, append(append([]string{}, origTools...), contactsTools...))
+
+	var seed contactsSeed
+	marionette(t, strings.Replace(contactsSeedScript, "SEED", "true", 1), &seed)
+	if seed.Error != "" || seed.Cards != 3 || seed.Lists != 1 {
+		t.Fatalf("seeding contacts: %+v", seed)
+	}
+
+	var r contactResult
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact"}, &r)
+	if len(r.Contacts) != 2 || r.Truncated || r.Lists != nil {
+		t.Fatalf("mail_contacts econtact: %+v", r)
+	}
+	quinn, rae := r.Contacts[0], r.Contacts[1]
+	if quinn.Name != "Quinn Econtact" || strings.Join(quinn.Books, "|") != seed.PAB+"|"+seed.History || len(quinn.Emails) != 2 {
+		t.Fatalf("Quinn: %+v, want one entry in %q and %q", quinn, seed.PAB, seed.History)
+	}
+	if rae.Name != "Rae Econtact" || strings.Join(rae.Books, "|") != seed.PAB {
+		t.Fatalf("Rae: %+v", rae)
+	}
+
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact", "limit": 1}, &r)
+	if len(r.Contacts) != 1 || !r.Truncated {
+		t.Fatalf("mail_contacts limit 1: %+v", r)
+	}
+
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact", "book": seed.History}, &r)
+	if len(r.Contacts) != 1 || r.Contacts[0].Name != "Quinn E." || strings.Join(r.Contacts[0].Books, "|") != seed.History {
+		t.Fatalf("mail_contacts book %q: %+v", seed.History, r)
+	}
+
+	r = contactResult{}
+	callOK(t, cs, "mail_contacts", map[string]any{"query": "econtact board", "include_lists": true}, &r)
+	if len(r.Contacts) != 0 || len(r.Lists) != 1 {
+		t.Fatalf("mail_contacts include_lists: %+v", r)
+	}
+	l := r.Lists[0]
+	var members []string
+	for _, m := range l.Members {
+		members = append(members, m.Name)
+	}
+	sort.Strings(members)
+	if l.Name != "Econtact board" || l.NickName != "ecboard" || l.Book != seed.PAB || l.MembersTruncated ||
+		strings.Join(members, "|") != "Quinn Econtact|Rae Econtact" {
+		t.Fatalf("mailing list: %+v", l)
+	}
+
+	if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "account": "account1"}); !isErr || !strings.HasPrefix(text, "invalid_argument:") {
+		t.Fatalf("mail_contacts with account: %v %s", isErr, text)
+	}
+	if text, isErr := call(t, cs, "mail_contacts", map[string]any{"query": "econtact", "book": "No such book"}); !isErr || !strings.HasPrefix(text, "not_found:") {
+		t.Fatalf("mail_contacts unknown book: %v %s", isErr, text)
+	}
+}
+
 // TestE2EConnectRestart checks that one connect-mode session survives
 // sigImagePNG is a 1x1 PNG the signature image test serves.
 const sigImagePNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="

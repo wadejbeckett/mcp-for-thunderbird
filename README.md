@@ -24,7 +24,7 @@ The tools come in groups, and you switch each group on or off in the add-on's op
 | Read | `mail_accounts`, `mail_folders`, `mail_search`, `mail_read`, `mail_thread`, `mail_attachment`, `mail_filter_suggest` | List accounts and folders; search mail; read one message; list the messages in a conversation; save an attachment to a folder you choose; describe a message filter for you to create. |
 | Organise | `mail_mark`, `mail_tag`, `mail_move`, `mail_archive`, `mail_trash` | Mark as read or flagged; add or remove tags; move or copy to another folder; archive; move to Trash. |
 | Draft | `mail_draft`, `mail_compose` | Save a new message, reply or forward to Drafts (Thunderbird 153 or later); open a filled-in compose window for you to check and send. |
-| Contacts | `mail_contacts` | Look people up in your address books. |
+| Contacts | `mail_contacts` | Look people up in your address books, and optionally find mailing lists with their members. |
 | Sending | `mail_send` | Send a message with no window, only to recipients you have listed (Thunderbird 153 or later). Off unless you turn it on. |
 
 AI apps write the body of a message as plain text, and the add-on turns it into an HTML message: a blank line starts a new paragraph, a paragraph of lines that start with `- ` or `* ` becomes a bulleted list, and a paragraph of lines that start with `1. `, `2. ` and so on becomes a numbered list. An indented line continues the list item above it. A list needs a blank line between it and the text around it; otherwise its lines stay as typed.

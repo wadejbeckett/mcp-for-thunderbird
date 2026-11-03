@@ -97,7 +97,8 @@ function checkSpecialUse(uses, where) {
 
 // createMessenger returns a fresh mock. `accounts` is a list of
 // {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]}}.
-// `books` is a list of {id, name, contacts: [vCard string, ...]}.
+// `books` is a list of {id, name, remote?, contacts: [vCard string, ...],
+// lists?: [{name, nickName?, members: [vCard string, ...]}]}.
 export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153 } = {}) {
   const local = new Map();
   const onChanged = event();
@@ -468,6 +469,20 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
             });
           }
           return out;
+        },
+      },
+      mailingLists: {
+        list: async (parentId) => {
+          const b = books.find((x) => x.id === parentId);
+          if (!b) throw new Error(`addressBook with id=${parentId} could not be found.`);
+          return (b.lists || []).map((l, i) => ({ id: `${b.id}-list${i}`, parentId: b.id, type: "mailingList", name: l.name, nickName: l.nickName ?? "", description: "" }));
+        },
+        listMembers: async (id) => {
+          for (const b of books) {
+            const i = (b.lists || []).findIndex((_, j) => `${b.id}-list${j}` === id);
+            if (i >= 0) return b.lists[i].members.map((vCard, j) => ({ id: `${id}-m${j}`, parentId: id, type: "contact", vCard }));
+          }
+          throw new Error(`mailingList with id=${id} could not be found.`);
         },
       },
     },
