@@ -115,6 +115,21 @@ test("tools are re-sent when settings change in storage", async () => {
   assert.deepEqual(port.sentOfType("config").at(-1), { type: "config", attachmentDir: "/elsewhere" });
 });
 
+test("an excluded folder the user renames or moves stays excluded", async () => {
+  await save({ excludedFolders: [{ accountId: "a1", path: "/Private" }] });
+  await bg.start();
+  const f = (path) => ({ accountId: "a1", path, name: path.split("/").pop() });
+  mock.messenger.folders.onRenamed.fire(f("/Private"), f("/Private2"));
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "/Private2" }]);
+  mock.messenger.folders.onMoved.fire(f("/Private2"), f("/Archive/Private2"));
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "/Archive/Private2" }]);
+  bg.stop();
+  assert.equal(mock.messenger.folders.onRenamed.listeners.length, 0);
+  assert.equal(mock.messenger.folders.onMoved.listeners.length, 0);
+});
+
 test("an attachment folder changed while the hello is built still reaches the host", async () => {
   // With direct send on, building the hello waits for Thunderbird's
   // permission check; the folder is changed in exactly that gap.

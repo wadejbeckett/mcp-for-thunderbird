@@ -147,6 +147,48 @@ func TestAttachmentPart(t *testing.T) {
 	}
 }
 
+// TestReadFoldersAccountsDescriptions checks that the tools describe the
+// fields they return: identities and the default account, folder counts
+// and quota, attachment types, and every header on request.
+func TestReadFoldersAccountsDescriptions(t *testing.T) {
+	for _, w := range []string{"identities", "default"} {
+		if !strings.Contains(byName(t, "mail_accounts").Description, w) {
+			t.Errorf("mail_accounts description must mention %q", w)
+		}
+	}
+	for _, w := range []string{"new", "quota", "lastUsed", "favorite", "null", "note"} {
+		if !strings.Contains(byName(t, "mail_folders").Description, w) {
+			t.Errorf("mail_folders description must mention %q", w)
+		}
+	}
+	// lastUsed is Thunderbird's MRUTime, not only when the user opened the folder
+	f := byName(t, "mail_folders").Description
+	for _, w := range []string{"moved", "delivered", "could not read", "in time"} {
+		if !strings.Contains(f, w) {
+			t.Errorf("mail_folders description must mention %q", w)
+		}
+	}
+	if strings.Contains(f, "when the user last opened it") {
+		t.Error("mail_folders description must not say lastUsed is only when the user opened the folder")
+	}
+	r := byName(t, "mail_read").Description
+	for _, w := range []string{"normal", "linked", "cloudFile", "detached", "deleted", "link", "attachmentsTruncated", "allHeaders", "Bcc", "Resent-Bcc", "-bcc"} {
+		if !strings.Contains(r, w) {
+			t.Errorf("mail_read description must mention %q", w)
+		}
+	}
+	h, ok := props(t, "mail_read")["headers"]
+	if !ok || h["type"] != "boolean" || h["description"] == "" {
+		t.Errorf("mail_read must take an optional headers boolean: %v", h)
+	}
+	if req := byName(t, "mail_attachment").Input["required"].([]string); len(req) != 1 || req[0] != "id" {
+		t.Errorf("mail_attachment must require only id, so a part alone fetches a nameless attachment: %v", req)
+	}
+	if !strings.Contains(byName(t, "mail_attachment").Description, "placeholder") {
+		t.Error("mail_attachment description must say attachments not in the message are refused")
+	}
+}
+
 func TestLimits(t *testing.T) {
 	if m := props(t, "mail_search")["limit"]["maximum"]; m != 200 {
 		t.Errorf("limit maximum = %v", m)

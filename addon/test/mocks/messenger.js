@@ -11,7 +11,8 @@
 // oldest-first ordering, never-settling queries, raw sources, attachments
 // and address books. Task 12 added getFull (plain and HTML parts, extra
 // headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
-// saveMessage, import, sendMessage, compose and messengerUtilities;
+// saveMessage, import, sendMessage, compose and messengerUtilities, and
+// folders.onRenamed and onMoved to fire by hand;
 // `release` below 153 takes away what Thunderbird 140 ESR lacks. Message
 // lists, the address, junk, me and tag filters, getHeaders and priority
 // follow Thunderbird 153.6 (ExtensionMessages.sys.mjs).
@@ -100,9 +101,12 @@ function checkSpecialUse(uses, where) {
 
 // createMessenger returns a fresh mock. `accounts` is a list of
 // {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]},
-// draftsIn?: account id whose Drafts folder saveMessage uses}.
+// draftsIn?: account id whose Drafts folder saveMessage uses,
+// favorites?: [path, ...], folderInfo?: {path: {newMessageCount, quota, lastUsed, ...}}}.
+// accounts.getDefault gives the account `defaultAccount` names (an id), or
+// none when it is not given.
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
-export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153 } = {}) {
+export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153, defaultAccount = null } = {}) {
   const local = new Map();
   const onChanged = event();
   const ports = [];
@@ -114,6 +118,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   let optionsOpened = 0;
 
   const folderList = [];
+  // folder id -> extra MailFolderInfo fields
+  const folderInfo = new Map();
   for (const a of accounts) {
     for (const path of a.folders || []) {
       folderList.push({
@@ -122,8 +128,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         path,
         name: path.split("/").pop(),
         isRoot: false,
+        isFavorite: Boolean(a.favorites && a.favorites.includes(path)),
         specialUse: (a.specialUse && a.specialUse[path]) || [],
       });
+      if (a.folderInfo && a.folderInfo[path]) folderInfo.set(folderList.at(-1).id, a.folderInfo[path]);
       checkSpecialUse(folderList.at(-1).specialUse, `fixture ${a.id}:${path}`);
     }
   }
@@ -228,8 +236,14 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const a = accounts.find((x) => x.id === id);
         return a ? { id: a.id, name: a.name, type: a.type, identities: clone(a.identities || []) } : null;
       },
+      getDefault: async () => {
+        const a = accounts.find((x) => x.id === defaultAccount);
+        return a ? { id: a.id, name: a.name, type: a.type, identities: clone(a.identities || []) } : null;
+      },
     },
     folders: {
+      onRenamed: event(),
+      onMoved: event(),
       query: async (q = {}) => {
         checkSpecialUse(q.specialUse, "queryInfo");
         return folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path) && (q.specialUse == null || q.specialUse.some((u) => f.specialUse.includes(u)))).map(clone);
@@ -244,7 +258,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const f = folderList.find((x) => x.id === id);
         if (!f) throw new Error(`Folder not found: ${id}`);
         const hs = [...store.values()].filter((h) => h.folder.id === id);
-        return { totalMessageCount: hs.length, unreadMessageCount: hs.filter((h) => !h.read).length };
+        return { totalMessageCount: hs.length, unreadMessageCount: hs.filter((h) => !h.read).length, newMessageCount: 0, ...clone(folderInfo.get(id) || {}) };
       },
     },
     messages: {

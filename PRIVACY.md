@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 2 November 2026.
+Last updated: 3 November 2026.
 
 This policy covers MCP for Thunderbird: the Thunderbird add-on and the host program it works with. MCP for Thunderbird lets AI apps on your computer, such as Claude Desktop, Claude Code, Codex or Cursor, work with the mail in Thunderbird, within limits you set in Thunderbird. MCP for Thunderbird is published by Wade J. Beckett, whose company is Noiz.
 
@@ -20,7 +20,7 @@ MCP for Thunderbird has two parts. The add-on runs in Thunderbird. The host is a
 
 Some more detail on each point:
 
-- **Only what is asked for, within your settings.** A tool result exists only because an AI app asked for it, and only for the accounts you ticked, outside the folders you excluded, and in the tool groups you turned on. Message headers here means sender, recipients, Reply-To, subject, date, folder, flags and tags, the names, sizes and types of attachments, and the sender authentication results (SPF, DKIM and DMARC) your mail server recorded. Search results never include message text. The text of a message is sent only when an AI app asks to read that one message.
+- **Only what is asked for, within your settings.** A tool result exists only because an AI app asked for it, and only for the accounts you ticked, outside the folders you excluded, and in the tool groups you turned on. Message headers here means sender, recipients, Reply-To, subject, date, folder, flags and tags, the names, sizes and types of attachments and the link of an attachment the message only links to, and the sender authentication results (SPF, DKIM and DMARC) your mail server recorded. When an AI app asks for them, it also gets every other header of the one message it reads, such as Received and List-Unsubscribe, but never Bcc, Resent-Bcc or any other header that lists blind-copy recipients. Search results never include message text. The text of a message is sent only when an AI app asks to read that one message.
 - **Attachments.** When an AI app saves an attachment, its bytes go to the native program, which writes them into the attachment folder you chose in the options. A plain-text attachment can instead be returned as text. Attachments over 50 MiB are refused.
 - **Contacts.** Address book entries (names, email addresses and organisation) are sent only when you have turned on the contacts group.
 - **The other direction.** The native program sends the add-on the AI app's requests: for example search terms, message ids, and the recipients and text of a draft. When a draft has attachments, the native program reads those files from your attachment folder and passes them to the add-on.

@@ -561,6 +561,293 @@ func TestE2ENullOptionals(t *testing.T) {
 	}
 }
 
+// TestE2EAccountsAndFolders checks what mail_accounts and mail_folders
+// take from Thunderbird: every identity, the default account
+// (accounts.getDefault, make-profile.sh sets account1), and each folder's
+// new count, quota, last-used date and favourite (folders.getFolderInfo).
+func TestE2EAccountsAndFolders(t *testing.T) {
+	cs := httpSession(t)
+	var accounts struct {
+		Accounts []struct {
+			ID         string `json:"id"`
+			Address    string `json:"address"`
+			Default    bool   `json:"default"`
+			Identities []struct {
+				ID, Email, Name string
+				Default         bool
+			} `json:"identities"`
+		} `json:"accounts"`
+	}
+	callOK(t, cs, "mail_accounts", map[string]any{}, &accounts)
+	byID := map[string]int{}
+	for i, a := range accounts.Accounts {
+		byID[a.ID] = i
+	}
+	a1, a3 := accounts.Accounts[byID["account1"]], accounts.Accounts[byID["account3"]]
+	if !a1.Default || a3.Default {
+		t.Fatalf("default account: account1 %v, account3 %v, want true, false", a1.Default, a3.Default)
+	}
+	if len(a1.Identities) != 1 || a1.Identities[0].ID != "id1" || a1.Identities[0].Email != "test@localhost" ||
+		a1.Identities[0].Name != "Test User" || !a1.Identities[0].Default {
+		t.Fatalf("account1 identities = %+v", a1.Identities)
+	}
+	if len(a3.Identities) != 1 || a3.Identities[0].Email != "other@localhost" {
+		t.Fatalf("account3 identities = %+v", a3.Identities)
+	}
+
+	var folders struct {
+		Folders []map[string]json.RawMessage `json:"folders"`
+		Note    string                       `json:"note"`
+	}
+	callOK(t, cs, "mail_folders", map[string]any{"account": "account1"}, &folders)
+	if folders.Note != "" {
+		t.Fatalf("mail_folders note: %s", folders.Note)
+	}
+	seen := false
+	for _, f := range folders.Folders {
+		var path string
+		json.Unmarshal(f["path"], &path)
+		for _, k := range []string{"new", "quota", "lastUsed", "favorite"} {
+			if _, ok := f[k]; !ok {
+				t.Fatalf("folder %s lacks %q: %v", path, k, f)
+			}
+		}
+		var n *int
+		var quota []map[string]any
+		var fav bool
+		if json.Unmarshal(f["new"], &n) != nil || n == nil || json.Unmarshal(f["quota"], &quota) != nil || quota == nil ||
+			json.Unmarshal(f["favorite"], &fav) != nil {
+			t.Fatalf("folder %s: new %s, quota %s, favorite %s", path, f["new"], f["quota"], f["favorite"])
+		}
+		if string(f["lastUsed"]) != "null" {
+			var when string
+			if json.Unmarshal(f["lastUsed"], &when) != nil {
+				t.Fatalf("folder %s lastUsed %s", path, f["lastUsed"])
+			}
+			if _, err := time.Parse(time.RFC3339, when); err != nil {
+				t.Fatalf("folder %s lastUsed %q: %v", path, when, err)
+			}
+		}
+		seen = true
+	}
+	if !seen {
+		t.Fatal("mail_folders listed no folders")
+	}
+}
+
+// TestE2EAttachmentKinds reads the seeded message with one attachment of
+// each kind (fixtures/seed/attachment-kinds.eml): a windows-1252 text,
+// one with no file name, a FileLink, a linked file, a deleted one and a
+// detached PDF. Its headers include Resent-Bcc, X-Original-Bcc and an
+// Authentication-Results look-alike, none of which allHeaders returns. The
+// type comes from the part's own headers, which Thunderbird gives from
+// 140; 153 also names the FileLink by its real name.
+func TestE2EAttachmentKinds(t *testing.T) {
+	cs := httpSession(t)
+	res, _ := searchUntil(t, cs, map[string]any{"subject": "Attachment kinds"}, "Attachment kinds")
+	id := find(res, "Attachment kinds").ID
+
+	type attachment struct {
+		Name, ContentType, Part, Type string
+		Link                          *string
+	}
+	var read struct {
+		Attachments []attachment        `json:"attachments"`
+		AllHeaders  map[string][]string `json:"allHeaders"`
+	}
+	text, isErr := call(t, cs, "mail_read", map[string]any{"id": id, "headers": true})
+	if isErr {
+		t.Fatalf("mail_read: %s", text)
+	}
+	if err := json.Unmarshal([]byte(text), &read); err != nil {
+		t.Fatal(err)
+	}
+	if got := read.AllHeaders["x-seed-check"]; len(got) != 1 || got[0] != "kinds" {
+		t.Fatalf("allHeaders x-seed-check = %v in %v", got, read.AllHeaders)
+	}
+	if got := read.AllHeaders["message-id"]; len(got) != 1 || got[0] != "<attachment-kinds@seed.test>" {
+		t.Fatalf("allHeaders message-id = %v", got)
+	}
+	if _, ok := read.AllHeaders["bcc"]; ok || strings.Contains(text, "secret-bcc") {
+		t.Fatalf("mail_read returned the Bcc header: %v", read.AllHeaders["bcc"])
+	}
+	// Every blind-recipient header is withheld, not only Bcc.
+	for _, h := range []string{"resent-bcc", "x-original-bcc"} {
+		if _, ok := read.AllHeaders[h]; ok {
+			t.Errorf("mail_read returned %s: %v", h, read.AllHeaders[h])
+		}
+	}
+	if strings.Contains(text, "resent-secret") || strings.Contains(text, "original-secret") {
+		t.Errorf("mail_read returned a blind recipient: %s", text)
+	}
+	// A look-alike name (raw bytes after it, which Thunderbird keeps as
+	// U+0080 to U+00FF; 0xAD is a soft hyphen that cleaning would strip)
+	// neither appears nor hides the real header's value.
+	if got := read.AllHeaders["authentication-results"]; len(got) != 1 || got[0] != "mx.seed.test; spf=fail smtp.mailfrom=acme.test" {
+		t.Errorf("allHeaders authentication-results = %q", got)
+	}
+	for k := range read.AllHeaders {
+		for _, c := range k {
+			if c < 0x21 || c > 0x7e || c == ':' {
+				t.Errorf("allHeaders has a name that is not a header name: %q", k)
+				break
+			}
+		}
+	}
+
+	current := backgroundSave(os.Getenv("MFT_E2E_TB_VERSION"))
+	byName := map[string]attachment{}
+	nameless := attachment{}
+	for _, a := range read.Attachments {
+		if a.Name == "" {
+			nameless = a
+		}
+		byName[a.Name] = a
+	}
+	// On 153 the FileLink is listed under its real name.
+	cloud := "big.zip"
+	if !current {
+		cloud = "big.zip.html"
+	}
+	// g.pdf keeps its real content type: only its headers say it was
+	// detached, and Thunderbird 153.6 itself calls it normal.
+	want := map[string]string{"menu.txt": "normal", "plan.odt": "linked", cloud: "cloudFile", "Deleted: old.doc": "deleted", "g.pdf": "detached"}
+	links := map[string]string{"plan.odt": "https://files.example.test/plan.odt", cloud: "https://cloud.example.test/f/big.zip"}
+	for name, typ := range want {
+		a, ok := byName[name]
+		if !ok {
+			t.Fatalf("no attachment %q in %+v", name, read.Attachments)
+		}
+		if a.Type != typ {
+			t.Errorf("%s: type %q, want %q", name, a.Type, typ)
+		}
+		if l, ok := links[name]; ok && (a.Link == nil || *a.Link != l) {
+			t.Errorf("%s: link %v, want %q", name, a.Link, l)
+		} else if !ok && a.Link != nil {
+			t.Errorf("%s: link %q, want none", name, *a.Link)
+		}
+	}
+	if nameless.Part == "" || nameless.Type != "normal" {
+		t.Fatalf("no nameless attachment in %+v", read.Attachments)
+	}
+
+	// The text is decoded in the charset of the attachment's own header.
+	var menu struct{ Text string }
+	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "name": "menu.txt"}, &menu)
+	if inner, ok := unwrap(menu.Text); !ok || strings.TrimSpace(inner) != "Menu: café 5€" {
+		t.Fatalf("menu.txt = %q", menu.Text)
+	}
+
+	// A part alone fetches the attachment with no name.
+	var saved struct{ Saved string }
+	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "part": nameless.Part}, &saved)
+	data, err := os.ReadFile(saved.Saved)
+	if err != nil || string(data) != "nameless-bytes" {
+		t.Fatalf("nameless attachment saved as %q: %v %q", saved.Saved, err, data)
+	}
+
+	// Placeholders are refused.
+	for _, name := range []string{"Deleted: old.doc", "g.pdf", "plan.odt", cloud} {
+		text, isErr := call(t, cs, "mail_attachment", map[string]any{"id": id, "name": name, "part": byName[name].Part})
+		if !isErr || !strings.HasPrefix(text, "refused:") {
+			t.Errorf("mail_attachment %s: %v %s", name, isErr, text)
+		}
+	}
+}
+
+// localFolderScript works on Local Folders in the e2e Thunderbird, as the
+// user does in the folder pane: "create" makes MftExcluded and MftArchive,
+// "rename" renames MftExcluded to MftExcluded2, and "move" moves
+// MftExcluded2 into MftArchive. It returns "ok" once the change is done.
+const localFolderScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const root = MailServices.accounts.localFoldersServer.rootFolder;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const child = (parent, name) => parent.subFolders.find((f) => f.name === name) || null;
+  const until = async (fn) => {
+    for (let i = 0; i < 40; i++) {
+      if (fn()) return "ok";
+      await sleep(250);
+    }
+    return "timed out";
+  };
+  const step = %q;
+  if (step === "create") {
+    for (const name of ["MftExcluded", "MftArchive"]) if (!child(root, name)) root.createSubfolder(name, null);
+    return until(() => child(root, "MftExcluded") && child(root, "MftArchive"));
+  }
+  if (step === "rename") {
+    child(root, "MftExcluded").rename("MftExcluded2", null);
+    return until(() => child(root, "MftExcluded2"));
+  }
+  if (step === "move") {
+    const archive = child(root, "MftArchive");
+    MailServices.copy.copyFolder(child(root, "MftExcluded2"), archive, true, null, null);
+    return until(() => child(archive, "MftExcluded2"));
+  }
+  return "unknown step";
+})().then(resolve, (e) => resolve("error: " + e));
+`
+
+// excludedPaths gives the add-on's excluded folders as account:path.
+func excludedPaths(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	list, _ := addonSettings(t, nil)["excludedFolders"].([]any)
+	for _, v := range list {
+		if ex, ok := v.(map[string]any); ok {
+			out = append(out, fmt.Sprintf("%v:%v", ex["accountId"], ex["path"]))
+		}
+	}
+	return out
+}
+
+// TestE2EExcludedFolderFollows renames and then moves an excluded folder in
+// Thunderbird: its exclusion follows it, from folders.onRenamed and
+// onMoved, so the folder does not come back into reach under a new path.
+func TestE2EExcludedFolderFollows(t *testing.T) {
+	before := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, before) })
+	folder := func(step string) {
+		t.Helper()
+		var got string
+		marionette(t, fmt.Sprintf(localFolderScript, step), &got)
+		if got != "ok" {
+			t.Fatalf("local folder %s: %s", step, got)
+		}
+	}
+	waitExcluded := func(want ...string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			got := excludedPaths(t)
+			if strings.Join(got, ",") == strings.Join(want, ",") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("excluded folders = %v, want %v", got, want)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	folder("create")
+	next := map[string]any{}
+	for k, v := range before {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{
+		map[string]any{"accountId": "account2", "path": "/MftExcluded"},
+		map[string]any{"accountId": "account2", "path": "/MftExcludedNot"},
+	}
+	addonSettings(t, next)
+	folder("rename")
+	waitExcluded("account2:/MftExcluded2", "account2:/MftExcludedNot")
+	folder("move")
+	waitExcluded("account2:/MftArchive/MftExcluded2", "account2:/MftExcludedNot")
+}
+
 // TestE2EConnectStdio is the Claude Code check done by a go-sdk client:
 // connect mode over stdio, asking for today's unread mail.
 func TestE2EConnectStdio(t *testing.T) {
