@@ -436,3 +436,15 @@ func TestTagsTool(t *testing.T) {
 		t.Error("mail_tag description must point to mail_tags")
 	}
 }
+
+// TestFoldersDescribesNewFolders: a new folder in an account with
+// excluded folders is hidden until the user checks the excluded folders
+// (addon/src/exclusions.js), and the description says so.
+func TestFoldersDescribesNewFolders(t *testing.T) {
+	d := byName(t, "mail_folders").Description
+	for _, want := range []string{"leaving out folders the user has excluded", "has appeared since the user last checked", "until the user checks them again"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("mail_folders description lacks %q: %s", want, d)
+		}
+	}
+}

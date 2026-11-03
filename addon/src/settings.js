@@ -3,8 +3,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Settings live in storage.local under "settings". They are changed only
-// from the add-on's own pages, never over MCP, and by followFolder when
-// the user renames or moves an excluded folder in Thunderbird.
+// from the add-on's own pages, never over MCP. The background changes
+// them too, but only to follow what Thunderbird reports: excluded folders
+// that were renamed or moved, the folders seen in accounts with excluded
+// folders (knownFolders, exclusions.js) and accounts that were deleted.
 
 import { fail } from "./errors.js";
 
@@ -32,6 +34,7 @@ export const DEFAULTS = Object.freeze({
   send: Object.freeze({ enabled: false, allow: Object.freeze([]) }),
   attachmentDir: "",
   excludedFolders: Object.freeze([]),
+  knownFolders: Object.freeze({}),
   paused: false,
   setupDone: false,
   instance: "",
@@ -136,48 +139,25 @@ export function load() {
   return serial(loadNow);
 }
 
-// followedExcluded rewrites the excluded folders after Thunderbird renamed
-// or moved folder `from` to `to` (MailFolders): an entry for that folder,
-// or for one under it, moves with it, also to another account. Null when
-// no entry changed.
-export function followedExcluded(list, from, to) {
-  if (!Array.isArray(list) || !from || !to || typeof from.path !== "string" || typeof to.path !== "string") return null;
-  if (typeof from.accountId !== "string" || typeof to.accountId !== "string") return null;
-  const old = from.path.replace(/\/+$/, "");
-  const now = to.path.replace(/\/+$/, "");
-  if (old === "" || now === "") return null;
-  let changed = false;
-  const out = list.map((ex) => {
-    if (!ex || ex.accountId !== from.accountId || typeof ex.path !== "string") return ex;
-    const p = ex.path.replace(/\/+$/, "");
-    if (p !== old && !p.startsWith(old + "/")) return ex;
-    changed = true;
-    return { accountId: to.accountId, path: now + p.slice(old.length) };
-  });
-  return changed ? out : null;
-}
-
-// followFolder keeps an excluded folder excluded after the user renames
-// or moves it in Thunderbird (folders.onRenamed and onMoved), since
-// exclusion is matched by path.
-export function followFolder(from, to) {
-  return serial(async () => {
-    const current = await loadNow();
-    const next = followedExcluded(current.excludedFolders, from, to);
-    if (!next) return current;
-    const s = { ...current, excludedFolders: next };
-    await globalThis.messenger.storage.local.set({ [STORAGE_KEY]: s });
-    return s;
-  });
+async function saveNow(current, patch) {
+  const s = merge(current, patch);
+  if (patch && "excludedFolders" in patch) s.excludedFolders = normaliseExcluded(patch.excludedFolders);
+  s.instance = current.instance;
+  await globalThis.messenger.storage.local.set({ [STORAGE_KEY]: s });
+  return s;
 }
 
 export function save(patch) {
+  return serial(async () => saveNow(await loadNow(), patch));
+}
+
+// update saves the patch that fn(current settings) returns, in the same
+// turn as the load, so a change made meanwhile is not lost. fn returning
+// null saves nothing. It resolves to the settings now stored.
+export function update(fn) {
   return serial(async () => {
     const current = await loadNow();
-    const s = merge(current, patch);
-    if (patch && "excludedFolders" in patch) s.excludedFolders = normaliseExcluded(patch.excludedFolders);
-    s.instance = current.instance;
-    await globalThis.messenger.storage.local.set({ [STORAGE_KEY]: s });
-    return s;
+    const patch = fn(current);
+    return patch ? saveNow(current, patch) : current;
   });
 }

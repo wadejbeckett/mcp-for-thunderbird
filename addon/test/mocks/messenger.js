@@ -18,6 +18,10 @@
 // follow Thunderbird 153.6 (ExtensionMessages.sys.mjs).
 // The organise handlers' tests added messages.onMoved and onCopied,
 // archive skipping and copying, and folders.getFolderCapabilities.
+// Folder and account events, with helpers that rename, move, copy,
+// create and delete folders and add and remove accounts, getBrowserInfo
+// and permissions.remove came with the folder exclusions that follow
+// renames.
 
 export function event() {
   const listeners = [];
@@ -109,7 +113,8 @@ function checkSpecialUse(uses, where) {
 // cannot hold messages (getFolderCapabilities says canAddMessages: false),
 // and a noDelete folder cannot delete them (canDeleteMessages: false).
 // accounts.getDefault gives the account `defaultAccount` names (an id), or
-// none when it is not given.
+// none when it is not given. A folder may also be {path, isVirtual?,
+// isTag?, isUnified?}.
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
 export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153, defaultAccount = null } = {}) {
   const local = new Map();
@@ -119,6 +124,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const actionState = { badgeText: "", title: "", badgeColor: null };
   const perms = new Set(granted);
   const requested = [];
+  const removed = [];
   const denyRequests = { value: false };
   let optionsOpened = 0;
 
@@ -127,17 +133,19 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   const folderInfo = new Map();
   const noMessages = new Set();
   const noDelete = new Set();
+  const newFolder = (accountId, path, flags = {}, specialUse = []) => ({
+    id: `${accountId}:/${path}`,
+    accountId,
+    path,
+    name: path.split("/").pop(),
+    isRoot: false,
+    ...flags,
+    specialUse,
+  });
   for (const a of accounts) {
-    for (const path of a.folders || []) {
-      folderList.push({
-        id: `${a.id}:/${path}`,
-        accountId: a.id,
-        path,
-        name: path.split("/").pop(),
-        isRoot: false,
-        isFavorite: Boolean(a.favorites && a.favorites.includes(path)),
-        specialUse: (a.specialUse && a.specialUse[path]) || [],
-      });
+    for (const entry of a.folders || []) {
+      const { path, ...flags } = typeof entry === "string" ? { path: entry } : entry;
+      folderList.push(newFolder(a.id, path, { isFavorite: Boolean(a.favorites && a.favorites.includes(path)), ...flags }, (a.specialUse && a.specialUse[path]) || []));
       if (a.folderInfo && a.folderInfo[path]) folderInfo.set(folderList.at(-1).id, a.folderInfo[path]);
       if ((a.noMessages || []).includes(path)) noMessages.add(folderList.at(-1).id);
       if ((a.noDelete || []).includes(path)) noDelete.add(folderList.at(-1).id);
@@ -228,6 +236,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         ports.push(p);
         return p;
       },
+      getBrowserInfo: async () => ({ name: "Thunderbird", vendor: "Mozilla", version: `${release}.6.0`, buildID: "20261026222624" }),
       onInstalled: event(),
       onStartup: event(),
       onMessage: event(),
@@ -269,10 +278,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const a = accounts.find((x) => x.id === defaultAccount);
         return a ? { id: a.id, name: a.name, type: a.type, identities: clone(a.identities || []) } : null;
       },
+      onCreated: event(),
+      onDeleted: event(),
     },
     folders: {
-      onRenamed: event(),
-      onMoved: event(),
       query: async (q = {}) => {
         checkSpecialUse(q.specialUse, "queryInfo");
         return folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path) && (q.specialUse == null || q.specialUse.some((u) => f.specialUse.includes(u)))).map(clone);
@@ -294,6 +303,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         const hs = [...store.values()].filter((h) => h.folder.id === id);
         return { totalMessageCount: hs.length, unreadMessageCount: hs.filter((h) => !h.read).length, newMessageCount: 0, ...clone(folderInfo.get(id) || {}) };
       },
+      onCreated: event(),
+      onDeleted: event(),
+      onRenamed: event(),
+      onMoved: event(),
+      onCopied: event(),
     },
     messages: {
       get: async (id) => {
@@ -629,6 +643,16 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         messenger.permissions.onAdded.fire({ permissions, origins: [] });
         return true;
       },
+      // remove gives up a granted permission, as Thunderbird does without
+      // asking; every removal is recorded.
+      remove: async ({ permissions = [] }) => {
+        removed.push([...permissions]);
+        const had = permissions.filter((p) => perms.has(p));
+        for (const p of had) perms.delete(p);
+        syncSend();
+        if (had.length) messenger.permissions.onRemoved.fire({ permissions: had, origins: [] });
+        return had.length > 0;
+      },
       onAdded: event(),
       onRemoved: event(),
     },
@@ -720,9 +744,30 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       const bad = permissions.find((p) => p === "messages.save" || p === "messages.send");
       if (bad) throw new Error(`Type error for parameter permissions (Error processing permissions.0: Value "${bad}" must either be one of the known permissions)`);
     };
-    const { contains, request } = messenger.permissions;
+    const { contains, request, remove } = messenger.permissions;
     messenger.permissions.contains = async (arg = {}) => (unknown(arg.permissions || []), contains(arg));
     messenger.permissions.request = async (arg = {}) => (unknown(arg.permissions || []), request(arg));
+    messenger.permissions.remove = async (arg = {}) => (unknown(arg.permissions || []), remove(arg));
+  }
+
+  // relocate moves (or copies) a folder and its subfolders from one
+  // account and path to another, with their messages, and returns the
+  // folder before and after, as Thunderbird's folder events give them.
+  function relocate(accountId, path, toAccountId, toPath, copy) {
+    const under = (f) => f.accountId === accountId && (f.path === path || f.path.startsWith(path + "/"));
+    const top = folderList.find((f) => f.accountId === accountId && f.path === path);
+    if (!top) throw new Error(`no folder ${accountId} ${path}`);
+    const before = clone(top);
+    for (const f of folderList.filter(under)) {
+      const next = newFolder(toAccountId, toPath + f.path.slice(path.length), { isVirtual: f.isVirtual, isTag: f.isTag, isUnified: f.isUnified }, f.specialUse);
+      if (copy) folderList.push(next);
+      else {
+        const was = f.id;
+        Object.assign(f, next);
+        for (const h of store.values()) if (h.folder.id === was) h.folder = { ...f };
+      }
+    }
+    return [before, clone(folderList.find((f) => f.accountId === toAccountId && f.path === toPath))];
   }
 
   const mock = {
@@ -752,6 +797,41 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       });
     },
     permissionRequests: requested,
+    permissionRemovals: removed,
+    // Folder changes fire Thunderbird's folder events unless quiet is set,
+    // which stands for an event not yet delivered.
+    createFolder(accountId, path, { quiet = false, ...flags } = {}) {
+      folderList.push(newFolder(accountId, path, flags));
+      if (!quiet) messenger.folders.onCreated.fire(clone(folderList.at(-1)));
+    },
+    deleteFolder(accountId, path, { quiet = false } = {}) {
+      const gone = folderList.filter((f) => f.accountId === accountId && (f.path === path || f.path.startsWith(path + "/")));
+      for (const f of gone) folderList.splice(folderList.indexOf(f), 1);
+      if (!quiet && gone.length) messenger.folders.onDeleted.fire(clone(gone[0]));
+    },
+    renameFolder(accountId, path, toPath, { quiet = false } = {}) {
+      const [a, b] = relocate(accountId, path, accountId, toPath, false);
+      if (!quiet) messenger.folders.onRenamed.fire(a, b);
+    },
+    moveFolder(accountId, path, toAccountId, toPath, { quiet = false } = {}) {
+      const [a, b] = relocate(accountId, path, toAccountId, toPath, false);
+      if (!quiet) messenger.folders.onMoved.fire(a, b);
+    },
+    copyFolder(accountId, path, toAccountId, toPath, { quiet = false } = {}) {
+      const [a, b] = relocate(accountId, path, toAccountId, toPath, true);
+      if (!quiet) messenger.folders.onCopied.fire(a, b);
+    },
+    addAccount(a) {
+      accounts.push({ identities: [], folders: [], ...a });
+      for (const path of a.folders || []) folderList.push(newFolder(a.id, path));
+      messenger.accounts.onCreated.fire(a.id, { id: a.id, name: a.name, type: a.type, identities: [] });
+    },
+    removeAccount(id) {
+      const i = accounts.findIndex((x) => x.id === id);
+      if (i >= 0) accounts.splice(i, 1);
+      for (const f of folderList.filter((x) => x.accountId === id)) folderList.splice(folderList.indexOf(f), 1);
+      messenger.accounts.onDeleted.fire(id);
+    },
     denyRequests: (v = true) => {
       denyRequests.value = v;
     },

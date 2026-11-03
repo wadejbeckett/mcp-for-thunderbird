@@ -16,12 +16,33 @@ const STATES = Object.freeze({
   not_connected: { label: "Not connected", className: "not-connected" },
   mismatch: { label: "Update needed", className: "mismatch" },
   host_error: { label: "Host program problem", className: "not-connected" },
+  not_installed: { label: "Host program not installed", className: "not-connected" },
+  not_started: { label: "Host program could not be started", className: "not-connected" },
 });
 
 // renderState maps the background's state to the words and style the
 // pages show.
 export function renderState(state) {
   return STATES[state] || STATES.not_connected;
+}
+
+// stateNotes turns the background's state ({missing, newFolders,
+// newAccounts}) into the lines the popup shows under the state.
+export function stateNotes(st) {
+  const out = [];
+  const missing = Array.isArray(st && st.missing) ? st.missing : [];
+  if (missing.length > 0) {
+    const list = missing.map((x) => `${x.account}: ${x.path}`).join(", ");
+    out.push(`Excluded folder not found: ${list}. If it was renamed or moved outside Thunderbird, exclude it again under its new name in the options.`);
+  }
+  const fresh = Array.isArray(st && st.newFolders) ? st.newFolders : [];
+  if (fresh.length > 0) {
+    const list = fresh.map((x) => `${x.account}: ${x.path}`).join(", ");
+    out.push(`New folder hidden from AI apps: ${list}. Check the excluded folders in the options and save to show it, or tick it to keep it excluded.`);
+  }
+  const added = Array.isArray(st && st.newAccounts) ? st.newAccounts : [];
+  if (added.length > 0) out.push(`Not enabled yet: ${added.join(", ")}. Tick it in the options to let AI apps use it.`);
+  return out;
 }
 
 // levelToGroups returns the tool groups a setup level switches on.

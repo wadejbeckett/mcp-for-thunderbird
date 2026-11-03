@@ -116,7 +116,7 @@ func TestNativeModeLifecycle(t *testing.T) {
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
 	hello, _ := json.Marshal(map[string]any{"type": "hello", "protocol": 1, "version": "1.0.0",
-		"instance": "lifecycle", "tools": []string{"mail_search", "mail_read"}, "attachmentDir": ""})
+		"instance": "lifecycle", "tools": []string{"mail_search", "mail_read"}, "attachmentDir": "", "thunderbird": "153.6.0"})
 	if err := nativemsg.Write(stdin, hello); err != nil {
 		t.Fatal(err)
 	}
@@ -249,6 +249,10 @@ func TestNativeModeLifecycle(t *testing.T) {
 	}
 	if bytes.Contains(stderr.Bytes(), []byte(conn.Token)) {
 		t.Fatal("token appears in stderr")
+	}
+	// The log names Thunderbird's version from the hello, for diagnostics.
+	if !bytes.Contains(stderr.Bytes(), []byte("started, add-on 1.0.0, Thunderbird 153.6.0, protocol 1")) {
+		t.Fatalf("no start line with the Thunderbird version in stderr:\n%s", stderr.String())
 	}
 	// A clean exit clears the port and token from the connection file, so
 	// no proxy sends the token to whatever binds that port next (R33).

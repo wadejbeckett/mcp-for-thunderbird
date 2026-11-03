@@ -5,8 +5,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { install, fetchFrom } from "./mocks/messenger.js";
-import { DEFAULTS, LEVELS, GROUPS, load, save, enabledTools, followFolder } from "../src/settings.js";
-import { isExcluded } from "../src/policy.js";
+import { DEFAULTS, LEVELS, GROUPS, load, save, update, enabledTools } from "../src/settings.js";
 
 const READ = ["mail_accounts", "mail_folders", "mail_search", "mail_read", "mail_thread", "mail_attachment", "mail_filter_suggest", "mail_tags"];
 const ORGANISE = ["mail_mark", "mail_tag", "mail_move", "mail_archive", "mail_trash"];
@@ -26,6 +25,7 @@ test("DEFAULTS match the Global Constraints", () => {
   assert.equal(DEFAULTS.setupDone, false);
   assert.equal(DEFAULTS.attachmentDir, "");
   assert.deepEqual(DEFAULTS.excludedFolders, []);
+  assert.deepEqual(DEFAULTS.knownFolders, {});
   assert.ok(Object.isFrozen(DEFAULTS));
 });
 
@@ -116,40 +116,15 @@ test("excluded folder paths are normalised; empty and root paths are refused", a
   assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Private" }]);
 });
 
-test("an excluded folder renamed or moved in Thunderbird stays excluded under its new path", async () => {
-  await save({
-    excludedFolders: [
-      { accountId: "a1", path: "/Private" },
-      { accountId: "a1", path: "/Private/Sub" },
-      { accountId: "a1", path: "/Privateer" },
-      { accountId: "a2", path: "/Private" },
-    ],
-  });
-  const f = (accountId, path) => ({ accountId, path, name: path.split("/").pop() });
-  let s = await followFolder(f("a1", "/Private"), f("a1", "/Private2"));
-  assert.deepEqual(s.excludedFolders, [
-    { accountId: "a1", path: "/Private2" },
-    { accountId: "a1", path: "/Private2/Sub" },
-    { accountId: "a1", path: "/Privateer" },
-    { accountId: "a2", path: "/Private" },
+test("update saves what its function returns from the settings of the same turn", async () => {
+  await save({ accounts: { a1: true } });
+  const [a, b] = await Promise.all([
+    update((cur) => ({ accounts: { ...cur.accounts, a2: true } })),
+    update((cur) => ({ accounts: { ...cur.accounts, a3: true } })),
   ]);
-  assert.ok(isExcluded("a1", "/Private2", s));
-  assert.ok(isExcluded("a1", "/Private2/Sub/Deeper", s));
-  // moved under another folder, then to another account
-  s = await followFolder(f("a1", "/Private2"), f("a1", "/Archive/Private2"));
-  assert.ok(isExcluded("a1", "/Archive/Private2/Sub", s));
-  s = await followFolder(f("a1", "/Archive/Private2"), f("a3", "/Private2"));
-  assert.deepEqual(
-    s.excludedFolders.filter((ex) => ex.accountId === "a3"),
-    [
-      { accountId: "a3", path: "/Private2" },
-      { accountId: "a3", path: "/Private2/Sub" },
-    ],
-  );
-  // a folder that was not excluded changes nothing; nor does a bad event
-  const before = (await load()).excludedFolders;
-  await followFolder(f("a1", "/Other"), f("a1", "/Other2"));
-  await followFolder(null, f("a1", "/X"));
-  await followFolder(f("a1", "/Privateer"), f("a1", ""));
-  assert.deepEqual((await load()).excludedFolders, before);
+  assert.deepEqual(a.accounts, { a1: true, a2: true });
+  assert.deepEqual(b.accounts, { a1: true, a2: true, a3: true }, "the second sees the first");
+  const same = await update(() => null);
+  assert.deepEqual(same.accounts, { a1: true, a2: true, a3: true });
+  await assert.rejects(update(() => ({ excludedFolders: [{ accountId: "a1", path: "/" }] })), { code: "invalid_argument" });
 });

@@ -10,14 +10,23 @@ import { groupOf, sendEnabled } from "./settings.js";
 import { decodeId } from "./ids.js";
 
 export const PAUSED_MESSAGE = "Paused by the user in Thunderbird";
+export const UNSEEN_MESSAGE =
+  "This folder is hidden for now: it is new, or does not exist. In an account with excluded folders, a new folder stays hidden until the user checks the excluded folders in MCP for Thunderbird settings and saves.";
 
 const trimSlash = (p) => p.replace(/\/+$/, "");
 
 // isExcluded matches an excluded folder and its subfolders. Paths are
 // compared without trailing slashes; an entry that names the root (stored
-// by hand, since save refuses it) excludes the whole account.
+// by hand, since save refuses it) excludes the whole account. In an
+// account with exclusions, a folder the add-on has not seen yet is
+// excluded too (isUnseen, exclusions.js): it may be an excluded folder
+// renamed outside Thunderbird.
 export function isExcluded(accountId, folderPath, s) {
   const path = trimSlash(String(folderPath));
+  return isExcludedByPath(accountId, path, s) || isUnseen(accountId, path, s);
+}
+
+function isExcludedByPath(accountId, path, s) {
   return (s.excludedFolders || []).some((ex) => {
     if (!ex || ex.accountId !== accountId) return false;
     const ep = trimSlash(String(ex.path ?? ""));
@@ -25,8 +34,19 @@ export function isExcluded(accountId, folderPath, s) {
   });
 }
 
+// isUnseen says whether a folder of an account with a folders-seen list
+// (settings.knownFolders) is missing from it. The root is never unseen.
+export function isUnseen(accountId, folderPath, s) {
+  const known = s.knownFolders && s.knownFolders[accountId];
+  if (!known || typeof known !== "object") return false;
+  const path = trimSlash(String(folderPath));
+  return path !== "" && !Object.hasOwn(known, path);
+}
+
 export function assertFolderAllowed(accountId, folderPath, s) {
-  if (isExcluded(accountId, folderPath, s)) fail("excluded", "This folder is excluded in MCP for Thunderbird settings.");
+  const path = trimSlash(String(folderPath));
+  if (isExcludedByPath(accountId, path, s)) fail("excluded", "This folder is excluded in MCP for Thunderbird settings.");
+  if (isUnseen(accountId, path, s)) fail("excluded", UNSEEN_MESSAGE);
 }
 
 export function assertAccountEnabled(accountId, s) {

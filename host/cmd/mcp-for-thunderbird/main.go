@@ -246,7 +246,11 @@ func RunNative(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	logger.Printf("started, add-on %s, protocol %d", safe(hello.Version), hello.Protocol)
+	tbVersion := safe(hello.Thunderbird)
+	if tbVersion == "" {
+		tbVersion = "unknown"
+	}
+	logger.Printf("started, add-on %s, Thunderbird %s, protocol %d", safe(hello.Version), tbVersion, hello.Protocol)
 
 	// Every start mints a new token (R33). The old file only suggests the
 	// port to try first, after a crash left it set.

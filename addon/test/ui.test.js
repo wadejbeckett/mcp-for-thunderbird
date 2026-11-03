@@ -157,6 +157,7 @@ test("TestRenderStateLabels", () => {
   assert.equal(renderState("not_connected").label, "Not connected");
   assert.equal(renderState("mismatch").label, "Update needed");
   assert.equal(renderState("host_error").label, "Host program problem");
+  assert.equal(renderState("not_installed").label, "Host program not installed");
   assert.equal(renderState("anything else").label, "Not connected");
 });
 
@@ -238,6 +239,7 @@ async function options(settings) {
 }
 
 test("options show the saved settings", async () => {
+  await mock.messenger.permissions.request({ permissions: ["messages.send"] });
   const p = await options({
     accounts: { a1: true },
     groups: { read: true, organise: false, compose: true, contacts: true },
@@ -662,7 +664,10 @@ test("a reopened setup shows the current choices and Finish keeps everything els
   p.click(p.$("finish"));
   await flush();
   // An account shown unticked is recorded as off, which it already was.
-  assert.deepEqual(await load(), { ...before, accounts: { ...before.accounts, a2: false } }, "Finish with no change changes nothing");
+  // The folders seen in the account with an exclusion are the
+  // background's (exclusions.js).
+  const after = await load();
+  assert.deepEqual(after, { ...before, knownFolders: after.knownFolders, accounts: { ...before.accounts, a2: false } }, "Finish with no change changes nothing");
 
   p = await setup();
   p.tick(boxes(p.document, "#accounts input")[1]);
@@ -733,4 +738,213 @@ test("on Thunderbird 140 the options say why drafts open in a window and keep di
 
 test("the activity log names a not_supported refusal", () => {
   assert.equal(describeEntry({ time: "", client: "c", tool: "mail_draft", outcome: "not_supported" }).outcome, "Refused: needs a newer Thunderbird");
+});
+
+// ---- excluded folders that follow their folder, and new accounts ----
+
+test("the excluded-folder picker leaves out saved searches, tag and unified folders", async () => {
+  bg.stop();
+  mock = install({
+    accounts: [{ id: "a1", name: "Work", type: "imap", folders: ["INBOX", { path: "Search", isVirtual: true }, { path: "Tag", isTag: true }, { path: "All", isUnified: true }] }],
+    manifest: { version: "1.2.3", manifest_version: 3 },
+  });
+  bg = createBackground();
+  await bg.start();
+  const p = await options({ accounts: { a1: true } });
+  assert.deepEqual(boxes(p.document, "#excluded input").map((f) => f.getAttribute("data-path")), ["INBOX"]);
+});
+
+test("the options list a folder created while the page is open", async () => {
+  const p = await options({ accounts: { a1: true } });
+  mock.createFolder("a1", "Projects");
+  await flush();
+  assert.ok(boxes(p.document, "#excluded input").some((f) => f.getAttribute("data-path") === "Projects"));
+  mock.deleteFolder("a1", "Projects");
+  await flush();
+  assert.ok(!boxes(p.document, "#excluded input").some((f) => f.getAttribute("data-path") === "Projects"));
+});
+
+test("a folder renamed while the options are open keeps its exclusion when the page is saved", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  mock.renameFolder("a1", "Private", "Secret");
+  await bg.foldersIdle();
+  await flush();
+  const row = boxes(p.document, "#excluded input").find((f) => f.getAttribute("data-path") === "Secret");
+  assert.equal(row.checked, true);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Secret" }]);
+  assert.equal(p.$("missing-note").hidden, true);
+});
+
+test("an excluded folder not found is listed and explained; saving shows the new folders to AI apps", async () => {
+  await save({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  await bg.foldersIdle();
+  // A rename in webmail: a new folder, then the old one goes.
+  mock.createFolder("a1", "Hidden");
+  mock.deleteFolder("a1", "Private");
+  await bg.foldersIdle();
+  const p = await options();
+  const rows = boxes(p.document, "#excluded label").map((l) => l.textContent.trim());
+  assert.ok(rows.includes("Work: Hidden (new: hidden from AI apps until you save)"), rows.join(" | "));
+  assert.ok(rows.includes("Work: Private (not found in Thunderbird)"));
+  assert.equal(p.$("missing-note").hidden, false);
+  assert.match(p.$("missing-note").textContent, /renamed or moved outside Thunderbird/);
+  // The user ticks the new name and saves.
+  p.tick(boxes(p.document, "#excluded input").find((f) => f.getAttribute("data-path") === "Hidden"));
+  p.fire(p.$("form"), "submit");
+  await flush();
+  const s = await load();
+  assert.deepEqual(s.excludedFolders, [{ accountId: "a1", path: "Private" }, { accountId: "a1", path: "Hidden" }]);
+  assert.deepEqual(s.knownFolders.a1, { INBOX: 0, Hidden: 0 }, "Private and its subfolder are gone");
+  // Unticking the folder that was not found forgets it.
+  p.tick(boxes(p.document, "#excluded input").find((f) => f.getAttribute("data-path") === "Private"), false);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Hidden" }]);
+  assert.equal(p.$("missing-note").hidden, true);
+});
+
+test("the options mark a new account as not enabled yet, also one added while the page is open", async () => {
+  const p = await options({ setupDone: true, accounts: { a1: true } });
+  const label = (id) => boxes(p.document, "#accounts input").find((b) => b.getAttribute("data-id") === id).parentElement.textContent;
+  assert.match(label("a2"), /New account: not enabled yet/);
+  assert.doesNotMatch(label("a1"), /New account/);
+  mock.addAccount({ id: "a3", name: "Club", type: "imap", folders: ["INBOX"] });
+  await flush();
+  assert.match(label("a3"), /Club.*New account: not enabled yet/);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.doesNotMatch(label("a3"), /New account/, "saved, now a known account");
+  mock.removeAccount("a3");
+  await flush();
+  assert.equal(boxes(p.document, "#accounts input").length, 2);
+});
+
+test("unticking direct send gives the messages.send permission back", async () => {
+  const p = await options({ accounts: { a1: true } });
+  p.tick(p.$("send-enabled"));
+  await flush();
+  assert.equal(await mock.messenger.permissions.contains({ permissions: ["messages.send"] }), true);
+  p.tick(p.$("send-enabled"), false);
+  await flush();
+  assert.deepEqual(mock.permissionRemovals, [["messages.send"]]);
+  assert.equal(await mock.messenger.permissions.contains({ permissions: ["messages.send"] }), false);
+});
+
+test("direct send shows as off when its permission is gone, though the settings say on", async () => {
+  // Given back in Thunderbird's add-ons manager, or by an untick never saved.
+  const p = await options({ accounts: { a1: true }, send: { enabled: true, allow: ["a@example.com"] } });
+  assert.equal(p.$("send-enabled").checked, false);
+});
+
+test("unticking direct send and leaving without saving keeps sending off", async () => {
+  await mock.messenger.permissions.request({ permissions: ["messages.send"] });
+  let p = await options({ accounts: { a1: true }, send: { enabled: true, allow: ["a@example.com"] } });
+  assert.equal(p.$("send-enabled").checked, true);
+  p.tick(p.$("send-enabled"), false);
+  await flush();
+  assert.equal((await load()).send.enabled, false, "stored at once");
+  assert.deepEqual((await load()).send.allow, ["a@example.com"]);
+  // The page is opened again without a save.
+  p = await options();
+  assert.equal(p.$("send-enabled").checked, false);
+});
+
+test("a rename the background followed is kept when the page is saved, also one the page did not see", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // Thunderbird renamed the folder before the page listened: the page saw
+  // no event, the background moved the exclusion.
+  mock.renameFolder("a1", "Private", "Secret", { quiet: true });
+  await save({ excludedFolders: [{ accountId: "a1", path: "Secret" }] });
+  await flush();
+  p.tick(boxes(p.document, "#excluded input").find((f) => f.getAttribute("data-path") === "INBOX"));
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Secret" }, { accountId: "a1", path: "INBOX" }]);
+});
+
+test("the options save merges into the stored exclusions instead of replacing them", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // A change the page never heard of: no storage event reaches it.
+  const listeners = mock.messenger.storage.onChanged.listeners.splice(0);
+  await save({ excludedFolders: [{ accountId: "a1", path: "Secret" }] });
+  mock.messenger.storage.onChanged.listeners.push(...listeners);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Secret" }]);
+});
+
+test("a folder event that comes while the options are loading is not missed", async () => {
+  await save({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  const p = page("options.html");
+  const loading = initOptions(p.document, { send, m: mock.messenger, clipboard, confirm: () => true });
+  mock.createFolder("a1", "Projects");
+  await loading;
+  await flush();
+  assert.ok(boxes(p.document, "#excluded input").some((f) => f.getAttribute("data-path") === "Projects"));
+});
+
+test("a new folder is labelled hidden until the save, and stays hidden until then", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  await bg.foldersIdle();
+  mock.createFolder("a1", "Projects");
+  await bg.foldersIdle();
+  await flush();
+  const label = () => boxes(p.document, "#excluded label").map((l) => l.textContent.trim()).find((t) => t.startsWith("Work: Projects"));
+  assert.equal(label(), "Work: Projects (new: hidden from AI apps until you save)");
+  assert.equal(p.$("missing-note").hidden, true, "no exclusion is missing");
+  assert.match(p.document.querySelector("#excluded").parentElement.textContent, /until you save this page/);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  await bg.foldersIdle();
+  assert.equal(label(), "Work: Projects");
+  assert.equal((await load()).knownFolders.a1.Projects, 0);
+});
+
+test("the popup names a new folder hidden from AI apps", async () => {
+  await save({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  await bg.foldersIdle();
+  mock.createFolder("a1", "Projects");
+  await bg.foldersIdle();
+  const p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  const notes = boxes(p.document, "#notes li").map((li) => li.textContent);
+  assert.match(notes[0], /^New folder hidden from AI apps: Work: Projects\./);
+});
+
+test("the popup says when the host program could not be started", async () => {
+  // The host that said welcome stops; then twice the program does not
+  // start (the reconnects come at once, then after 1 s).
+  port.drop("host exited");
+  for (let i = 0; i < 2; i++) {
+    const before = mock.lastPort();
+    while (mock.lastPort() === before) await new Promise((r) => setTimeout(r, 50));
+    mock.lastPort().drop("An unexpected error occurred");
+    await flush();
+  }
+  const p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  assert.equal(p.$("state").textContent, "Host program could not be started");
+});
+
+test("the popup names excluded folders not found and accounts not enabled yet", async () => {
+  await save({ setupDone: true, accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  await bg.foldersIdle();
+  mock.deleteFolder("a1", "Private");
+  await bg.foldersIdle();
+  const p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  const notes = boxes(p.document, "#notes li").map((li) => li.textContent);
+  assert.equal(p.$("notes").hidden, false);
+  assert.match(notes[0], /^Excluded folder not found: Work: Private\./);
+  assert.match(notes[1], /^Not enabled yet: Home\./);
+});
+
+test("the popup and pages say when the host program is not installed", async () => {
+  port.drop("No such native application mcp_for_thunderbird");
+  await flush();
+  const p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  assert.equal(p.$("state").textContent, "Host program not installed");
 });
