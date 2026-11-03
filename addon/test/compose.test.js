@@ -1140,6 +1140,12 @@ test("a forward refuses FileLink, linked, detached and deleted attachments", asy
     [{ type: "detached", contentType: "application/pdf" }, "detached and saved outside the message"],
     [{ type: "deleted", contentType: "text/x-moz-deleted" }, "deleted from the message"],
     [{ contentType: "text/x-moz-deleted; name=\"Deleted: report.pdf\"" }, "deleted from the message"],
+    // Thunderbird 153.6 calls its own placeholders normal; the part's
+    // headers say what they are, as in mail_attachment.
+    [{ type: "normal", contentType: "text/plain", headers: { "x-mozilla-altered": ['AttachmentDeleted; date="Mon Nov 02 10:00:00 2026"'] } }, "deleted from the message"],
+    [{ type: "normal", contentType: "application/pdf", headers: { "x-mozilla-altered": ['AttachmentDetached; date="Mon Nov 02 10:00:00 2026"'], "x-mozilla-external-attachment-url": ["file:///home/u/report.pdf"] } }, "detached and saved outside the message"],
+    // 140 ESR gives no type; the headers still tell.
+    [{ contentType: "application/pdf", headers: { "x-mozilla-cloud-part": ["cloudFile; url=https://files.test/report.pdf"] } }, "a FileLink, stored online"],
   ];
   for (const [i, [extra, why]] of cases.entries()) {
     const o = original({ headerMessageId: `placeholder-${i}@seed.test`, attachments: [{ name: "report.pdf", partName: "1.2", size: 300, content: "placeholder", ...extra }] });

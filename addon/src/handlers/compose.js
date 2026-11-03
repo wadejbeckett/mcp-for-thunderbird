@@ -44,7 +44,7 @@ import { isPlainAddress } from "../address.js";
 import { assertFolderAllowed, enabledAccountIds } from "../policy.js";
 import { fail, isToolError, ToolError } from "../errors.js";
 import { htmlToText, stripInvisible } from "../clean.js";
-import { call, newRun, answered, message, bodyParts, base64, realFolder, ATTACHMENT, TIMEOUT } from "./read.js";
+import { call, newRun, answered, message, bodyParts, base64, realFolder, attachmentType, ATTACHMENT, TIMEOUT } from "./read.js";
 
 // COMPOSE.budgetMs is the time budget of one compose tool call. Exported
 // so tests can shorten it.
@@ -623,22 +623,16 @@ function buildMessage(headerLines, html, atts) {
 // ---- mail_draft ----
 
 // PLACEHOLDER says why an attachment that is not of type normal holds
-// only a placeholder in the message (MessageAttachment.type, Thunderbird
-// 153 and later).
+// only a placeholder in the message. The type is read.js's attachmentType,
+// the rule mail_read and mail_attachment use: the part's own headers
+// first, since Thunderbird 153.6's MessageAttachment.type misses the
+// deleted and detached placeholders it writes itself.
 const PLACEHOLDER = {
   cloudFile: "a FileLink, stored online",
   linked: "linked to a file online",
   detached: "detached and saved outside the message",
   deleted: "deleted from the message",
 };
-
-// attachmentType is an attachment's type; one that has none (as before
-// Thunderbird 153) is normal unless Thunderbird left its placeholder for a
-// deleted attachment.
-function attachmentType(a) {
-  if (typeof a.type === "string") return a.type;
-  return /^text\/x-moz-deleted\b/i.test(String(a.contentType || "")) ? "deleted" : "normal";
-}
 
 // forwardedAttachments reads the original's attachments, refusing before
 // any byte is read when the listed sizes are over the limit, or when an

@@ -2493,7 +2493,9 @@ func TestE2EComposeOtherAccount(t *testing.T) {
 // TestE2EForwardPlaceholder delivers a message whose attachment is a
 // FileLink placeholder (an X-Mozilla-Cloud-Part header): Thunderbird 153
 // lists it with type cloudFile, so a forward draft is refused, and one with
-// forward_as attachment, which forwards the message whole, is saved.
+// forward_as attachment, which forwards the message whole, is saved. A
+// second message holds a detached placeholder, which Thunderbird 153.6
+// lists as normal: its headers make the forward refused all the same.
 func TestE2EForwardPlaceholder(t *testing.T) {
 	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
 		t.Skipf("Thunderbird %s has no mail_draft", version)
@@ -2525,6 +2527,26 @@ func TestE2EForwardPlaceholder(t *testing.T) {
 		t.Fatal("forward_as attachment: no draft id")
 	}
 	t.Logf("FileLink forward refused: %s", text)
+
+	dsubj := "E2E detached " + stamp
+	msg = "From: Sender <sender@example.org>\r\nTo: test@localhost\r\nSubject: " + dsubj + "\r\n" +
+		"Message-ID: <detached-" + stamp + "@e2e.test>\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n" +
+		"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain\r\n\r\nThe report was detached.\r\n" +
+		"--b1\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\n" +
+		"X-Mozilla-Altered: AttachmentDetached; date=\"Mon Nov 02 10:00:00 2026\"\r\nX-Mozilla-External-Attachment-URL: file:///tmp/report.pdf\r\n\r\n" +
+		"You detached an attachment from this message.\r\n--b1--\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ = searchUntil(t, cs, map[string]any{"subject": dsubj}, dsubj)
+	det := find(res, dsubj)
+	text, isErr = call(t, cs, "mail_draft", map[string]any{"kind": "forward", "id": det.ID, "to": []string{"someone@example.org"}, "body": "FYI"})
+	const wantDetached = "refused: The attachment report.pdf is detached and saved outside the message, so the message holds only a placeholder for it and it cannot be forwarded as a file. Forward the whole message with forward_as attachment instead."
+	if !isErr || text != wantDetached {
+		t.Fatalf("forward of a detached placeholder: %v %q, want %q", isErr, text, wantDetached)
+	}
+	t.Logf("detached forward refused: %s", text)
 }
 
 // offlineScript sets Thunderbird's Work Offline state (Services.io.offline)
