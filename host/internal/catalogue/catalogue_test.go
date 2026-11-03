@@ -412,7 +412,7 @@ func TestOrganiseDescriptions(t *testing.T) {
 		}
 	}
 	ar := byName(t, "mail_archive").Description
-	for _, s := range []string{"not_enabled", "not enabled or is excluded", "already in its archive folder", "copied: [{from, to}]", "refused and mayHaveCompleted"} {
+	for _, s := range []string{"not_enabled", "not enabled or is excluded", "already in its archive folder", "copied: [{from, to}]", "refused and mayHaveCompleted", "a year or month folder Thunderbird makes for the archive is such a folder until the user checks the excluded folders"} {
 		if !strings.Contains(ar, s) {
 			t.Errorf("mail_archive description lacks %q: %s", s, ar)
 		}
@@ -434,6 +434,11 @@ func TestTagsTool(t *testing.T) {
 	}
 	if !strings.Contains(byName(t, "mail_tag").Description, "mail_tags") {
 		t.Error("mail_tag description must point to mail_tags")
+	}
+	for _, k := range []string{"tag", "tags"} {
+		if d, _ := props(t, "mail_search")[k]["description"].(string); !strings.Contains(d, "mail_tags") {
+			t.Errorf("mail_search %s must point to mail_tags: %s", k, d)
+		}
 	}
 }
 

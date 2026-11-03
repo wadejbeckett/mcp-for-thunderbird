@@ -534,6 +534,27 @@ test("mail_archive fails a message Thunderbird put in a folder the settings do n
   });
 });
 
+test("mail_archive into a year folder new in an account with exclusions fails with refused, with no new id", async () => {
+  // Thunderbird makes Archives/2026 at the archive. In an account with
+  // excluded folders it is hidden until the user checks the excluded
+  // folders in the options (exclusions.js), so the message is reported as
+  // archived where the settings do not allow, and its new id is not given.
+  const yearly = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Archives/2026"] };
+  mock = install({ accounts: [yearly, ...ACCOUNTS.slice(1)] });
+  const seen = Object.fromEntries(ACCOUNTS[0].folders.map((p) => [p, 0]));
+  await save({ accounts: { a1: true, a2: true, a3: true }, excludedFolders: [{ accountId: "a1", path: "Private" }], knownFolders: { a1: seen } });
+  const m = add("a1", "INBOX", 1);
+  mock.behaviour.archiveTo = () => ({ accountId: "a1", path: "Archives/2026" });
+  let r = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(r.content, { done: [], failed: [{ id: m.id, code: "refused", mayHaveCompleted: true }], moved: [] });
+  assert.equal(folderOf(m.num).path, "Archives/2026");
+  // once the user has seen the folder, the next archive there gives its id
+  await save({ knownFolders: { a1: { ...seen, "Archives/2026": 0 } } });
+  const n = add("a1", "INBOX", 2);
+  r = await call("mail_archive", { ids: [n.id] });
+  assert.deepEqual(r.content, { done: [n.id], failed: [], moved: [{ from: n.id, to: encodeId("a1", "Archives/2026", "msg2@example.org") }] });
+});
+
 test("mail_archive archives every message when Thunderbird sends no move event", async () => {
   // the waits for events are spent once for the call, not once per message
   const ms = Array.from({ length: 6 }, (_, i) => add("a1", "INBOX", i + 1));
