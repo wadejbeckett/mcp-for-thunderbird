@@ -64,6 +64,7 @@ const CROSS_ACCOUNT = "Moving mail between accounts is not allowed.";
 // before it is checked, so the answer is not "enable this account".
 const NO_ACCOUNT = {
   mail_contacts: "mail_contacts takes no account: address books belong to the whole profile, not to one account.",
+  mail_tags: "mail_tags takes no account: tags belong to the whole profile, not to one account.",
 };
 
 // check refuses a call the settings do not allow. Order: paused, tool

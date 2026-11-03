@@ -36,6 +36,13 @@ test("an account sent to mail_contacts is refused before it is checked", () => {
   check("mail_contacts", { query: "x" }, on);
 });
 
+test("an account sent to mail_tags is refused before it is checked", () => {
+  for (const account of ["a1", "off", "unknown", "", 5]) {
+    assert.throws(() => check("mail_tags", { account }, s()), { code: "invalid_argument", message: "mail_tags takes no account: tags belong to the whole profile, not to one account." });
+  }
+  check("mail_tags", {}, s());
+});
+
 test("a disabled account gives not_enabled", () => {
   assert.throws(() => check("mail_folders", { account: "off" }, s()), { code: "not_enabled" });
   assert.throws(() => check("mail_folders", { account: "unknown" }, s()), { code: "not_enabled" });
