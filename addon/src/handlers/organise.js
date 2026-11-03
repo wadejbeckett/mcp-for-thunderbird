@@ -22,7 +22,7 @@
 // budget is spent fail with thunderbird_error.
 
 import { HANDLERS } from "../rpc.js";
-import { decodeId, encodeId, resolveId } from "../ids.js";
+import { decodeId, encodeId, resolveId, endList } from "../ids.js";
 import { assertFolderAllowed, enabledAccountIds, isExcluded } from "../policy.js";
 import { fail, isToolError, ToolError } from "../errors.js";
 import { call, newRun, answered, clip, folderByPath, realFolder, tagKeyOf, tagList, TIMEOUT } from "./read.js";
@@ -301,8 +301,9 @@ const EVENT_WAIT_MS = 3000;
 // opaque id of its old place. On IMAP the event comes once Thunderbird has
 // seen the message in the new folder, which can be after messages.archive
 // has returned. Every event is a pair of message lists, and a list with
-// more than one page stays open in Thunderbird until it is aborted, so the
-// listener aborts both, also for moves that are none of this call's.
+// more than one page stays open in Thunderbird until its last page is
+// read, so the listener ends both (endList), also for moves that are none
+// of this call's.
 function watchArchive() {
   const msgs = tb().messages;
   const events = [
@@ -312,11 +313,7 @@ function watchArchive() {
   const seen = new Map();
   let wake = null;
   const close = (list) => {
-    if (list && typeof list.id === "string" && typeof msgs.abortList === "function") {
-      Promise.resolve()
-        .then(() => msgs.abortList(list.id))
-        .catch(() => {});
-    }
+    if (list && typeof list.id === "string") endList(list.id);
   };
   const listeners = events.map(([kind, ev]) => {
     const listener = (from, to) => {

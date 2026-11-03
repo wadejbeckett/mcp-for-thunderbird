@@ -658,6 +658,25 @@ test("mail_archive closes the message lists of every move event it hears", async
   for (const id of ["list-src", "list-dst", "list-csrc"]) assert.ok(mock.calls.abortList.includes(id), id);
 });
 
+test("mail_archive reads the move event's lists to their end, so Thunderbird forgets them", async () => {
+  // abortList alone leaves a list in Thunderbird's tracker until its last
+  // page is read (endList, ids.js)
+  for (let i = 10; i < 15; i++) add("a1", "Work", i);
+  const m = add("a1", "INBOX", 1);
+  const msgs = globalThis.messenger.messages;
+  const archive = msgs.archive;
+  msgs.archive = async (ids) => {
+    const a = await msgs.query({ accountId: "a1", folderId: "a1:/Work", messagesPerPage: 2 });
+    const b = await msgs.query({ accountId: "a1", folderId: "a1:/Work", messagesPerPage: 2 });
+    msgs.onMoved.fire(a, b);
+    return archive(ids);
+  };
+  const r = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(r.content.done, [m.id]);
+  for (let i = 0; i < 20 && mock.openLists().length > 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(mock.openLists(), []);
+});
+
 test("mail_move copy into the message's own folder fails; a move there changes nothing", async () => {
   const m = add("a1", "Work", 1);
   const other = add("a1", "INBOX", 2);
