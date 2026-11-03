@@ -328,7 +328,7 @@ func TestComposeIdentityKindsAndForward(t *testing.T) {
 			t.Fatalf("%s must take a from string: %v", n, f)
 		}
 		d, _ := f["description"].(string)
-		for _, want := range []string{"address or id", "default identity"} {
+		for _, want := range []string{"address or id", "default identity", "mail_accounts"} {
 			if !strings.Contains(d, want) {
 				t.Errorf("%s from description must mention %q: %s", n, want, d)
 			}

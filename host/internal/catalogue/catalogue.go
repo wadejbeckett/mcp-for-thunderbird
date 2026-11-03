@@ -57,10 +57,10 @@ const htmlDesc = "true when body is HTML rather than plain text. Allowed: p, br,
 
 // fromDesc tells callers how the sending identity is chosen
 // (addon/src/handlers/compose.js, writer).
-const fromDesc = "Identity to write from: its address or id. For a new message, one of the account's identities; with no account, the enabled account that has this identity. For a reply or forward, an identity of any enabled account. Without from, a reply or forward goes out from the identity the original was addressed to, in its own account first and then in any enabled account; for mail you sent, from the identity that sent it; otherwise from the account's default identity. A reply or forward from another account's identity is saved in that account's Drafts."
+const fromDesc = "Identity to write from: its address or id, as mail_accounts lists them. For a new message, one of the account's identities; with no account, the enabled account that has this identity. For a reply or forward, an identity of any enabled account. Without from, a reply or forward goes out from the identity the original was addressed to, in its own account first and then in any enabled account; for mail you sent, from the identity that sent it; otherwise from the account's default identity. A reply or forward from another account's identity is saved in that account's Drafts."
 
 // sendFromDesc is fromDesc for mail_send, which writes only new messages.
-const sendFromDesc = "Identity to send from: its address or id, one of the account's identities; the account's default identity when not given. With from and no account, the enabled account that has this identity."
+const sendFromDesc = "Identity to send from: its address or id as mail_accounts lists them, one of the account's identities; the account's default identity when not given. With from and no account, the enabled account that has this identity."
 
 func composeProps() m {
 	return m{
