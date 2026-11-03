@@ -5,7 +5,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { install } from "./mocks/messenger.js";
-import { encodeId, decodeId, resolveId, clearIdCache } from "../src/ids.js";
+import { encodeId, decodeId, resolveId, clearIdCache, endList, END } from "../src/ids.js";
 
 const b64url = (s) => Buffer.from(s, "utf8").toString("base64url");
 
@@ -102,4 +102,35 @@ test("a message moved to another folder is not found in the old one", async () =
   const a = mock.addMessage("account1", "INBOX");
   const id = encodeId("account1", "Other", a.headerMessageId);
   await rejectsWith(resolveId(id), "not_found", "Message not found in Other");
+});
+
+test("endList aborts a list and reads it to its last page, so Thunderbird forgets it", async () => {
+  for (let i = 0; i < 7; i++) mock.addMessage("account1", "INBOX");
+  const m = mock.messenger.messages;
+  const listId = await m.query({ accountId: "account1", messagesPerPage: 2, returnMessageListId: true });
+  await m.continueList(listId);
+  assert.equal(mock.openLists().length, 1);
+  const open = mock.openLists()[0];
+  await endList(open);
+  assert.deepEqual(mock.calls.abortList, [open]);
+  assert.ok(mock.calls.continueList.includes(open));
+  assert.deepEqual(mock.openLists(), []);
+});
+
+test("endList ignores a list that is gone and gives up on one that never answers", async () => {
+  await endList("no-such-list");
+  const m = mock.messenger.messages;
+  const was = END.waitMs;
+  END.waitMs = 50;
+  try {
+    m.abortList = () => new Promise(() => {});
+    const t0 = Date.now();
+    await endList("x");
+    m.abortList = async () => {};
+    m.continueList = () => new Promise(() => {});
+    await endList("y");
+    assert.ok(Date.now() - t0 < 500);
+  } finally {
+    END.waitMs = was;
+  }
 });

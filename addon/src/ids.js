@@ -5,6 +5,9 @@
 // Opaque message ids: "m1." + base64url(JSON [accountId, folderPath,
 // headerMessageId]), no padding. Thunderbird's numeric ids do not survive a
 // restart, so they are only a per-session cache.
+//
+// endList, shared by every handler that stops reading a message list
+// early, also lives here: resolveId is its first user.
 
 import { fail } from "./errors.js";
 
@@ -42,6 +45,41 @@ export function decodeId(id) {
   }
   if (!Array.isArray(v) || v.length !== 3 || !v.every((x) => typeof x === "string" && x !== "")) bad();
   return { accountId: v[0], folderPath: v[1], headerMessageId: v[2] };
+}
+
+// END bounds endList: each Thunderbird call waits at most waitMs, and at
+// most maxPages pages are read. Exported so tests can shorten it.
+export const END = { waitMs: 1000, maxPages: 1000 };
+const LATE = Symbol("late");
+
+function bounded(fn) {
+  let timer;
+  return Promise.race([
+    Promise.resolve().then(fn),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(LATE), END.waitMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// endList ends a message list the caller no longer reads. abortList stops
+// the search, but Thunderbird keeps the list, with every header it has
+// collected, until its last page (id null) is read; so the pages left are
+// read too. They come at once, since an aborted list adds nothing more.
+// Errors are ignored: the list is gone already.
+export async function endList(listId) {
+  const m = globalThis.messenger;
+  try {
+    if ((await bounded(() => m.messages.abortList(listId))) === LATE) return;
+    let id = listId;
+    for (let i = 0; i < END.maxPages && id; i++) {
+      const page = await bounded(() => m.messages.continueList(id));
+      if (page === LATE || !page || typeof page !== "object") return;
+      id = typeof page.id === "string" ? page.id : null;
+    }
+  } catch {
+    // the list is gone already
+  }
 }
 
 export function clearIdCache() {
@@ -88,7 +126,7 @@ export async function resolveId(id) {
     if (found || !page.id) break;
     page = await m.messages.continueList(page.id);
   }
-  if (page.id) await m.messages.abortList(page.id);
+  if (page.id) await endList(page.id);
   if (!found) notFound();
   cache.set(id, found.id);
   return found;

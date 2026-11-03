@@ -310,3 +310,48 @@ func TestComposeIdentityKindsAndForward(t *testing.T) {
 		t.Errorf("mail_draft description must mention Local Folders' Drafts, that no other server account gets a draft, and placeholder attachments: %s", d)
 	}
 }
+
+func TestSearchArgumentsFromCoverageAudit(t *testing.T) {
+	p := props(t, "mail_search")
+	for _, k := range []string{"junk", "to_me", "from_me", "subfolders"} {
+		if p[k]["type"] != "boolean" || p[k]["description"] == "" {
+			t.Errorf("mail_search %s must be a described boolean: %v", k, p[k])
+		}
+	}
+	if p["tags"]["type"] != "array" {
+		t.Errorf("mail_search tags must be a list: %v", p["tags"])
+	}
+	modes, _ := p["tags_mode"]["enum"].([]string)
+	if strings.Join(modes, ",") != "all,any,none,untagged" {
+		t.Errorf("mail_search tags_mode enum = %v", modes)
+	}
+	for _, k := range []string{"from", "to"} {
+		d, _ := p[k]["description"].(string)
+		if strings.Contains(d, "contains.") || !strings.Contains(d, "whole address") {
+			t.Errorf("mail_search %s must say how a whole address and other text match: %s", k, d)
+		}
+	}
+	for _, k := range []string{"to_me", "from_me"} {
+		if d, _ := p[k]["description"].(string); !strings.Contains(d, "enabled accounts' addresses") {
+			t.Errorf("mail_search %s must say it compares with the enabled accounts' addresses: %s", k, d)
+		}
+	}
+	if d, _ := p["tags_mode"]["description"].(string); !strings.Contains(d, "message by message") {
+		t.Errorf("mail_search tags_mode must say untagged is checked message by message: %s", d)
+	}
+	d := byName(t, "mail_search").Description
+	for _, s := range []string{"note on how to narrow", "priority", "before 148", "tags_mode untagged", "to_me or from_me false"} {
+		if !strings.Contains(d, s) {
+			t.Errorf("mail_search description lacks %q: %s", s, d)
+		}
+	}
+	if u, _ := p["until"]["description"].(string); !strings.Contains(u, "future") {
+		t.Errorf("mail_search until must say mail dated in the future is found without it: %s", u)
+	}
+	td := byName(t, "mail_thread").Description
+	for _, s := range []string{"truncated", "200", "100", "newest 200 later messages", "priority"} {
+		if !strings.Contains(td, s) {
+			t.Errorf("mail_thread description lacks %q: %s", s, td)
+		}
+	}
+}
