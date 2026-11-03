@@ -6,20 +6,14 @@
 // the background rewrites it when Thunderbird reports a rename, move or
 // copy (followFolder). A rename made elsewhere, such as in webmail, reaches
 // Thunderbird as a new folder and a deleted one, with nothing to link the
-// two, so each account with exclusions also keeps the folder paths the
-// add-on has seen (settings.knownFolders: path -> when it was adopted, 0
-// for a folder the user saw in the options). policy.isExcluded treats a
-// folder that is not in that list as excluded. reconcile adopts a new
-// folder after GRACE_MS, and only while every exclusion of the account
-// still names a folder that exists; while one is missing, new folders stay
-// hidden until the user saves the options, and folders adopted in the last
-// RECENT_MS are hidden again, in case the missing folder came back under
-// one of their names before Thunderbird reported the old one gone. No
-// function here removes an exclusion, except forgetAccount for an account
-// that was deleted.
-
-export const GRACE_MS = 30_000;
-export const RECENT_MS = 10 * 60_000;
+// two and in no fixed order: the old folder can stay listed for minutes
+// after the new one appears. So each account with exclusions also keeps
+// the folder paths the user has seen (settings.knownFolders: path -> 0),
+// and policy.isExcluded treats a folder that is not in that list as
+// excluded. The list starts with the folders there at the first look, and
+// a new folder joins it only when the user saves the options with it
+// listed; nothing is adopted on a timer. No function here removes an
+// exclusion, except forgetAccount for an account that was deleted.
 
 const trim = (p) => String(p ?? "").replace(/\/+$/, "");
 const under = (path, base) => path === base || path.startsWith(base + "/");
@@ -92,14 +86,20 @@ export function followFolder(s, from, to, { keep = false, targetFolders = null }
   return { excludedFolders, knownFolders: known };
 }
 
+// presentPaths lists every folder of the account except its root, saved
+// searches, tag and unified folders included: an exclusion naming one of
+// them (the picker listed saved searches before) still names a folder.
+const presentPaths = (folders, accountId) => (folders || []).filter((f) => f && typeof f.path === "string" && !f.isRoot && f.accountId === accountId).map((f) => trim(f.path));
+const realPaths = (folders, accountId) => (folders || []).filter((f) => isRealFolder(f) && f.accountId === accountId).map((f) => trim(f.path));
+
 // reconcile compares an account's exclusions and folders seen with its
-// real folders now (folders, from folders.query). firstSeen (a Map of
-// "account\0path" -> ms) remembers when each new folder was first seen;
-// it is updated in place. Returns {patch, missing, due}: the settings
-// patch or null, the excluded paths that name no folder, and the time the
-// next new folder may be adopted, or null.
-export function reconcile(s, accountId, folders, now, firstSeen) {
-  const out = { patch: null, missing: [], due: null };
+// folders now (folders, from folders.query). Returns {patch, missing,
+// unseen}: the settings patch or null, the excluded paths that name no
+// folder, and the new real folders that stay hidden until the user has
+// seen them in the options (none under an excluded folder, which is
+// hidden anyway).
+export function reconcile(s, accountId, folders) {
+  const out = { patch: null, missing: [], unseen: [] };
   const known = s.knownFolders || {};
   const ex = exclusionsOf(s, accountId);
   if (ex.length === 0) {
@@ -110,43 +110,26 @@ export function reconcile(s, accountId, folders, now, firstSeen) {
     }
     return out;
   }
-  const paths = (folders || []).filter((f) => isRealFolder(f) && f.accountId === accountId).map((f) => trim(f.path));
+  const paths = realPaths(folders, accountId);
   // No folders at all means the list is not there yet: change nothing.
   if (paths.length === 0) return out;
-  const present = new Set(paths);
+  const present = new Set(presentPaths(folders, accountId));
   out.missing = ex.filter((p) => p !== "" && !present.has(p));
 
   const before = known[accountId] && typeof known[accountId] === "object" ? known[accountId] : null;
   const next = {};
   if (!before) {
-    // First look at this account: everything there now was there when the
-    // exclusions were chosen, unless one is already missing. Then nothing
-    // is adopted, and the user decides in the options.
-    if (out.missing.length === 0) for (const p of paths) next[p] = 0;
+    // First look at this account: every folder there now was already
+    // shown to AI apps before the list existed, so hiding it protects
+    // nothing, also when an exclusion is already missing.
+    for (const p of paths) next[p] = 0;
   } else {
     // Folders no longer there are forgotten: one that comes back under the
     // same name is new again.
-    for (const [p, t] of Object.entries(before)) if (present.has(p)) next[p] = t;
-    if (out.missing.length > 0) {
-      for (const [p, t] of Object.entries(next)) if (t > 0 && now - t < RECENT_MS) delete next[p];
-    }
+    const real = new Set(paths);
+    for (const [p, t] of Object.entries(before)) if (real.has(p)) next[p] = t;
   }
-  for (const p of paths) {
-    const k = `${accountId}\u0000${p}`;
-    if (Object.hasOwn(next, p)) {
-      firstSeen.delete(k);
-      continue;
-    }
-    if (!firstSeen.has(k)) firstSeen.set(k, now);
-    const at = firstSeen.get(k) + GRACE_MS;
-    if (out.missing.length === 0 && now >= at) {
-      next[p] = now;
-      firstSeen.delete(k);
-    } else if (out.missing.length === 0 && (out.due === null || at < out.due)) out.due = at;
-  }
-  for (const k of [...firstSeen.keys()]) {
-    if (k.startsWith(`${accountId}\u0000`) && !present.has(k.slice(accountId.length + 1))) firstSeen.delete(k);
-  }
+  out.unseen = paths.filter((p) => !Object.hasOwn(next, p) && !ex.some((e) => e !== "" && under(p, e)));
   if (!sameKnown(before, next)) out.patch = { knownFolders: { ...known, [accountId]: next } };
   return out;
 }
@@ -155,6 +138,27 @@ function sameKnown(a, b) {
   if (!a) return false;
   const ka = Object.keys(a);
   return ka.length === Object.keys(b).length && ka.every((k) => Object.hasOwn(b, k) && a[k] === b[k]);
+}
+
+// mergeExclusions applies the ticks and unticks made in the options (page,
+// against base, the exclusions the page started from) to the exclusions
+// stored now, so a change the background made meanwhile, such as
+// following a rename, is kept.
+export function mergeExclusions(stored, base, page) {
+  const key = (e) => `${e.accountId}\u0000${trim(e.path)}`;
+  const baseKeys = new Set((base || []).filter(Boolean).map(key));
+  const pageKeys = new Set((page || []).filter(Boolean).map(key));
+  const out = [];
+  const seen = new Set();
+  const push = (e) => {
+    const k = key(e);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(e);
+  };
+  for (const e of stored || []) if (e && !(baseKeys.has(key(e)) && !pageKeys.has(key(e)))) push(e);
+  for (const e of page || []) if (e && !baseKeys.has(key(e))) push(e);
+  return out;
 }
 
 // reviewed returns the folders-seen list for an account whose folders the
@@ -181,9 +185,9 @@ export function forgetAccount(s, accountId) {
 }
 
 // missingExclusions lists an account's excluded paths that name none of
-// its real folders; an empty folder list (not loaded) gives none.
+// its folders; an empty folder list (not loaded) gives none.
 export function missingExclusions(s, accountId, folders) {
-  const paths = new Set((folders || []).filter((f) => isRealFolder(f) && f.accountId === accountId).map((f) => trim(f.path)));
-  if (paths.size === 0) return [];
+  if (realPaths(folders, accountId).length === 0) return [];
+  const paths = new Set(presentPaths(folders, accountId));
   return exclusionsOf(s, accountId).filter((p) => p !== "" && !paths.has(p));
 }

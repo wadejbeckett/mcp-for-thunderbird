@@ -11,7 +11,7 @@ import { decodeId } from "./ids.js";
 
 export const PAUSED_MESSAGE = "Paused by the user in Thunderbird";
 export const UNSEEN_MESSAGE =
-  "This folder is hidden for now: it is new, or does not exist. A new folder in an account with excluded folders is hidden for a short while, and until the excluded folders are checked in MCP for Thunderbird settings when one of them is missing.";
+  "This folder is hidden for now: it is new, or does not exist. In an account with excluded folders, a new folder stays hidden until the user checks the excluded folders in MCP for Thunderbird settings and saves.";
 
 const trimSlash = (p) => p.replace(/\/+$/, "");
 

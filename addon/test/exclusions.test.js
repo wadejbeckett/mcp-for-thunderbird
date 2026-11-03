@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { followFolder, reconcile, forgetAccount, missingExclusions, reviewed, isRealFolder, GRACE_MS, RECENT_MS } from "../src/exclusions.js";
+import { followFolder, reconcile, forgetAccount, missingExclusions, reviewed, isRealFolder, mergeExclusions } from "../src/exclusions.js";
 import { isExcluded, isUnseen } from "../src/policy.js";
 
 const f = (accountId, path, extra = {}) => ({ accountId, path, isRoot: false, ...extra });
@@ -68,80 +68,93 @@ test("a rename that touches no exclusion or seen folder changes nothing", () => 
 });
 
 test("first look at an account adopts every folder there", () => {
-  const seen = new Map();
   const s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: {} };
-  const r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal"), f("a1", "/S", { isVirtual: true })], 1000, seen);
+  const r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal"), f("a1", "/S", { isVirtual: true })]);
   assert.deepEqual(r.patch, { knownFolders: { a1: { "/INBOX": 0, "/Legal": 0 } } });
   assert.deepEqual(r.missing, []);
-  assert.equal(r.due, null);
+  assert.deepEqual(r.unseen, []);
 });
 
-test("first look with an exclusion already missing adopts nothing", () => {
+test("first look with an exclusion already missing still adopts the folders there, and flags the exclusion", () => {
+  // An upgrade: /Legal was deleted long ago, and the old version never
+  // removed its exclusion. The folders there now were shown to AI apps
+  // already; hiding them protects nothing.
   const s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: {} };
-  const r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal 2026")], 1000, new Map());
+  const r = reconcile(s, "a1", [f("a1", "/", { isRoot: true }), f("a1", "/INBOX"), f("a1", "/Legal 2026")]);
   assert.deepEqual(r.missing, ["/Legal"]);
-  assert.deepEqual(r.patch, { knownFolders: { a1: {} } });
+  assert.deepEqual(r.patch, { knownFolders: { a1: { "/INBOX": 0, "/Legal 2026": 0 } } });
   const after = { ...s, ...r.patch };
-  assert.equal(isExcluded("a1", "/Legal 2026", after), true);
-  assert.equal(isExcluded("a1", "/INBOX", after), true);
+  assert.equal(isExcluded("a1", "/INBOX", after), false);
+  // A folder that appears later is new.
+  const r2 = reconcile(after, "a1", [f("a1", "/INBOX"), f("a1", "/Legal 2026"), f("a1", "/Later")]);
+  assert.deepEqual(r2.unseen, ["/Later"]);
+  assert.equal(isExcluded("a1", "/Later", after), true);
 });
 
-test("a new folder is hidden for the grace period, then adopted", () => {
-  const seen = new Map();
-  let s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: { a1: { "/INBOX": 0, "/Legal": 0 } } };
-  const folders = [f("a1", "/INBOX"), f("a1", "/Legal"), f("a1", "/Projects")];
-  let r = reconcile(s, "a1", folders, 1000, seen);
-  assert.equal(r.patch, null);
-  assert.equal(r.due, 1000 + GRACE_MS);
+test("an exclusion naming a saved search is not missing, and its account stays visible", () => {
+  // The picker listed saved searches before; such an exclusion names a
+  // folder that exists.
+  const s = { excludedFolders: [ex("a1", "/Saved Search")], knownFolders: {} };
+  const folders = [f("a1", "/", { isRoot: true }), f("a1", "/INBOX"), f("a1", "/Saved Search", { isVirtual: true })];
+  const r = reconcile(s, "a1", folders);
+  assert.deepEqual(r.missing, []);
+  assert.deepEqual(r.patch, { knownFolders: { a1: { "/INBOX": 0 } } });
+  assert.equal(isExcluded("a1", "/INBOX", { ...s, ...r.patch }), false);
+  assert.deepEqual(missingExclusions(s, "a1", folders), []);
+  assert.deepEqual(missingExclusions({ excludedFolders: [ex("a1", "/Tag")] }, "a1", [f("a1", "/INBOX"), f("a1", "/Tag", { isTag: true })]), []);
+  assert.deepEqual(missingExclusions({ excludedFolders: [ex("a1", "/All")] }, "a1", [f("a1", "/INBOX"), f("a1", "/All", { isUnified: true })]), []);
+});
+
+test("a new folder stays hidden until the user has seen it, however long it waits", () => {
+  const s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: { a1: { "/INBOX": 0, "/Legal": 0 } } };
+  const folders = [f("a1", "/INBOX"), f("a1", "/Legal"), f("a1", "/Projects"), f("a1", "/Legal/Sub")];
+  const r = reconcile(s, "a1", folders);
+  assert.equal(r.patch, null, "nothing is adopted");
+  assert.deepEqual(r.unseen, ["/Projects"], "a subfolder of an excluded folder is hidden anyway, not flagged");
   assert.equal(isUnseen("a1", "/Projects", s), true);
-  r = reconcile(s, "a1", folders, 1000 + GRACE_MS - 1, seen);
-  assert.equal(r.patch, null, "not yet");
-  r = reconcile(s, "a1", folders, 1000 + GRACE_MS, seen);
-  assert.deepEqual(r.patch.knownFolders.a1, { "/INBOX": 0, "/Legal": 0, "/Projects": 1000 + GRACE_MS });
-  s = { ...s, ...r.patch };
-  assert.equal(isExcluded("a1", "/Projects", s), false);
-  assert.equal(seen.size, 0);
+  assert.equal(reconcile(s, "a1", folders).patch, null, "nor on a later check");
+  assert.deepEqual(reviewed(folders, "a1"), { "/INBOX": 0, "/Legal": 0, "/Projects": 0, "/Legal/Sub": 0 });
 });
 
-test("a rename made in webmail arrives as a new folder, then the old one goes: the new one stays hidden", () => {
-  const seen = new Map();
+test("a rename made in webmail, the old folder still listed for a while, keeps the new one hidden", () => {
   let s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: { a1: { "/INBOX": 0, "/Legal": 0 } } };
-  // Thunderbird's folder discovery adds the new name first...
-  let r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal"), f("a1", "/Legal 2026")], 1000, seen);
+  // Thunderbird's folder discovery adds the new name; the old one stays
+  // listed, so no exclusion is missing...
+  let r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal"), f("a1", "/Legal 2026")]);
   assert.equal(r.patch, null);
+  assert.deepEqual(r.missing, []);
   assert.equal(isExcluded("a1", "/Legal 2026", s), true, "hidden while new");
-  // ...then drops the old one.
-  r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal 2026")], 2000, seen);
+  // ...and only later drops the old one.
+  r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal 2026")]);
   assert.deepEqual(r.missing, ["/Legal"]);
-  s = { ...s, ...(r.patch || {}) };
-  // Long after the grace period it is still hidden, while /Legal is missing.
-  r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal 2026")], 2000 + 10 * GRACE_MS, seen);
-  assert.equal(r.due, null);
   s = { ...s, ...(r.patch || {}) };
   assert.equal(isExcluded("a1", "/Legal 2026", s), true);
   assert.equal(isExcluded("a1", "/INBOX", s), false);
 });
 
-test("when an exclusion goes missing, folders adopted lately are hidden again", () => {
-  const now = 100 * RECENT_MS;
-  const s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: { a1: { "/INBOX": 0, "/Legal": 0, "/Late": now - 1000, "/Older": now - RECENT_MS - 1 } } };
-  const r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Late"), f("a1", "/Older")], now, new Map());
-  assert.deepEqual(r.missing, ["/Legal"]);
-  assert.deepEqual(r.patch.knownFolders.a1, { "/INBOX": 0, "/Older": now - RECENT_MS - 1 });
-});
-
 test("a folder that is gone is forgotten, so one coming back under its name is new", () => {
   const s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: { a1: { "/INBOX": 0, "/Legal": 0, "/Old": 0 } } };
-  const r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal")], 1000, new Map());
+  const r = reconcile(s, "a1", [f("a1", "/INBOX"), f("a1", "/Legal")]);
   assert.deepEqual(r.patch.knownFolders.a1, { "/INBOX": 0, "/Legal": 0 });
   assert.equal(isUnseen("a1", "/Old", { ...s, ...r.patch }), true);
 });
 
 test("no folder list changes nothing; an account without exclusions drops its list", () => {
   const s = { excludedFolders: [ex("a1", "/Legal")], knownFolders: { a1: { "/Legal": 0 }, a2: { "/INBOX": 0 } } };
-  assert.deepEqual(reconcile(s, "a1", [], 1000, new Map()), { patch: null, missing: [], due: null });
-  assert.deepEqual(reconcile(s, "a2", [f("a2", "/INBOX")], 1000, new Map()).patch, { knownFolders: { a1: { "/Legal": 0 } } });
-  assert.equal(reconcile({ excludedFolders: [], knownFolders: {} }, "a3", [f("a3", "/INBOX")], 1000, new Map()).patch, null);
+  assert.deepEqual(reconcile(s, "a1", []), { patch: null, missing: [], unseen: [] });
+  assert.deepEqual(reconcile(s, "a2", [f("a2", "/INBOX")]).patch, { knownFolders: { a1: { "/Legal": 0 } } });
+  assert.equal(reconcile({ excludedFolders: [], knownFolders: {} }, "a3", [f("a3", "/INBOX")]).patch, null);
+});
+
+test("mergeExclusions applies the page's ticks and unticks to what is stored now", () => {
+  const base = [ex("a1", "/Secret"), ex("a1", "/Old")];
+  // The background followed a rename the page did not see.
+  const stored = [ex("a1", "/Secret2"), ex("a1", "/Old")];
+  // The page unticked /Old and ticked /New.
+  const page = [ex("a1", "/Secret"), ex("a1", "/New")];
+  assert.deepEqual(mergeExclusions(stored, base, page), [ex("a1", "/Secret2"), ex("a1", "/New")]);
+  assert.deepEqual(mergeExclusions(stored, base, base), stored, "no change on the page keeps what is stored");
+  assert.deepEqual(mergeExclusions([ex("a1", "/X")], [], [ex("a1", "/X")]), [ex("a1", "/X")], "no duplicate");
 });
 
 test("an account without a folders-seen list hides nothing extra", () => {

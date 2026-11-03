@@ -239,6 +239,7 @@ async function options(settings) {
 }
 
 test("options show the saved settings", async () => {
+  await mock.messenger.permissions.request({ permissions: ["messages.send"] });
   const p = await options({
     accounts: { a1: true },
     groups: { read: true, organise: false, compose: true, contacts: true },
@@ -829,6 +830,102 @@ test("unticking direct send gives the messages.send permission back", async () =
   await flush();
   assert.deepEqual(mock.permissionRemovals, [["messages.send"]]);
   assert.equal(await mock.messenger.permissions.contains({ permissions: ["messages.send"] }), false);
+});
+
+test("direct send shows as off when its permission is gone, though the settings say on", async () => {
+  // Given back in Thunderbird's add-ons manager, or by an untick never saved.
+  const p = await options({ accounts: { a1: true }, send: { enabled: true, allow: ["a@example.com"] } });
+  assert.equal(p.$("send-enabled").checked, false);
+});
+
+test("unticking direct send and leaving without saving keeps sending off", async () => {
+  await mock.messenger.permissions.request({ permissions: ["messages.send"] });
+  let p = await options({ accounts: { a1: true }, send: { enabled: true, allow: ["a@example.com"] } });
+  assert.equal(p.$("send-enabled").checked, true);
+  p.tick(p.$("send-enabled"), false);
+  await flush();
+  assert.equal((await load()).send.enabled, false, "stored at once");
+  assert.deepEqual((await load()).send.allow, ["a@example.com"]);
+  // The page is opened again without a save.
+  p = await options();
+  assert.equal(p.$("send-enabled").checked, false);
+});
+
+test("a rename the background followed is kept when the page is saved, also one the page did not see", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // Thunderbird renamed the folder before the page listened: the page saw
+  // no event, the background moved the exclusion.
+  mock.renameFolder("a1", "Private", "Secret", { quiet: true });
+  await save({ excludedFolders: [{ accountId: "a1", path: "Secret" }] });
+  await flush();
+  p.tick(boxes(p.document, "#excluded input").find((f) => f.getAttribute("data-path") === "INBOX"));
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Secret" }, { accountId: "a1", path: "INBOX" }]);
+});
+
+test("the options save merges into the stored exclusions instead of replacing them", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // A change the page never heard of: no storage event reaches it.
+  const listeners = mock.messenger.storage.onChanged.listeners.splice(0);
+  await save({ excludedFolders: [{ accountId: "a1", path: "Secret" }] });
+  mock.messenger.storage.onChanged.listeners.push(...listeners);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  assert.deepEqual((await load()).excludedFolders, [{ accountId: "a1", path: "Secret" }]);
+});
+
+test("a folder event that comes while the options are loading is not missed", async () => {
+  await save({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  const p = page("options.html");
+  const loading = initOptions(p.document, { send, m: mock.messenger, clipboard, confirm: () => true });
+  mock.createFolder("a1", "Projects");
+  await loading;
+  await flush();
+  assert.ok(boxes(p.document, "#excluded input").some((f) => f.getAttribute("data-path") === "Projects"));
+});
+
+test("a new folder is labelled hidden until the save, and stays hidden until then", async () => {
+  const p = await options({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  await bg.foldersIdle();
+  mock.createFolder("a1", "Projects");
+  await bg.foldersIdle();
+  await flush();
+  const label = () => boxes(p.document, "#excluded label").map((l) => l.textContent.trim()).find((t) => t.startsWith("Work: Projects"));
+  assert.equal(label(), "Work: Projects (new: hidden from AI apps until you save)");
+  assert.equal(p.$("missing-note").hidden, true, "no exclusion is missing");
+  assert.match(p.document.querySelector("#excluded").parentElement.textContent, /until you save this page/);
+  p.fire(p.$("form"), "submit");
+  await flush();
+  await bg.foldersIdle();
+  assert.equal(label(), "Work: Projects");
+  assert.equal((await load()).knownFolders.a1.Projects, 0);
+});
+
+test("the popup names a new folder hidden from AI apps", async () => {
+  await save({ accounts: { a1: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  await bg.foldersIdle();
+  mock.createFolder("a1", "Projects");
+  await bg.foldersIdle();
+  const p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  const notes = boxes(p.document, "#notes li").map((li) => li.textContent);
+  assert.match(notes[0], /^New folder hidden from AI apps: Work: Projects\./);
+});
+
+test("the popup says when the host program could not be started", async () => {
+  // The host that said welcome stops; then twice the program does not
+  // start (the reconnects come at once, then after 1 s).
+  port.drop("host exited");
+  for (let i = 0; i < 2; i++) {
+    const before = mock.lastPort();
+    while (mock.lastPort() === before) await new Promise((r) => setTimeout(r, 50));
+    mock.lastPort().drop("An unexpected error occurred");
+    await flush();
+  }
+  const p = page("popup.html");
+  await initPopup(p.document, { send, m: mock.messenger });
+  assert.equal(p.$("state").textContent, "Host program could not be started");
 });
 
 test("the popup names excluded folders not found and accounts not enabled yet", async () => {

@@ -1967,7 +1967,7 @@ func TestE2EConnectRestart(t *testing.T) {
 // connects, and waits until folder a is there and folder b is not ("" for
 // either means no wait); "drop" removes folder a as discovery does when the
 // server no longer has it, which a discovery started from here does not
-// get to within the test's time.
+// get to within the test's time; any other action only lists them.
 const imapFoldersScript = `
 const resolve = arguments[arguments.length - 1];
 (async () => {
@@ -2194,10 +2194,12 @@ func TestE2EExcludedFolderFollows(t *testing.T) {
 	folderHidden(t, cs, "/Sorted/E2E Renamed")
 
 	// Renamed on the server, as webmail does: Thunderbird sees a new folder
-	// and the excluded one gone. The new one stays hidden, past the wait a
-	// new folder gets, and the toolbar says an excluded folder is missing.
-	// The new name stays under Sorted: GreenMail keeps a renamed mailbox
-	// under its parent whatever name it is given.
+	// and, later, the excluded one gone. The new one stays hidden while the
+	// old one is still listed, past the half minute an earlier version
+	// waited before showing a new folder, and after the old one goes; the
+	// toolbar first says a new folder is hidden, then that an excluded
+	// folder is missing. The new name stays under Sorted: GreenMail keeps a
+	// renamed mailbox under its parent whatever name it is given.
 	old := serverMailbox(t, "E2E Renamed")
 	renamed := strings.TrimSuffix(old, "E2E Renamed") + "E2E Webmail"
 	run, done = imapSession(t)
@@ -2212,11 +2214,20 @@ func TestE2EExcludedFolderFollows(t *testing.T) {
 	lsub, _ := run(`LSUB "" "*"`)
 	t.Logf("renamed %q to %q on the server; subscribed: %v", old, renamed, lsub)
 	done()
+	// Discovery started from Marionette adds the new folder and keeps the
+	// old one, as the real ordering can for minutes; the old one is dropped
+	// only after the wait, with the call discovery itself uses.
 	imapFolders(t, "discover", "/Sorted/E2E Webmail", "")
 	folderHidden(t, cs, "/Sorted/E2E Webmail")
-	imapFolders(t, "drop", "/Sorted/E2E Renamed", "")
-	folderHidden(t, cs, "/Sorted/E2E Webmail")
 	time.Sleep(35 * time.Second)
+	if got := imapFoldersOnce(t, "list", "", ""); !contains(got, "/Sorted/E2E Renamed") {
+		t.Fatalf("the old folder went before the wait was over, so the test proves nothing: %v", got)
+	}
+	folderHidden(t, cs, "/Sorted/E2E Webmail")
+	if st := toolbarState(t); !strings.Contains(st.Title, "new folder is hidden") || st.Badge != "!" {
+		t.Fatalf("toolbar with a new folder = %+v", st)
+	}
+	imapFolders(t, "drop", "/Sorted/E2E Renamed", "")
 	folderHidden(t, cs, "/Sorted/E2E Webmail")
 	if got := strings.Join(excludedPaths(addonSettings(t, nil)), ","); got != "account1:/Sorted/E2E Renamed" {
 		t.Fatalf("the exclusion of the missing folder was not kept: %s", got)
@@ -2258,7 +2269,8 @@ const resolve = arguments[arguments.length - 1];
 
 // TestE2EMissingHostText checks the words Thunderbird uses when no native
 // messaging manifest names a host: the background matches them to show
-// "host program not installed" (addon/src/background.js, NO_HOST).
+// "host program not installed" (addon/src/background.js, NO_HOST). A
+// manifest whose program is missing is TestE2EBrokenHostText.
 func TestE2EMissingHostText(t *testing.T) {
 	var got struct{ Message, Error string }
 	marionette(t, missingHostScript, &got)
@@ -2267,6 +2279,57 @@ func TestE2EMissingHostText(t *testing.T) {
 	}
 	if !regexp.MustCompile(`No such native application`).MatchString(got.Message) {
 		t.Fatalf("port error for a missing host = %q", got.Message)
+	}
+}
+
+// brokenHostScript writes a native messaging manifest whose path names a
+// program that does not exist into the user's manifest folder, starts
+// that host as missingHostScript does, removes the manifest again and
+// returns the error the port closes with. On Windows manifests are found
+// through the registry, so it says skip there.
+const brokenHostScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  if (Services.appinfo.OS === "WINNT") return { skip: true };
+  const { NativeApp } = ChromeUtils.importESModule("resource://gre/modules/NativeMessaging.sys.mjs");
+  const id = "mcp-for-thunderbird@wadejbeckett.github.io";
+  const name = "mcp_for_thunderbird_e2e_broken";
+  const dir = PathUtils.join(Services.dirsvc.get("XREUserNativeManifests", Ci.nsIFile).path, Services.appinfo.OS === "Darwin" ? "NativeMessagingHosts" : "native-messaging-hosts");
+  const file = PathUtils.join(dir, name + ".json");
+  const missing = PathUtils.join(PathUtils.tempDir, "mcp-for-thunderbird-e2e-no-such-program");
+  await IOUtils.makeDirectory(dir, { ignoreExisting: true });
+  await IOUtils.writeJSON(file, { name, description: "e2e: a host whose program is missing", path: missing, type: "stdio", allowed_extensions: [id] });
+  try {
+    const ctx = [...WebExtensionPolicy.getByID(id).extension.views].find((v) => v.viewType === "background");
+    return await new Promise((done) => {
+      const app = new NativeApp(ctx, name);
+      app.once("disconnect", (_, err) => done({ message: String(err && err.message) }));
+    });
+  } finally {
+    await IOUtils.remove(file);
+  }
+})().then(resolve, (e) => resolve({ error: String(e) }));
+`
+
+// TestE2EBrokenHostText checks what Thunderbird says when the manifest is
+// there but its program is not, as after the host was deleted or moved:
+// not "No such native application" but words the background matches to
+// show "host program could not be started" (BROKEN_HOST).
+func TestE2EBrokenHostText(t *testing.T) {
+	var got struct {
+		Message, Error string
+		Skip           bool
+	}
+	marionette(t, brokenHostScript, &got)
+	if got.Skip {
+		t.Skip("native messaging manifests are found through the registry on Windows")
+	}
+	if got.Error != "" {
+		t.Fatalf("broken host: %s", got.Error)
+	}
+	t.Logf("port error for a host whose program is missing: %q", got.Message)
+	if regexp.MustCompile(`No such native application`).MatchString(got.Message) || !regexp.MustCompile(`does not exist, or is not executable`).MatchString(got.Message) {
+		t.Fatalf("port error for a host whose program is missing = %q", got.Message)
 	}
 }
 

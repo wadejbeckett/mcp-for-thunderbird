@@ -337,10 +337,10 @@ test("message router: getState, setPaused, log and unknown types", async () => {
   welcome(port);
   const [handler] = mock.messenger.runtime.onMessage.listeners;
   const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
-  assert.deepEqual(await handler({ type: "getState" }, me), { state: "connected", paused: false, missing: [], newAccounts: [] });
+  assert.deepEqual(await handler({ type: "getState" }, me), { state: "connected", paused: false, missing: [], newFolders: [], newAccounts: [] });
   assert.deepEqual(await handler({ type: "setPaused", paused: true }, me), { paused: true });
   assert.equal((await load()).paused, true);
-  assert.deepEqual(await handler({ type: "getState" }, me), { state: "paused", paused: true, missing: [], newAccounts: [] });
+  assert.deepEqual(await handler({ type: "getState" }, me), { state: "paused", paused: true, missing: [], newFolders: [], newAccounts: [] });
   await handler({ type: "setPaused", paused: false }, me);
   assert.equal((await load()).paused, false);
   await assert.rejects(handler({ type: "setPaused", paused: "yes" }, me), /true or false/);
@@ -371,7 +371,7 @@ test("message router fails closed on a missing or foreign sender", async () => {
   assert.equal(handler(msg, { id: rt.id, url: "https://evil.test/ui/options.html" }), undefined, "web page url");
   assert.equal(handler(msg, { id: rt.id, url: "moz-extension://other-uuid/ui/options.html" }), undefined, "another extension's url");
   assert.equal(handler(msg, { id: "other@addon", url: rt.getURL("ui/options.html") }), undefined, "another id");
-  assert.deepEqual(await handler(msg, { id: rt.id, url: rt.getURL("ui/popup.html") }), { state: "connected", paused: false, missing: [], newAccounts: [] });
+  assert.deepEqual(await handler(msg, { id: rt.id, url: rt.getURL("ui/popup.html") }), { state: "connected", paused: false, missing: [], newFolders: [], newAccounts: [] });
 });
 
 test("message router: rotateToken, detectClients, configureClients and getEndpoint", async () => {
@@ -531,7 +531,7 @@ test("a host failure on the same protocol is not Update needed", async () => {
   assert.equal(port.sentOfType("result")[0].error.code, "refused");
   const [handler] = mock.messenger.runtime.onMessage.listeners;
   const me = { id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/options.html") };
-  assert.deepEqual(await handler({ type: "getState" }, me), { state: "host_error", paused: false, error: "No free port between 47110 and 47119", missing: [], newAccounts: [] });
+  assert.deepEqual(await handler({ type: "getState" }, me), { state: "host_error", paused: false, error: "No free port between 47110 and 47119", missing: [], newFolders: [], newAccounts: [] });
   // The host exits after such a welcome; the add-on keeps the reason and
   // tries again with backoff.
   port.drop();
@@ -580,10 +580,9 @@ test("on Thunderbird 140 the tool list leaves out mail_draft and mail_send", asy
 // ---- excluded folders follow their folder (exclusions.js) ----
 
 import { isExcluded } from "../src/policy.js";
-import { GRACE_MS } from "../src/exclusions.js";
 
 // withFolders restarts the background on a mock whose account a1 has these
-// folders and excluded folders, with a clock the test moves.
+// folders and excluded folders.
 async function withFolders(folders, excludedFolders, extra = []) {
   bg.stop();
   mock = install({
@@ -591,13 +590,11 @@ async function withFolders(folders, excludedFolders, extra = []) {
     manifest: { version: "1.2.3", manifest_version: 3 },
   });
   await save({ accounts: { a1: true, ...Object.fromEntries(extra.map((a) => [a.id, true])) }, excludedFolders, setupDone: true });
-  const clock = { t: 1_000_000 };
-  bg = createBackground({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout, now: () => clock.t });
+  bg = createBackground({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout });
   await bg.start();
   welcome(mock.lastPort());
   await bg.foldersIdle();
   await flush();
-  return clock;
 }
 
 const me = () => ({ id: mock.messenger.runtime.id, url: mock.messenger.runtime.getURL("ui/popup.html") });
@@ -633,18 +630,20 @@ test("a rename not yet reported keeps the new name hidden", async () => {
 });
 
 test("a rename made in webmail (a new folder, then the old one gone) keeps the folder hidden and is flagged", async () => {
-  const clock = await withFolders(["INBOX", "Legal"], [{ accountId: "a1", path: "Legal" }]);
+  await withFolders(["INBOX", "Legal"], [{ accountId: "a1", path: "Legal" }]);
   mock.createFolder("a1", "Legal 2026");
   await bg.foldersIdle();
   assert.equal(isExcluded("a1", "Legal 2026", await load()), true, "hidden while new");
-  clock.t += 1000;
+  assert.deepEqual((await getState()).newFolders, [{ account: "Work", path: "Legal 2026" }]);
+  assert.match(mock.actionState.title, /new folder is hidden/);
+  // Every timer runs, as if the old folder stayed listed for a long time:
+  // nothing adopts the new one.
+  for (const t of timers.pending()) if (t.ms > 1000) t.fn();
+  await bg.foldersIdle();
+  assert.equal(isExcluded("a1", "Legal 2026", await load()), true, "still hidden while the old folder is listed");
   mock.deleteFolder("a1", "Legal");
   await bg.foldersIdle();
   await flush();
-  clock.t += 10 * GRACE_MS;
-  // whatever timer is due runs; the folder stays hidden while Legal is missing
-  for (const t of timers.pending()) if (t.ms > 1000) t.fn();
-  await bg.foldersIdle();
   const s = await load();
   assert.equal(isExcluded("a1", "Legal 2026", s), true);
   assert.equal(isExcluded("a1", "INBOX", s), false);
@@ -654,26 +653,15 @@ test("a rename made in webmail (a new folder, then the old one gone) keeps the f
   assert.equal(mock.actionState.badgeText, "!");
 });
 
-test("a new folder is adopted once its wait is over, by the timer or before a call", async () => {
-  const clock = await withFolders(["INBOX", "Legal"], [{ accountId: "a1", path: "Legal" }]);
+test("a new folder stays hidden, also from a call, until the user has seen it", async () => {
+  await withFolders(["INBOX", "Legal"], [{ accountId: "a1", path: "Legal" }]);
   mock.createFolder("a1", "Projects");
   await bg.foldersIdle();
-  assert.equal(isExcluded("a1", "Projects", await load()), true);
-  const due = timers.pending().find((t) => t.ms >= GRACE_MS);
-  assert.ok(due, "a timer for the end of the wait");
-  clock.t += GRACE_MS + 200;
-  due.fired = true;
-  due.fn();
-  await bg.foldersIdle();
-  assert.equal(isExcluded("a1", "Projects", await load()), false);
-
-  // Without the timer, the next call adopts it first.
-  mock.createFolder("a1", "Later");
-  await bg.foldersIdle();
-  clock.t += GRACE_MS + 200;
+  await flush();
+  assert.equal(timers.pending().some((t) => t.ms >= 30_000), false, "no timer adopts it");
   let seen = null;
   HANDLERS.mail_folders = async (args, ctx) => {
-    seen = isExcluded("a1", "Later", ctx.settings);
+    seen = isExcluded("a1", "Projects", ctx.settings);
     return {};
   };
   const port = mock.lastPort();
@@ -682,7 +670,34 @@ test("a new folder is adopted once its wait is over, by the timer or before a ca
   await bg.foldersIdle();
   await flush();
   assert.equal(port.sentOfType("result").at(-1).ok, true);
-  assert.equal(seen, false);
+  assert.equal(seen, true);
+  assert.equal(mock.actionState.badgeText, "!");
+  // The options record it as seen; the toolbar goes back to connected.
+  await save({ knownFolders: { a1: { INBOX: 0, Legal: 0, Projects: 0 } } });
+  await flush();
+  await bg.foldersIdle();
+  await flush();
+  assert.equal(isExcluded("a1", "Projects", await load()), false);
+  assert.deepEqual((await getState()).newFolders, []);
+  assert.equal(mock.actionState.title, "MCP for Thunderbird: connected");
+});
+
+test("upgrading with a stale exclusion keeps the account's folders visible and flags the exclusion", async () => {
+  // The previous version never removed an exclusion of a deleted folder.
+  await withFolders(["INBOX", "Projects"], [{ accountId: "a1", path: "OldGone" }]);
+  const s = await load();
+  assert.deepEqual(s.knownFolders, { a1: { INBOX: 0, Projects: 0 } });
+  assert.equal(isExcluded("a1", "INBOX", s), false);
+  assert.deepEqual((await getState()).missing, [{ account: "Work", path: "OldGone" }]);
+});
+
+test("an exclusion of a saved search is not reported as missing", async () => {
+  await withFolders(["INBOX", { path: "Unread Work", isVirtual: true }], [{ accountId: "a1", path: "Unread Work" }]);
+  const s = await load();
+  assert.equal(isExcluded("a1", "INBOX", s), false);
+  assert.deepEqual((await getState()).missing, []);
+  assert.equal(mock.actionState.title, "MCP for Thunderbird: connected");
+  assert.equal(mock.actionState.badgeText, "");
 });
 
 test("a deleted account's settings are removed, and a new one is not enabled", async () => {
@@ -718,4 +733,42 @@ test("a host that is not installed is named in the toolbar and to the pages", as
   mock.lastPort().drop("host exited");
   await flush();
   assert.equal(bg.state(), "not_connected", "a host that stopped is not called missing");
+});
+
+test("a host program that cannot be started is named after the second try", async () => {
+  // A manifest whose path names a missing program: Thunderbird closes the
+  // port with a generic error, before the host says anything.
+  await bg.start();
+  mock.lastPort().drop("An unexpected error occurred");
+  await flush();
+  assert.equal(bg.state(), "not_connected", "once may be a host that stopped while starting");
+  timers.fire();
+  await flush();
+  mock.lastPort().drop("An unexpected error occurred");
+  await flush();
+  assert.equal(bg.state(), "not_started");
+  assert.equal(mock.actionState.title, "MCP for Thunderbird: host program could not be started");
+  assert.equal(mock.actionState.badgeText, "!");
+  await assert.rejects(bg.requestToken(), /could not be started\. Install it again/);
+  timers.fire();
+  await flush();
+  assert.equal(bg.state(), "not_started", "a retry under way keeps saying so");
+  welcome(mock.lastPort());
+  await flush();
+  assert.equal(bg.state(), "connected");
+  // A host that ran and stopped is not one that could not start.
+  mock.lastPort().drop("host exited");
+  await flush();
+  timers.fire();
+  await flush();
+  mock.lastPort().drop("host exited");
+  await flush();
+  assert.equal(bg.state(), "not_connected");
+});
+
+test("Thunderbird's words for a program that is not there name it at once", async () => {
+  await bg.start();
+  mock.lastPort().drop('File at path "/home/u/.local/bin/mcp-for-thunderbird" does not exist, or is not executable');
+  await flush();
+  assert.equal(bg.state(), "not_started");
 });

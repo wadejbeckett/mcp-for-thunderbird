@@ -40,19 +40,33 @@ const TOOLBAR = {
   mismatch: { title: "Update needed", badge: "!", color: "#b00020" },
   host_error: { title: "MCP for Thunderbird: host program problem", badge: "!", color: "#b00020" },
   not_installed: { title: "MCP for Thunderbird: host program not installed", badge: "!", color: "#b00020" },
+  not_started: { title: "MCP for Thunderbird: host program could not be started", badge: "!", color: "#b00020" },
 };
 
-// REVIEW replaces the connected look while an excluded folder of an
-// enabled account names no folder.
-const REVIEW = {
+// The review looks replace the connected look while an excluded folder of
+// an enabled account names no folder, or a new folder there waits to be
+// seen in the options.
+const REVIEW_MISSING = {
   title: "MCP for Thunderbird: connected. An excluded folder was not found; check the excluded folders in the options.",
+  badge: "!",
+  color: "#8a6d00",
+};
+const REVIEW_NEW = {
+  title: "MCP for Thunderbird: connected. A new folder is hidden from AI apps until you check the excluded folders in the options.",
   badge: "!",
   color: "#8a6d00",
 };
 
 // Thunderbird's own words when no native messaging manifest names the
-// host (NativeMessaging.sys.mjs).
+// host, and when the manifest's path names no program it can run
+// (NativeMessaging.sys.mjs and Subprocess, Thunderbird 153). Other
+// failures to start, such as through the Flatpak or Snap portal, give
+// other words, so a port that closes twice running before the host said
+// anything also counts as a host that could not be started
+// (START_FAILURES).
 const NO_HOST = /No such native application/;
+const BROKEN_HOST = /does not exist, or is not executable/;
+const START_FAILURES = 2;
 
 // hostMessage keeps a host-supplied welcome error to one short printable
 // line for the toolbar and the pages.
@@ -64,6 +78,7 @@ function hostMessage(v) {
 const UPDATE_NEEDED = "MCP for Thunderbird and its host program need updating to matching versions.";
 const NOT_CONNECTED = "MCP for Thunderbird is not connected to its host program.";
 const NOT_INSTALLED = "The host program of MCP for Thunderbird is not installed. Install it, then restart Thunderbird.";
+const NOT_STARTED = "The host program of MCP for Thunderbird could not be started. Install it again, then restart Thunderbird.";
 const GENERIC = "Thunderbird could not complete the request.";
 
 function b64ToBytes(s) {
@@ -81,7 +96,7 @@ function concat(chunks) {
   return out;
 }
 
-export function createBackground({ setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout, now = () => Date.now() } = {}) {
+export function createBackground({ setTimeout: setT = globalThis.setTimeout, clearTimeout: clearT = globalThis.clearTimeout } = {}) {
   const m = () => globalThis.messenger;
   let port = null;
   let welcomed = false;
@@ -91,6 +106,8 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   let mismatch = false;
   let hostError = null; // the last same-protocol welcome ok:false, until a good welcome
   let hostMissing = false; // the last disconnect said the host is not installed, until a welcome
+  let startFailures = 0; // ports closed in a row before the host said anything
+  let heardFrom = null; // the last port the host sent a message on
   let paused = false;
   let attempt = 0;
   let timer = null;
@@ -106,11 +123,9 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   const listeners = [];
   // Folder bookkeeping (exclusions.js): one step at a time.
   let folderChain = Promise.resolve();
-  const firstSeen = new Map();
   const missing = new Map(); // enabled account id -> excluded paths not found
-  let dueAt = null;
-  let dueTimer = null;
-  let lastWatched = null; // excluded folders and accounts last checked
+  const waiting = new Map(); // enabled account id -> new folders hidden until seen
+  let lastWatched = null; // excluded folders, accounts and folders seen last checked
   let thunderbird; // Thunderbird's version, read once
 
   function on(ev, fn) {
@@ -122,13 +137,14 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     if (mismatch) return "mismatch";
     if (hostError && (!port || !welcomed)) return "host_error";
     if (hostMissing && !welcomed) return "not_installed";
+    if (startFailures >= START_FAILURES && !welcomed) return "not_started";
     if (!port || !welcomed) return "not_connected";
     return paused ? "paused" : "connected";
   }
 
   async function showState() {
     const st = state();
-    const t = st === "connected" && missing.size > 0 ? REVIEW : TOOLBAR[st];
+    const t = st !== "connected" ? TOOLBAR[st] : missing.size > 0 ? REVIEW_MISSING : waiting.size > 0 ? REVIEW_NEW : TOOLBAR[st];
     const action = m().action;
     if (!action) return;
     try {
@@ -240,8 +256,12 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   function onDisconnect(p) {
     if (port !== p) return;
     // Thunderbird says why the port closed only as text; a host that is
-    // not installed is told apart from one that stopped.
-    hostMissing = Boolean(p.error && NO_HOST.test(String(p.error.message)));
+    // not installed is told apart from one that stopped, and one that
+    // never says anything from one that ran.
+    const why = p.error ? String(p.error.message) : "";
+    hostMissing = NO_HOST.test(why);
+    if (hostMissing || heardFrom === p) startFailures = 0;
+    else startFailures = BROKEN_HOST.test(why) ? START_FAILURES : startFailures + 1;
     port = null;
     welcomed = false;
     endpointPort = null;
@@ -253,6 +273,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
 
   function onMessage(p, msg) {
     if (port !== p || !msg || typeof msg !== "object") return;
+    heardFrom = p;
     switch (msg.type) {
       case "welcome":
         // Another protocol means an update is needed (the host stays up,
@@ -266,6 +287,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
         } else {
           hostError = null;
           hostMissing = false;
+          startFailures = 0;
           welcomed = true;
           attempt = 0;
           endpointPort = !mismatch && Number.isInteger(msg.port) && msg.port > 0 && msg.port < 65536 ? msg.port : null;
@@ -380,16 +402,16 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     return folderChain;
   }
 
-  // foldersSettled lets a call wait for bookkeeping under way, and adopts
-  // new folders whose wait is over, as the timer would have.
+  // foldersSettled lets a call wait for bookkeeping under way.
   async function foldersSettled() {
-    if (dueAt !== null && now() >= dueAt) folderWork(checkAll);
     let t;
     await Promise.race([folderChain, new Promise((r) => (t = setT(r, FOLDER_WAIT_MS)))]);
     clearT(t);
   }
 
-  const watchKey = (s) => JSON.stringify([s.excludedFolders || [], s.accounts || {}]);
+  // A change to these checks every account again: the options record the
+  // folders the user saw in knownFolders, which can clear the toolbar flag.
+  const watchKey = (s) => JSON.stringify([s.excludedFolders || [], s.accounts || {}, s.knownFolders || {}]);
 
   async function foldersOf(accountId) {
     try {
@@ -408,14 +430,16 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     if (!folders) return;
     let r = null;
     const s = await update((cur) => {
-      r = reconcile(cur, accountId, folders, now(), firstSeen);
+      r = reconcile(cur, accountId, folders);
       return r.patch;
     });
-    const before = missing.size;
-    if (r.missing.length > 0 && s.accounts && s.accounts[accountId] === true) missing.set(accountId, r.missing);
+    const before = `${missing.size},${waiting.size}`;
+    const enabled = Boolean(s.accounts && s.accounts[accountId] === true);
+    if (enabled && r.missing.length > 0) missing.set(accountId, r.missing);
     else missing.delete(accountId);
-    if (r.due !== null) scheduleDue(r.due);
-    if (missing.size !== before) showState();
+    if (enabled && r.unseen.length > 0) waiting.set(accountId, r.unseen);
+    else waiting.delete(accountId);
+    if (`${missing.size},${waiting.size}` !== before) showState();
   }
 
   // checkAll checks every account with exclusions or a folders-seen list.
@@ -424,25 +448,10 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     lastWatched = watchKey(s);
     const ids = new Set(Object.keys(s.knownFolders || {}));
     for (const ex of s.excludedFolders || []) if (ex && typeof ex.accountId === "string") ids.add(ex.accountId);
-    for (const id of [...missing.keys()]) {
-      if (!ids.has(id)) missing.delete(id);
-    }
+    for (const id of [...missing.keys()]) if (!ids.has(id)) missing.delete(id);
+    for (const id of [...waiting.keys()]) if (!ids.has(id)) waiting.delete(id);
     for (const id of ids) await checkAccount(id);
     showState();
-  }
-
-  function scheduleDue(at) {
-    if (stopped || (dueAt !== null && dueAt <= at)) return;
-    if (dueTimer) clearT(dueTimer);
-    dueAt = at;
-    dueTimer = setT(
-      () => {
-        dueTimer = null;
-        dueAt = null;
-        folderWork(checkAll);
-      },
-      Math.max(0, at - now()) + 100,
-    );
   }
 
   // onFolderMoved follows a rename, a move or (keep) a copy.
@@ -466,7 +475,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     folderWork(async () => {
       await update((s) => forgetAccount(s, accountId));
       missing.delete(accountId);
-      for (const k of [...firstSeen.keys()]) if (k.startsWith(`${accountId}\u0000`)) firstSeen.delete(k);
+      waiting.delete(accountId);
       showState();
     });
   }
@@ -516,6 +525,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   function unusable() {
     if (mismatch) return new Error(UPDATE_NEEDED);
     if (hostMissing && !welcomed) return new Error(NOT_INSTALLED);
+    if (startFailures >= START_FAILURES && !welcomed) return new Error(NOT_STARTED);
     if (!port || !welcomed) return new Error(hostError ? `${NOT_CONNECTED} ${hostError}` : NOT_CONNECTED);
     return null;
   }
@@ -569,12 +579,13 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
   // runtime messaging and never touch the native port. The reply is a
   // promise, or undefined for a message that is not ours.
   // getState also names what the user should look at: excluded folders
-  // of enabled accounts that were not found, and accounts added since the
-  // settings were last saved, which are not enabled.
+  // of enabled accounts that were not found, new folders there that stay
+  // hidden until the user has seen them in the options, and accounts
+  // added since the settings were last saved, which are not enabled.
   async function getState() {
     const st = state();
     const s = await load();
-    const out = { state: st, paused: s.paused, missing: [], newAccounts: [] };
+    const out = { state: st, paused: s.paused, missing: [], newFolders: [], newAccounts: [] };
     if (st === "host_error") out.error = hostError;
     let accounts = [];
     try {
@@ -584,6 +595,7 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     }
     const name = new Map(accounts.map((a) => [a.id, a.name]));
     for (const [id, paths] of missing) for (const path of paths) out.missing.push({ account: name.get(id) || id, path });
+    for (const [id, paths] of waiting) for (const path of paths) out.newFolders.push({ account: name.get(id) || id, path });
     if (s.setupDone) out.newAccounts = accounts.filter((a) => !Object.hasOwn(s.accounts || {}, a.id)).map((a) => a.name);
     return out;
   }
@@ -673,9 +685,6 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     stopped = true;
     if (timer) clearT(timer);
     timer = null;
-    if (dueTimer) clearT(dueTimer);
-    dueTimer = null;
-    dueAt = null;
     for (const [ev, fn] of listeners.splice(0)) ev.removeListener(fn);
     if (port) {
       const p = port;

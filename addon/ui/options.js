@@ -7,11 +7,13 @@
 // activity log. Settings are saved with settings.update; everything about
 // the host goes through the background (runtime messages). The account
 // and folder lists follow Thunderbird's account and folder events while
-// the page is open. Saving also records the folders shown as seen by the
-// user (exclusions.js), for each account with excluded folders.
+// the page is open. Saving applies the page's ticks and unticks to the
+// excluded folders stored then, so a rename the background followed
+// meanwhile is kept, and records the folders shown as seen by the user
+// (exclusions.js), for each account with excluded folders.
 
 import { load, update, enabledTools, STORAGE_KEY } from "../src/settings.js";
-import { isRealFolder, followFolder, missingExclusions, reviewed } from "../src/exclusions.js";
+import { isRealFolder, followFolder, missingExclusions, reviewed, mergeExclusions } from "../src/exclusions.js";
 import { byId, showState, showLog, checkboxRow, messageOf, realDeps, inPage } from "./dom.js";
 import { supported } from "../src/features.js";
 import { parseAllowlist, isAbsolutePath, RESTART_NOTE, allMailAccounts, GMAIL_NOTE } from "./logic.js";
@@ -30,7 +32,7 @@ const NEW_ACCOUNT = "New account: not enabled yet.";
 const NEW_FOLDER = "(new: hidden from AI apps until you save)";
 const NOT_FOUND = "(not found in Thunderbird)";
 const MISSING_NOTE =
-  "Some excluded folders were not found. A folder renamed or moved outside Thunderbird, such as in webmail, appears here as a new folder: tick it to keep it excluded. Until you save, new folders in those accounts stay hidden from AI apps. Untick a folder that was not found to stop excluding it.";
+  "Some excluded folders were not found. A folder renamed or moved outside Thunderbird, such as in webmail, appears here as a new folder: tick it to keep it excluded. Untick a folder that was not found to stop excluding it.";
 
 // broadFolder says whether an absolute path names a folder too broad to
 // be the attachment folder: a filesystem root (/), a drive root (C:\), a
@@ -61,6 +63,27 @@ export function broadFolder(p) {
 
 export async function initOptions(doc, { send, m, clipboard, confirm }) {
   const $ = (id) => byId(doc, id);
+  // Thunderbird's folder and account events are listened to before
+  // anything is read, so none is missed while the page loads; they are
+  // handled once it has.
+  let loaded;
+  const ready = new Promise((r) => (loaded = r));
+  const later = (fn) => (...args) => ready.then(() => fn(...args));
+  const listen = (ev, fn) => {
+    if (ev && ev.addListener) ev.addListener(later(fn));
+  };
+  if (m.folders) {
+    listen(m.folders.onRenamed, (a, b) => folderMoved(a, b, false));
+    listen(m.folders.onMoved, (a, b) => folderMoved(a, b, false));
+    listen(m.folders.onCopied, (a, b) => folderMoved(a, b, true));
+    listen(m.folders.onCreated, folderChanged);
+    listen(m.folders.onDeleted, folderChanged);
+  }
+  listen(m.accounts.onCreated, () => accountsChanged());
+  listen(m.accounts.onDeleted, () => accountsChanged());
+  if (m.storage) listen(m.storage.onChanged, storageChanged);
+  if (m.permissions) listen(m.permissions.onRemoved, permissionRemoved);
+
   const settings = await load();
   let accounts = (await m.accounts.list(false)) || [];
   const accountName = new Map(accounts.map((a) => [a.id, a.name]));
@@ -69,6 +92,9 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
   // Every exclusion, shown or not. Ticks and unticks change it, and so do
   // the folder events that move it with its folder.
   const excluded = new Map(settings.excludedFolders.map((e) => [keyOf(e.accountId, e.path), e]));
+  // The exclusions the page started from, moved with renames like the
+  // page's own: a save applies the difference to the stored ones.
+  let base = [...settings.excludedFolders];
   // The folders seen in each account with exclusions, as the background
   // keeps them; only for the labels.
   let known = settings.knownFolders || {};
@@ -193,7 +219,15 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
 
   for (const g of GROUPS) $(`group-${g}`).checked = Boolean(settings.groups[g]);
   $("attachment-dir").value = settings.attachmentDir;
-  $("send-enabled").checked = settings.send.enabled;
+  // The box shows sending as on only while the permission is there too:
+  // it can be given back in Thunderbird's add-ons manager.
+  let sendGranted = false;
+  try {
+    sendGranted = Boolean(await m.permissions.contains({ permissions: ["messages.send"] }));
+  } catch {
+    sendGranted = false;
+  }
+  $("send-enabled").checked = settings.send.enabled && sendGranted;
   $("send-allow").value = settings.send.allow.join("\n");
 
   // Thunderbird 140 cannot save drafts or send without a window
@@ -212,10 +246,17 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     if (!box.checked) {
       // Unticking gives the permission back, so Thunderbird no longer
       // lists the add-on as able to send.
+      // The setting goes off at once too, so leaving without saving does
+      // not keep sending on without its permission.
       try {
         await m.permissions.remove({ permissions: ["messages.send"] });
       } catch {
         // the settings gate still keeps mail_send off
+      }
+      try {
+        await update((cur) => (cur.send.enabled ? { send: { ...cur.send, enabled: false } } : null));
+      } catch {
+        // the permission is gone, so mail_send stays off anyway
       }
       return;
     }
@@ -254,10 +295,11 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
       const groups = {};
       for (const g of GROUPS) groups[g] = $(`group-${g}`).checked;
       const sendOn = $("send-enabled").checked;
-      const exclusions = [...excluded.values()];
+      const page = [...excluded.values()];
       let before;
       const after = await update((cur) => {
         before = cur;
+        const exclusions = mergeExclusions(cur.excludedFolders, base, page);
         const accountMap = { ...cur.accounts };
         for (const b of accountBoxes) accountMap[b.getAttribute("data-id")] = b.checked;
         // The folders listed for a ticked account are now seen by the
@@ -279,6 +321,9 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
         };
       });
       known = after.knownFolders || {};
+      base = [...after.excludedFolders];
+      excluded.clear();
+      for (const e of base) excluded.set(keyOf(e.accountId, e.path), e);
       renderAccounts(after.accounts);
       await renderExcluded();
       const changed = JSON.stringify(enabledTools(before)) !== JSON.stringify(enabledTools(after));
@@ -339,7 +384,7 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     await refreshLog();
   });
 
-  // ---- Thunderbird's folder and account events ----
+  // ---- Thunderbird's folder and account events (listened to above) ----
 
   // A rename, move or copy moves the page's exclusions with the folder, as
   // the background does with the saved ones, so a save made now keeps
@@ -352,6 +397,8 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
       for (const e of patch.excludedFolders) excluded.set(keyOf(e.accountId, e.path), e);
       known = patch.knownFolders;
     }
+    const moved = followFolder({ excludedFolders: base }, from, to, { keep });
+    if (moved) base = moved.excludedFolders;
     folderCache.delete(from.accountId);
     folderCache.delete(to.accountId);
     renderExcluded();
@@ -361,28 +408,31 @@ export async function initOptions(doc, { send, m, clipboard, confirm }) {
     folderCache.delete(f.accountId);
     renderExcluded();
   }
-  const listen = (ev, fn) => {
-    if (ev && ev.addListener) ev.addListener(fn);
-  };
-  if (m.folders) {
-    listen(m.folders.onRenamed, (a, b) => folderMoved(a, b, false));
-    listen(m.folders.onMoved, (a, b) => folderMoved(a, b, false));
-    listen(m.folders.onCopied, (a, b) => folderMoved(a, b, true));
-    listen(m.folders.onCreated, folderChanged);
-    listen(m.folders.onDeleted, folderChanged);
-  }
-  listen(m.accounts.onCreated, () => accountsChanged());
-  listen(m.accounts.onDeleted, () => accountsChanged());
-  // The background adopts new folders after a while: the labels follow.
-  if (m.storage && m.storage.onChanged) {
-    listen(m.storage.onChanged, (changes, area) => {
-      const next = area === "local" && changes[STORAGE_KEY] && changes[STORAGE_KEY].newValue;
-      if (!next || JSON.stringify(next.knownFolders || {}) === JSON.stringify(known)) return;
+  // The background moves exclusions with their folder and keeps the
+  // folders seen: the page takes both over, keeping its own unsaved ticks.
+  function storageChanged(changes, area) {
+    const next = area === "local" && changes[STORAGE_KEY] && changes[STORAGE_KEY].newValue;
+    if (!next) return;
+    let redraw = false;
+    const stored = Array.isArray(next.excludedFolders) ? next.excludedFolders : [];
+    if (JSON.stringify(stored) !== JSON.stringify(base)) {
+      const merged = mergeExclusions(stored, base, [...excluded.values()]);
+      excluded.clear();
+      for (const e of merged) excluded.set(keyOf(e.accountId, e.path), e);
+      base = [...stored];
+      redraw = true;
+    }
+    if (JSON.stringify(next.knownFolders || {}) !== JSON.stringify(known)) {
       known = next.knownFolders || {};
-      renderExcluded();
-    });
+      redraw = true;
+    }
+    if (redraw) renderExcluded();
+  }
+  function permissionRemoved(p) {
+    if (p && Array.isArray(p.permissions) && p.permissions.includes("messages.send")) $("send-enabled").checked = false;
   }
 
+  loaded();
   await renderExcluded();
   await refreshState();
   await refreshLog();
