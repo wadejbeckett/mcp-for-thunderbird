@@ -36,13 +36,15 @@ const defaultCallTimeout = 60 * time.Second
 // another protocol version; the welcome ok:false has already been sent.
 var ErrProtocol = errors.New("protocol mismatch")
 
-// Hello is the add-on's opening message.
+// Hello is the add-on's opening message. Thunderbird is Thunderbird's
+// version, for the log; an add-on older than the field sends none.
 type Hello struct {
 	Protocol      int      `json:"protocol"`
 	Version       string   `json:"version"`
 	Instance      string   `json:"instance"`
 	Tools         []string `json:"tools"`
 	AttachmentDir string   `json:"attachmentDir"`
+	Thunderbird   string   `json:"thunderbird"`
 }
 
 // SaveFile is an attachment the host is asked to write to disk.
@@ -99,6 +101,7 @@ type frame struct {
 	Instance      string          `json:"instance,omitempty"`
 	Tools         []string        `json:"tools,omitempty"`
 	AttachmentDir string          `json:"attachmentDir,omitempty"`
+	Thunderbird   string          `json:"thunderbird,omitempty"`
 	OK            *bool           `json:"ok,omitempty"`
 	Content       json.RawMessage `json:"content,omitempty"`
 	Save          *struct {
@@ -498,7 +501,7 @@ func (b *Bridge) dispatch(f frame) {
 			return
 		}
 		b.deliverHello(helloOutcome{h: Hello{Protocol: f.Protocol, Version: f.Version,
-			Instance: f.Instance, Tools: f.Tools, AttachmentDir: f.AttachmentDir}})
+			Instance: f.Instance, Tools: f.Tools, AttachmentDir: f.AttachmentDir, Thunderbird: f.Thunderbird}})
 	case "tools":
 		if onTools != nil {
 			onTools(f.Tools)
