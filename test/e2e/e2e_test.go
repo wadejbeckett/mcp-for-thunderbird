@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1262,6 +1263,102 @@ const before = id.archiveEnabled;
 id.archiveEnabled = %s;
 return before;
 `
+
+// archiveGranularityScript sets identity id1's archive granularity (0 one
+// folder, 1 a folder per year, 2 per month) and returns the one it had.
+const archiveGranularityScript = `
+const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+const id = MailServices.accounts.getIdentity("id1");
+const before = id.archiveGranularity;
+id.archiveGranularity = %d;
+return before;
+`
+
+// TestE2EArchiveNewYearFolder archives into a year folder that Thunderbird
+// makes at the archive, in an account with an excluded folder. Such a new
+// folder is hidden until the user checks the excluded folders in the
+// options, so the message is failed with refused and mayHaveCompleted, and
+// no new id into it is given; on the server it is in the year folder.
+func TestE2EArchiveNewYearFolder(t *testing.T) {
+	cs := httpSession(t)
+	orig := addonSettings(t, nil)
+	delete(orig, "knownFolders")
+	stamp := time.Now().Format("150405.000")
+	subj := "E2E yearly " + stamp
+	msgID := "yearly-" + stamp + "@e2e.test"
+	year := strconv.Itoa(time.Now().UTC().Year())
+
+	run, done := imapSession(t)
+	for _, c := range []string{`CREATE "E2E Hidden"`, `SUBSCRIBE "E2E Hidden"`} {
+		if lines, ok := run(c); !ok {
+			done()
+			t.Fatalf("imap %s: %v", c, lines)
+		}
+	}
+	done()
+	yearBox := "" // the server's name for Archives/<year>, once it exists
+	var granularity int
+	marionette(t, fmt.Sprintf(archiveGranularityScript, 1), &granularity)
+	t.Cleanup(func() {
+		var ignored int
+		marionette(t, fmt.Sprintf(archiveGranularityScript, granularity), &ignored)
+		addonSettings(t, orig)
+		run, done := imapSession(t)
+		defer done()
+		for _, name := range []string{"E2E Hidden", yearBox} {
+			if name == "" {
+				continue
+			}
+			run(`UNSUBSCRIBE %q`, name)
+			run(`DELETE %q`, name)
+		}
+		for _, p := range []string{"/Archives/" + year, "/E2E Hidden"} {
+			imapFolders(t, "drop", p, "")
+		}
+	})
+	imapFolders(t, "discover", "/E2E Hidden", "")
+
+	next := map[string]any{}
+	for k, v := range orig {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{map[string]any{"accountId": "account1", "path": "/E2E Hidden"}}
+	addonSettings(t, next)
+	settingsUntil(t, "folders seen", func(s map[string]any) bool {
+		k, _ := s["knownFolders"].(map[string]any)
+		seen, _ := k["account1"].(map[string]any)
+		_, ok := seen["/Archives"]
+		return ok
+	})
+
+	msg := "From: Sender <sender@example.org>\r\nTo: test@localhost\r\nSubject: " + subj + "\r\n" +
+		"Message-ID: <" + msgID + ">\r\nDate: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n\r\nArchive me by year.\r\n"
+	if err := smtp.SendMail("127.0.0.1:3025", nil, "sender@example.org", []string{"test@localhost"}, []byte(msg)); err != nil {
+		t.Fatalf("SMTP: %v", err)
+	}
+	res, _ := searchUntil(t, cs, map[string]any{"subject": subj}, subj)
+	one := find(res, subj)
+
+	text, isErr := call(t, cs, "mail_archive", map[string]any{"ids": []string{one.ID}})
+	var o struct {
+		Done   []string `json:"done"`
+		Failed []struct {
+			ID               string `json:"id"`
+			Code             string `json:"code"`
+			MayHaveCompleted bool   `json:"mayHaveCompleted"`
+		} `json:"failed"`
+		Moved []movedID `json:"moved"`
+	}
+	if isErr || json.Unmarshal([]byte(text), &o) != nil {
+		t.Fatalf("mail_archive: %v %s", isErr, text)
+	}
+	if len(o.Done) != 0 || len(o.Moved) != 0 || len(o.Failed) != 1 || o.Failed[0].ID != one.ID || o.Failed[0].Code != "refused" || !o.Failed[0].MayHaveCompleted {
+		t.Fatalf("mail_archive into a new year folder = %s, want refused with mayHaveCompleted and no new id", text)
+	}
+	yearBox = serverMailbox(t, year)
+	imapWait(t, "archive", yearBox, msgID, func(found bool, _ string) bool { return found })
+	t.Logf("archived into Archives/%s, reported as %s", year, text)
+}
 
 // TestE2ETags lists Thunderbird's tags: a new profile has the five default
 // tags, and the one TestE2EOrganise adds by label is among them.
