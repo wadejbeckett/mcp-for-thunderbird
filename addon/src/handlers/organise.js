@@ -6,9 +6,9 @@
 // mail_trash, and the read-only mail_tags. Each organise handler returns
 // {done: [ids], failed: [{id, code}]}; one bad id does not stop the others.
 // mail_move, mail_archive and mail_trash also return the id each message
-// has after the change, as moved (copied for mail_move with copy):
-// [{from, to}]. Nothing here ever calls messages.delete: mail_trash moves to
-// the account's Trash folder.
+// has after the change, as moved (copied for mail_move with copy, and for a
+// message mail_archive archived as a copy): [{from, to}]. Nothing here ever
+// calls messages.delete: mail_trash moves to the account's Trash folder.
 //
 // Policy has already refused ids in disabled accounts or excluded folders,
 // ids and an `account` argument that disagree, and an excluded target
@@ -23,7 +23,7 @@
 
 import { HANDLERS } from "../rpc.js";
 import { decodeId, encodeId, resolveId } from "../ids.js";
-import { assertFolderAllowed, isExcluded } from "../policy.js";
+import { assertFolderAllowed, enabledAccountIds, isExcluded } from "../policy.js";
 import { fail, isToolError, ToolError } from "../errors.js";
 import { call, newRun, answered, clip, folderByPath, realFolder, tagKeyOf, tagList, TIMEOUT } from "./read.js";
 
@@ -284,62 +284,80 @@ function holdsExcluded(f, s) {
   });
 }
 
-// Waits for Thunderbird's word on an archived message: the move event for a
-// message still in sight (RECHECK_MS) and, once it has left its folder, for
-// the event that names its new folder (EVENT_WAIT_MS). Both stay within the
-// call's budget.
+// Waits for Thunderbird's word on the archived messages, each wait once for
+// the whole call and after every message has been archived: RECHECK_MS for
+// the event of a message still in sight, then EVENT_WAIT_MS for the events
+// that name the new place of the rest. Both stay within the call's budget,
+// so a late or missing event never keeps a message from being archived.
 const RECHECK_MS = 500;
 const EVENT_WAIT_MS = 3000;
 
-// watchMoves collects messages.onMoved events while mail_archive runs, so it
-// learns where Thunderbird put each message: the add-on is not told which
-// folder an identity archives into, and Thunderbird may file into a year or
-// month subfolder. Each event pairs the moved messages with their headers in
-// the new folder; a message is known by the opaque id of its old place. On
-// IMAP the event comes once Thunderbird has seen the message in the new
-// folder, which can be after messages.archive has returned.
-function watchMoves() {
-  const ev = tb().messages.onMoved;
-  const on = Boolean(ev && typeof ev.addListener === "function");
+// watchArchive collects messages.onMoved and messages.onCopied events while
+// mail_archive runs, so it learns where Thunderbird put each message: the
+// add-on is not told which folder an identity archives into, Thunderbird
+// may file into a year or month subfolder, and it archives by copying when
+// the message's folder cannot delete messages. Each event pairs the
+// messages with their headers in the new folder; a message is known by the
+// opaque id of its old place. On IMAP the event comes once Thunderbird has
+// seen the message in the new folder, which can be after messages.archive
+// has returned. Every event is a pair of message lists, and a list with
+// more than one page stays open in Thunderbird until it is aborted, so the
+// listener aborts both, also for moves that are none of this call's.
+function watchArchive() {
+  const msgs = tb().messages;
+  const events = [
+    ["moved", msgs.onMoved],
+    ["copied", msgs.onCopied],
+  ].filter(([, ev]) => ev && typeof ev.addListener === "function");
   const seen = new Map();
-  const waiting = new Map();
-  const listener = (from, to) => {
-    const src = from && Array.isArray(from.messages) ? from.messages : [];
-    const dst = to && Array.isArray(to.messages) ? to.messages : [];
-    src.forEach((m, i) => {
-      if (!m || !m.folder || typeof m.headerMessageId !== "string" || m.headerMessageId === "") return;
-      const same = (x) => x && x.folder && x.headerMessageId === m.headerMessageId;
-      const d = same(dst[i]) ? dst[i] : dst.find(same);
-      if (!d) return;
-      const key = encodeId(m.folder.accountId, m.folder.path, m.headerMessageId);
-      seen.set(key, d);
-      const w = waiting.get(key);
-      if (w) w(d);
-    });
+  let wake = null;
+  const close = (list) => {
+    if (list && typeof list.id === "string" && typeof msgs.abortList === "function") {
+      Promise.resolve()
+        .then(() => msgs.abortList(list.id))
+        .catch(() => {});
+    }
   };
-  if (on) ev.addListener(listener);
-  return {
-    seen: (id) => seen.get(id) || null,
-    // wait resolves to the message's header in its new folder, or null when
-    // no move of it is seen within ms and the run's budget.
-    wait(run, id, ms) {
-      if (seen.has(id)) return Promise.resolve(seen.get(id));
-      const left = Math.min(ms, run.deadline - Date.now());
-      if (!on || left <= 0) return Promise.resolve(null);
-      return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          waiting.delete(id);
-          resolve(null);
-        }, left);
-        waiting.set(id, (d) => {
-          clearTimeout(timer);
-          waiting.delete(id);
-          resolve(d);
-        });
+  const listeners = events.map(([kind, ev]) => {
+    const listener = (from, to) => {
+      close(from);
+      close(to);
+      const src = from && Array.isArray(from.messages) ? from.messages : [];
+      const dst = to && Array.isArray(to.messages) ? to.messages : [];
+      src.forEach((m, i) => {
+        if (!m || !m.folder || typeof m.headerMessageId !== "string" || m.headerMessageId === "") return;
+        const same = (x) => x && x.folder && x.headerMessageId === m.headerMessageId;
+        const d = same(dst[i]) ? dst[i] : dst.find(same);
+        if (!d) return;
+        const key = encodeId(m.folder.accountId, m.folder.path, m.headerMessageId);
+        if (!seen.has(key)) seen.set(key, { kind, to: d });
       });
+      if (wake) wake();
+    };
+    ev.addListener(listener);
+    return [ev, listener];
+  });
+  return {
+    // seen gives {kind: "moved" or "copied", to: the header in the new
+    // folder} for a message Thunderbird reported, or null.
+    seen: (id) => seen.get(id) || null,
+    // wait resolves once every id has been reported, or after ms or at the
+    // run's deadline, whichever comes first.
+    async wait(run, ids, ms) {
+      const end = Math.min(Date.now() + ms, run.deadline);
+      while (events.length > 0 && ids.some((id) => !seen.has(id)) && Date.now() < end) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, end - Date.now());
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+        wake = null;
+      }
     },
     stop() {
-      if (on) ev.removeListener(listener);
+      for (const [ev, listener] of listeners) ev.removeListener(listener);
     },
   };
 }
@@ -354,47 +372,118 @@ async function stillThere(run, id) {
   return (await api(run, () => resolveId(id).catch(gone))) !== null;
 }
 
-// Thunderbird skips, without saying so, a message whose identity has
-// archiving turned off.
-const NOT_ARCHIVED = "Thunderbird did not archive the message: archiving may be turned off for its identity.";
+// inArchive tells whether folder f is one of its account's marked archive
+// folders or under one. Thunderbird leaves a message where it is when it is
+// already in the folder it would archive it into.
+function inArchive(f, marked) {
+  return marked.some((a) => a.accountId === f.accountId && (f.path === a.path || f.path.startsWith(a.path.replace(/\/+$/, "") + "/")));
+}
+
+// archivesByCopy tells whether Thunderbird archives the message by copying
+// it, leaving the original in place: it does for a newsgroup and for a
+// folder that cannot delete messages, such as a read-only shared IMAP
+// folder. Without folders.getFolderCapabilities only a newsgroup is known.
+async function archivesByCopy(run, h, accounts, caps) {
+  const account = accounts.find((a) => a && a.id === h.folder.accountId);
+  if (account && account.type === "nntp") return true;
+  const key = h.folder.id ?? `${h.folder.accountId}:${h.folder.path}`;
+  if (!caps.has(key)) caps.set(key, h.folder.id ? await folderCapabilities(run, h.folder) : null);
+  const c = caps.get(key);
+  return Boolean(c && c.canDeleteMessages === false);
+}
 
 async function mailArchive(args, ctx) {
   const s = ctx.settings;
   const ids = idsArg(args);
   const run = newRun();
-  const accounts = answered(await call(run, () => tb().accounts.list(false)));
+  const listed = answered(await call(run, () => tb().accounts.list(false)));
+  const accounts = Array.isArray(listed) ? listed : [];
   const all = answered(await call(run, () => tb().folders.query({ specialUse: ["archives"] })));
   const marked = (Array.isArray(all) ? all : []).filter((f) => f && realFolder(f, f.accountId) && hasUse(f, "archives"));
   const checked = new Set();
   for (const accountId of accountsOf(ids)) {
-    checkArchive(accountId, Array.isArray(accounts) ? accounts : [], marked, s);
+    checkArchive(accountId, accounts, marked, s);
     checked.add(accountId);
   }
-  // A message counts as archived once Thunderbird reports its move or it
-  // has left its folder. Its new id is given only for a folder the
-  // settings allow.
+  // Every message is archived first; only then does the call look at what
+  // Thunderbird did, so the waits are spent once, not once per message.
   const allowed = (h) => h.folder && s.accounts && s.accounts[h.folder.accountId] === true && !isExcluded(h.folder.accountId, h.folder.path, s);
-  const moves = watchMoves();
+  const caps = new Map();
+  const archived = [];
+  const watch = watchArchive();
   try {
-    return await forEachMessage(
-      ids,
-      run,
-      s,
-      async (h, id) => {
-        if (!checked.has(h.folder.accountId)) fail("refused", CROSS_ACCOUNT);
-        await api(run, () => tb().messages.archive([h.id]));
-        let to = moves.seen(id);
-        if (!to && (await stillThere(run, id))) {
-          to = await moves.wait(run, id, RECHECK_MS);
-          if (!to && (await stillThere(run, id))) fail("not_enabled", NOT_ARCHIVED);
+    const first = await forEachMessage(ids, run, s, async (h, id) => {
+      if (!checked.has(h.folder.accountId)) fail("refused", CROSS_ACCOUNT);
+      const copy = await archivesByCopy(run, h, accounts, caps);
+      await api(run, () => tb().messages.archive([h.id]));
+      archived.push({ id, h, copy });
+    });
+    const failed = new Map(first.failed.map((f) => [f.id, f]));
+    // Archiving has been asked for, so a check that fails now may come
+    // after the change.
+    const unsure = (p, e) => failed.set(p.id, { id: p.id, code: isToolError(e) ? e.code : "thunderbird_error", mayHaveCompleted: true });
+    const quiet = async (list) => {
+      const out = [];
+      for (const p of list) {
+        if (watch.seen(p.id)) continue;
+        try {
+          if (await stillThere(run, p.id)) out.push(p);
+        } catch (e) {
+          unsure(p, e);
         }
-        if (!to) to = await moves.wait(run, id, EVENT_WAIT_MS);
-        return to && allowed(to) ? encodeId(to.folder.accountId, to.folder.path, to.headerMessageId) : null;
-      },
-      "moved",
+      }
+      return out;
+    };
+    // A message Thunderbird said nothing about and that is still in its
+    // folder gets RECHECK_MS for a late event. Still there after that, it
+    // was already in its archive folder (done, its id unchanged), is being
+    // copied (it waits for the copy's event), or was skipped.
+    let still = await quiet(archived);
+    if (still.length > 0) {
+      await watch.wait(
+        run,
+        still.map((p) => p.id),
+        RECHECK_MS,
+      );
+      still = await quiet(still.filter((p) => !failed.has(p.id)));
+    }
+    const inPlace = new Set();
+    for (const p of still) {
+      if (inArchive(p.h.folder, marked)) inPlace.add(p.id);
+      else if (!p.copy) failed.set(p.id, { id: p.id, code: "not_enabled" });
+    }
+    const open = archived.filter((p) => !failed.has(p.id) && !inPlace.has(p.id));
+    await watch.wait(
+      run,
+      open.map((p) => p.id),
+      EVENT_WAIT_MS,
     );
+    // A message Thunderbird put in a folder the settings do not allow has
+    // left the accounts and folders MCP for Thunderbird may work with: it
+    // is failed with refused, and its new id is not given. A copy that was
+    // not seen may still be made.
+    const out = { done: [], failed: [], moved: [] };
+    const done = new Map();
+    for (const p of archived) {
+      if (failed.has(p.id)) continue;
+      const e = watch.seen(p.id);
+      if (inPlace.has(p.id) && !e) done.set(p.id, ["moved", p.id]);
+      else if (e && !allowed(e.to)) failed.set(p.id, { id: p.id, code: "refused", mayHaveCompleted: true });
+      else if (e) done.set(p.id, [e.kind, encodeId(e.to.folder.accountId, e.to.folder.path, e.to.headerMessageId)]);
+      else if (p.copy) failed.set(p.id, { id: p.id, code: "thunderbird_error", mayHaveCompleted: true });
+      else done.set(p.id, null);
+    }
+    for (const id of ids) {
+      if (failed.has(id)) out.failed.push(failed.get(id));
+      else if (done.has(id)) {
+        out.done.push(id);
+        const n = done.get(id);
+        if (n) (out[n[0]] ||= []).push({ from: id, to: n[1] });
+      }
+    }
+    return out;
   } finally {
-    moves.stop();
+    watch.stop();
   }
 }
 
@@ -432,9 +521,11 @@ const COLOR = /^#[0-9A-Fa-f]{6}$/;
 
 // mailTags lists Thunderbird's tags, so an AI app can find the names to
 // give mail_tag and mail_search and read the keys in message lists. Tags
-// belong to the whole profile, not to one account. Keys and labels are
-// cleaned like headers.
-async function mailTags() {
+// belong to the whole profile, not to one account, so the list is the same
+// whichever accounts are enabled; with none enabled it is refused, as no
+// tool may then read anything. Keys and labels are cleaned like headers.
+async function mailTags(args, ctx) {
+  if (enabledAccountIds(ctx.settings).length === 0) fail("not_enabled", "No account is enabled in MCP for Thunderbird.");
   const list = await tagList(newRun());
   return {
     tags: list

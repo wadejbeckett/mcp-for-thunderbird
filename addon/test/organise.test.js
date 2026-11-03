@@ -515,13 +515,126 @@ test("mail_archive without a move event still reports the message done, with no 
   assert.equal(folderOf(m.num).path, "Archives");
 });
 
-test("mail_archive gives no new id for a folder the settings do not allow", async () => {
+test("mail_archive fails a message Thunderbird put in a folder the settings do not allow, with no new id", async () => {
   const m = add("a1", "INBOX", 1);
   const n = add("a1", "INBOX", 2);
-  // Thunderbird filed them where the checks did not expect
-  mock.behaviour.archiveTo = (h) => (h.headerMessageId === "msg1@example.org" ? { accountId: "a1", path: "Private" } : { accountId: "a4", path: "Kept" });
+  const ok = add("a1", "INBOX", 3);
+  // Thunderbird filed them where the checks did not expect: an excluded
+  // folder, and an account that is not enabled
+  mock.behaviour.archiveTo = (h) =>
+    h.headerMessageId === "msg1@example.org" ? { accountId: "a1", path: "Private" } : h.headerMessageId === "msg2@example.org" ? { accountId: "a4", path: "Kept" } : null;
+  const r = await call("mail_archive", { ids: [m.id, n.id, ok.id] });
+  assert.deepEqual(r.content, {
+    done: [ok.id],
+    failed: [
+      { id: m.id, code: "refused", mayHaveCompleted: true },
+      { id: n.id, code: "refused", mayHaveCompleted: true },
+    ],
+    moved: [{ from: ok.id, to: encodeId("a1", "Archives", "msg3@example.org") }],
+  });
+});
+
+test("mail_archive archives every message when Thunderbird sends no move event", async () => {
+  // the waits for events are spent once for the call, not once per message
+  const ms = Array.from({ length: 6 }, (_, i) => add("a1", "INBOX", i + 1));
+  mock.behaviour.movedDelay = null;
+  const started = Date.now();
+  const r = await call("mail_archive", { ids: ms.map((m) => m.id) });
+  assert.deepEqual(r.content, { done: ms.map((m) => m.id), failed: [], moved: [] });
+  assert.equal(mock.calls.archive.length, 6);
+  for (const m of ms) assert.equal(folderOf(m.num).path, "Archives");
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+});
+
+test("mail_archive waits once for late events and skipped messages, not once per message", async () => {
+  const ms = Array.from({ length: 4 }, (_, i) => add("a1", "INBOX", i + 1));
+  const kept = Array.from({ length: 4 }, (_, i) => add("a1", "INBOX", i + 11));
+  const skip = new Set(kept.map((k) => k.num));
+  mock.behaviour.archiveSkip = (id) => skip.has(id);
+  mock.behaviour.movedDelay = 300;
+  const started = Date.now();
+  const r = await call("mail_archive", { ids: [...ms, ...kept].map((m) => m.id) });
+  assert.deepEqual(r.content.done, ms.map((m) => m.id));
+  assert.deepEqual(r.content.moved.length, 4);
+  assert.deepEqual(
+    r.content.failed,
+    kept.map((k) => ({ id: k.id, code: "not_enabled" })),
+  );
+  // one recheck of 500 ms, not one per skipped message
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
+});
+
+test("mail_archive reports a message already in its archive folder as done, its id unchanged", async () => {
+  const yearly = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Archives/2026"] };
+  mock = install({ accounts: [yearly, ...ACCOUNTS.slice(1)] });
+  await save({ accounts: { a1: true, a2: true, a3: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // Thunderbird leaves a message where it is when that is where it would
+  // archive it, with no event
+  const flat = add("a1", "Archives", 1);
+  const r = await call("mail_archive", { ids: [flat.id] });
+  assert.deepEqual(r.content, { done: [flat.id], failed: [], moved: [{ from: flat.id, to: flat.id }] });
+  mock.behaviour.archiveTo = () => ({ accountId: "a1", path: "Archives/2026" });
+  const year = add("a1", "Archives/2026", 2);
+  const r2 = await call("mail_archive", { ids: [year.id] });
+  assert.deepEqual(r2.content, { done: [year.id], failed: [], moved: [{ from: year.id, to: year.id }] });
+  assert.equal(mock.calls.archive.length, 2);
+  // a skipped message outside the archive folders is still not archived
+  mock.behaviour.archiveSkip = () => true;
+  const work = add("a1", "Work", 3);
+  assert.deepEqual((await call("mail_archive", { ids: [work.id] })).content.failed, [{ id: work.id, code: "not_enabled" }]);
+});
+
+test("mail_archive reports a message Thunderbird archived as a copy under copied", async () => {
+  const a1 = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Shared"], noDelete: ["Shared"] };
+  mock = install({ accounts: [a1, ...ACCOUNTS.slice(1)] });
+  await save({ accounts: { a1: true, a2: true, a3: true }, excludedFolders: [{ accountId: "a1", path: "Private" }] });
+  // a folder that cannot delete messages: Thunderbird copies into Archives
+  // and leaves the original, and the event is onCopied
+  const m = add("a1", "Shared", 1);
+  const n = add("a1", "INBOX", 2);
+  mock.behaviour.movedDelay = 150;
   const r = await call("mail_archive", { ids: [m.id, n.id] });
-  assert.deepEqual(r.content, { done: [m.id, n.id], failed: [], moved: [] });
+  assert.deepEqual(r.content, {
+    done: [m.id, n.id],
+    failed: [],
+    moved: [{ from: n.id, to: encodeId("a1", "Archives", "msg2@example.org") }],
+    copied: [{ from: m.id, to: encodeId("a1", "Archives", "msg1@example.org") }],
+  });
+  assert.equal(folderOf(m.num).path, "Shared");
+  assert.equal(globalThis.messenger.messages.onCopied.listeners.length, 0);
+  assert.equal(globalThis.messenger.messages.onMoved.listeners.length, 0);
+});
+
+test("mail_archive does not call a copy it did not see not_enabled", async () => {
+  SEARCH.budgetMs = 1200;
+  const news = { id: "n1", name: "News", type: "nntp", folders: ["comp.lang", "Archives"], specialUse: { Archives: ["archives"] }, identities: [{ id: "idn", accountId: "n1", email: "news@example.org" }] };
+  const a1 = { ...ACCOUNTS[0], folders: [...ACCOUNTS[0].folders, "Shared"], noDelete: ["Shared"] };
+  mock = install({ accounts: [a1, ...ACCOUNTS.slice(1), news] });
+  await save({ accounts: { a1: true, a2: true, a3: true, n1: true }, excludedFolders: [] });
+  const m = add("a1", "Shared", 1);
+  const g = add("n1", "comp.lang", 2);
+  mock.behaviour.movedDelay = null;
+  const r = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(r.content.failed, [{ id: m.id, code: "thunderbird_error", mayHaveCompleted: true }]);
+  // a newsgroup is archived as a copy whatever Thunderbird says it allows
+  delete globalThis.messenger.folders.getFolderCapabilities;
+  const r2 = await call("mail_archive", { ids: [g.id] });
+  assert.deepEqual(r2.content.failed, [{ id: g.id, code: "thunderbird_error", mayHaveCompleted: true }]);
+});
+
+test("mail_archive closes the message lists of every move event it hears", async () => {
+  const m = add("a1", "INBOX", 1);
+  const archive = globalThis.messenger.messages.archive;
+  // a large move elsewhere while the call runs: both lists have more pages
+  globalThis.messenger.messages.archive = async (ids) => {
+    globalThis.messenger.messages.onMoved.fire({ id: "list-src", messages: [] }, { id: "list-dst", messages: [] });
+    globalThis.messenger.messages.onCopied.fire({ id: "list-csrc", messages: [] }, { id: null, messages: [] });
+    return archive(ids);
+  };
+  const r = await call("mail_archive", { ids: [m.id] });
+  assert.deepEqual(r.content.done, [m.id]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (const id of ["list-src", "list-dst", "list-csrc"]) assert.ok(mock.calls.abortList.includes(id), id);
 });
 
 test("mail_move copy into the message's own folder fails; a move there changes nothing", async () => {
@@ -583,6 +696,13 @@ test("mail_tags lists keys, labels and colours, cleaned", async () => {
   ];
   assert.deepEqual((await call("mail_tags", {})).content, { tags: [{ key: "invoices", label: "Invoices", color: null }] });
   assert.equal(mock.calls.update.length, 0);
+});
+
+test("mail_tags is refused while no account is enabled", async () => {
+  await save({ accounts: {} });
+  assert.equal((await call("mail_tags", {})).error.code, "not_enabled");
+  await save({ accounts: { a2: true } });
+  assert.equal((await call("mail_tags", {})).ok, true);
 });
 
 test("mail_tags is a read tool", async () => {

@@ -857,6 +857,19 @@ func TestE2EArchive(t *testing.T) {
 	if isErr || json.Unmarshal([]byte(text), &r) != nil || r.Headers.Subject != subj {
 		t.Fatalf("mail_read of the archived id: %v %s", isErr, text)
 	}
+
+	// Archiving it again: Thunderbird leaves a message that is already in
+	// its archive folder where it is, with no event. It is done, and its id
+	// does not change.
+	o = organised{}
+	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{archived}}, &o)
+	o.only(t, "mail_archive again", archived)
+	if len(o.Moved) != 1 || o.Moved[0].From != archived || o.Moved[0].To != archived {
+		t.Fatalf("mail_archive of an archived message = %+v, want its id unchanged", o)
+	}
+	if found, _ := imapLookup(t, "Archives", id); !found {
+		t.Fatal("the archived message left Archives")
+	}
 }
 
 // archiveEnabledScript turns archiving on or off for identity id1 and

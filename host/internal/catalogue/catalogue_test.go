@@ -272,7 +272,7 @@ func TestOrganiseDescriptions(t *testing.T) {
 		}
 	}
 	ar := byName(t, "mail_archive").Description
-	for _, s := range []string{"not_enabled", "not enabled or is excluded"} {
+	for _, s := range []string{"not_enabled", "not enabled or is excluded", "already in its archive folder", "copied: [{from, to}]", "refused and mayHaveCompleted"} {
 		if !strings.Contains(ar, s) {
 			t.Errorf("mail_archive description lacks %q: %s", s, ar)
 		}
@@ -287,7 +287,7 @@ func TestTagsTool(t *testing.T) {
 	if len(props(t, "mail_tags")) != 0 || tl.Input["additionalProperties"] != false {
 		t.Errorf("mail_tags must take no arguments: %v", tl.Input)
 	}
-	for _, s := range []string{"key", "label", "color"} {
+	for _, s := range []string{"key", "label", "color", "no account is enabled"} {
 		if !strings.Contains(tl.Description, s) {
 			t.Errorf("mail_tags description lacks %q", s)
 		}

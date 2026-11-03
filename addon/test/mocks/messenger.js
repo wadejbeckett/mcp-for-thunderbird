@@ -13,8 +13,8 @@
 // headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
 // saveMessage, import, sendMessage, compose and messengerUtilities;
 // `release` below 153 takes away what Thunderbird 140 ESR lacks. The
-// organise handlers' tests added messages.onMoved, archive skipping and
-// folders.getFolderCapabilities.
+// organise handlers' tests added messages.onMoved and onCopied, archive
+// skipping and copying, and folders.getFolderCapabilities.
 
 export function event() {
   const listeners = [];
@@ -99,8 +99,9 @@ function checkSpecialUse(uses, where) {
 
 // createMessenger returns a fresh mock. `accounts` is a list of
 // {id, name, type, identities?, folders: [path, ...], specialUse?: {path: [use]},
-// noMessages?: [path, ...]}; a noMessages folder cannot hold messages
-// (getFolderCapabilities says canAddMessages: false).
+// noMessages?: [path, ...], noDelete?: [path, ...]}; a noMessages folder
+// cannot hold messages (getFolderCapabilities says canAddMessages: false),
+// and a noDelete folder cannot delete them (canDeleteMessages: false).
 // `books` is a list of {id, name, contacts: [vCard string, ...]}.
 export function createMessenger({ accounts = [], manifest = { version: "0.0.0", manifest_version: 3 }, granted = [], books = [], release = 153 } = {}) {
   const local = new Map();
@@ -115,6 +116,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
 
   const folderList = [];
   const noMessages = new Set();
+  const noDelete = new Set();
   for (const a of accounts) {
     for (const path of a.folders || []) {
       folderList.push({
@@ -126,6 +128,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         specialUse: (a.specialUse && a.specialUse[path]) || [],
       });
       if ((a.noMessages || []).includes(path)) noMessages.add(folderList.at(-1).id);
+      if ((a.noDelete || []).includes(path)) noDelete.add(folderList.at(-1).id);
       checkSpecialUse(folderList.at(-1).specialUse, `fixture ${a.id}:${path}`);
     }
   }
@@ -171,8 +174,11 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   // archiveSkip(id) true: archive leaves that message where it is, as
   // Thunderbird does when its identity has archiving turned off.
   // archiveTo(header) gives the folder (accountId, path) archive files the
-  // message into; by default the account's archive folder. movedDelay is
-  // the time in ms before messages.onMoved fires (null: it never fires).
+  // message into; by default the account's archive folder. As Thunderbird
+  // does, archive leaves a message already in that folder where it is, and
+  // copies one from a noDelete folder or a newsgroup (an nntp account).
+  // movedDelay is the time in ms before messages.onMoved or
+  // messages.onCopied fires (null: neither fires).
   // saveReturns: saveMessage returns the saved header (Local Folders);
   // by default it returns none, as on IMAP (docs/SPIKES.md §2).
   // importReturns false: messages.import returns no header.
@@ -260,7 +266,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       getFolderCapabilities: async (id) => {
         const f = folderList.find((x) => x.id === id);
         if (!f) throw new Error(`Folder not found: ${id}`);
-        return { canAddMessages: !noMessages.has(id), canAddSubfolders: true, canBeDeleted: true, canBeRenamed: true, canDeleteMessages: true };
+        return { canAddMessages: !noMessages.has(id), canAddSubfolders: true, canBeDeleted: true, canBeRenamed: true, canDeleteMessages: !noDelete.has(id) };
       },
       getFolderInfo: async (id) => {
         calls.getFolderInfo.push(id);
@@ -367,8 +373,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         for (const id of ids) {
           const h = store.get(id);
           if (!h) throw new Error(`Message not found: ${id}.`);
-          const nid = nextId++;
-          store.set(nid, { ...clone(h), id: nid, folder: { ...f } });
+          copyTo(h, f);
         }
       },
       archive: async (ids) => {
@@ -382,7 +387,10 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
           const f = want
             ? folderList.find((x) => x.accountId === want.accountId && x.path === want.path)
             : folderList.find((x) => x.accountId === h.folder.accountId && x.specialUse.includes("archives"));
-          if (f) moveTo(h, f);
+          if (!f || f.id === h.folder.id) continue;
+          const news = accounts.some((a) => a.id === h.folder.accountId && a.type === "nntp");
+          if (news || noDelete.has(h.folder.id)) copyTo(h, f);
+          else moveTo(h, f);
         }
       },
       delete: async (ids) => {
@@ -418,6 +426,7 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
         return { mode: "sendNow", headerMessageId: "sent-1@example.org", messages: [] };
       },
       onMoved: event(),
+      onCopied: event(),
       tags: {
         list: async () => [
           { key: "$label1", tag: "Important", color: "#FF0000", ordinal: "" },
@@ -602,9 +611,21 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
   function moveTo(h, f) {
     const before = clone(h);
     h.folder = { ...f };
-    const after = clone(h);
+    tell(messenger.messages.onMoved, before, clone(h));
+  }
+
+  // copyTo puts a copy of the message in folder f, with an id of its own,
+  // and fires messages.onCopied with the original and the copy.
+  function copyTo(h, f) {
+    const nid = nextId++;
+    const copy = { ...clone(h), id: nid, folder: { ...f } };
+    store.set(nid, copy);
+    tell(messenger.messages.onCopied, clone(h), clone(copy));
+  }
+
+  function tell(ev, before, after) {
     if (behaviour.movedDelay == null) return;
-    const fire = () => messenger.messages.onMoved.fire({ id: null, messages: [before] }, { id: null, messages: [after] });
+    const fire = () => ev.fire({ id: null, messages: [before] }, { id: null, messages: [after] });
     if (behaviour.movedDelay > 0) setTimeout(fire, behaviour.movedDelay);
     else fire();
   }
