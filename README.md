@@ -75,6 +75,7 @@ An AI app can send the body as HTML instead, with `html` set to true, when it ne
 - **Text search is case-sensitive**, because Thunderbird's search is. Results come newest first, and a long search stops after about 10 seconds and returns what it found, with a note on how to narrow it.
 - **"Has attachments" can be unknown** in search results when there was no time left to check it.
 - **Attachments that are not in the message cannot be saved.** A FileLink attachment, or one the message only links to, is listed with its link; one that was detached or deleted in Thunderbird is listed as such. The message holds only a placeholder for these, so the add-on refuses to save it.
+- **Excluded folders are kept by their path.** When you rename or move an excluded folder in Thunderbird, the add-on moves the exclusion with it. A folder renamed or moved while the add-on is turned off keeps its old entry, so check Excluded folders in the options after turning the add-on back on.
 - **One time budget per request.** A request that changes many messages at once (marking, tagging, moving) reports which messages were done and which failed if Thunderbird is slow.
 - **Reply and forward drafts** are saved to Drafts with their threading kept. When you send one, Thunderbird files the sent copy according to the account's own settings; this has not been tested on every account type.
 - **Direct sending accepts only simple addresses**: letters, digits and `. _ + -` before the `@`, and a plain domain. Write a draft for any other address. [SECURITY.md](SECURITY.md) explains why.

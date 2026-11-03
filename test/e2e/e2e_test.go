@@ -651,6 +651,99 @@ func TestE2EAttachmentKinds(t *testing.T) {
 	}
 }
 
+// localFolderScript works on Local Folders in the e2e Thunderbird, as the
+// user does in the folder pane: "create" makes MftExcluded and MftArchive,
+// "rename" renames MftExcluded to MftExcluded2, and "move" moves
+// MftExcluded2 into MftArchive. It returns "ok" once the change is done.
+const localFolderScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+  const root = MailServices.accounts.localFoldersServer.rootFolder;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const child = (parent, name) => parent.subFolders.find((f) => f.name === name) || null;
+  const until = async (fn) => {
+    for (let i = 0; i < 40; i++) {
+      if (fn()) return "ok";
+      await sleep(250);
+    }
+    return "timed out";
+  };
+  const step = %q;
+  if (step === "create") {
+    for (const name of ["MftExcluded", "MftArchive"]) if (!child(root, name)) root.createSubfolder(name, null);
+    return until(() => child(root, "MftExcluded") && child(root, "MftArchive"));
+  }
+  if (step === "rename") {
+    child(root, "MftExcluded").rename("MftExcluded2", null);
+    return until(() => child(root, "MftExcluded2"));
+  }
+  if (step === "move") {
+    const archive = child(root, "MftArchive");
+    MailServices.copy.copyFolder(child(root, "MftExcluded2"), archive, true, null, null);
+    return until(() => child(archive, "MftExcluded2"));
+  }
+  return "unknown step";
+})().then(resolve, (e) => resolve("error: " + e));
+`
+
+// excludedPaths gives the add-on's excluded folders as account:path.
+func excludedPaths(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	list, _ := addonSettings(t, nil)["excludedFolders"].([]any)
+	for _, v := range list {
+		if ex, ok := v.(map[string]any); ok {
+			out = append(out, fmt.Sprintf("%v:%v", ex["accountId"], ex["path"]))
+		}
+	}
+	return out
+}
+
+// TestE2EExcludedFolderFollows renames and then moves an excluded folder in
+// Thunderbird: its exclusion follows it, from folders.onRenamed and
+// onMoved, so the folder does not come back into reach under a new path.
+func TestE2EExcludedFolderFollows(t *testing.T) {
+	before := addonSettings(t, nil)
+	t.Cleanup(func() { addonSettings(t, before) })
+	folder := func(step string) {
+		t.Helper()
+		var got string
+		marionette(t, fmt.Sprintf(localFolderScript, step), &got)
+		if got != "ok" {
+			t.Fatalf("local folder %s: %s", step, got)
+		}
+	}
+	waitExcluded := func(want ...string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			got := excludedPaths(t)
+			if strings.Join(got, ",") == strings.Join(want, ",") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("excluded folders = %v, want %v", got, want)
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	folder("create")
+	next := map[string]any{}
+	for k, v := range before {
+		next[k] = v
+	}
+	next["excludedFolders"] = []any{
+		map[string]any{"accountId": "account2", "path": "/MftExcluded"},
+		map[string]any{"accountId": "account2", "path": "/MftExcludedNot"},
+	}
+	addonSettings(t, next)
+	folder("rename")
+	waitExcluded("account2:/MftExcluded2", "account2:/MftExcludedNot")
+	folder("move")
+	waitExcluded("account2:/MftArchive/MftExcluded2", "account2:/MftExcludedNot")
+}
+
 // TestE2EConnectStdio is the Claude Code check done by a go-sdk client:
 // connect mode over stdio, asking for today's unread mail.
 func TestE2EConnectStdio(t *testing.T) {

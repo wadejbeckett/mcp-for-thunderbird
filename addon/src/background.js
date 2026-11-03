@@ -3,7 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // Background: keeps the native port to the host open, says hello, answers
-// tool calls, keeps the host's tool list current and shows the state in
+// tool calls, keeps the host's tool list current, keeps excluded folders
+// excluded when the user renames or moves them, and shows the state in
 // the toolbar button.
 //
 // MV3 event page (ruling R6): an open native port keeps the page alive.
@@ -11,7 +12,7 @@
 // the first reconnect is immediate (docs/SPIKES.md §1) and the backoff is
 // capped at 25 s (ruling R17).
 
-import { load, save, enabledTools, STORAGE_KEY } from "./settings.js";
+import { load, save, followFolder, enabledTools, STORAGE_KEY } from "./settings.js";
 import { list as logList, clear as logClear } from "./log.js";
 import { dispatch } from "./rpc.js";
 import { supportedTools } from "./features.js";
@@ -482,6 +483,11 @@ export function createBackground({ setTimeout: setT = globalThis.setTimeout, cle
     on(rt.onStartup, () => {});
     on(rt.onMessage, onRuntimeMessage);
     on(m().storage.onChanged, onSettingsChanged);
+    // Exclusion is by path: an excluded folder the user renames or moves
+    // stays excluded under its new path.
+    const folders = m().folders;
+    if (folders && folders.onRenamed) on(folders.onRenamed, (from, to) => followFolder(from, to).catch(() => {}));
+    if (folders && folders.onMoved) on(folders.onMoved, (from, to) => followFolder(from, to).catch(() => {}));
     if (m().permissions) {
       on(m().permissions.onAdded, () => refreshTools().catch(() => {}));
       on(m().permissions.onRemoved, () => refreshTools().catch(() => {}));

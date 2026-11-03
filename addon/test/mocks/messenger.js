@@ -11,7 +11,8 @@
 // oldest-first ordering, never-settling queries, raw sources, attachments
 // and address books. Task 12 added getFull (plain and HTML parts, extra
 // headers), Task 13 getAttachmentFile and messages.tags.list, Task 16
-// saveMessage, import, sendMessage, compose and messengerUtilities;
+// saveMessage, import, sendMessage, compose and messengerUtilities, and
+// folders.onRenamed and onMoved to fire by hand;
 // `release` below 153 takes away what Thunderbird 140 ESR lacks.
 
 export function event() {
@@ -236,6 +237,8 @@ export function createMessenger({ accounts = [], manifest = { version: "0.0.0", 
       },
     },
     folders: {
+      onRenamed: event(),
+      onMoved: event(),
       query: async (q = {}) => {
         checkSpecialUse(q.specialUse, "queryInfo");
         return folderList.filter((f) => (q.accountId == null || f.accountId === q.accountId) && (q.path == null || f.path === q.path) && (q.specialUse == null || q.specialUse.some((u) => f.specialUse.includes(u)))).map(clone);
