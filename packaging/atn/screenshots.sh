@@ -13,13 +13,17 @@
 # at least 1000 by 750 pixels, into packaging/atn/screenshots (or out-dir):
 #   options.png          the options page
 #   options-folders.png  the options page from the excluded folders down
+#   options-log.png      the end of the options page, with the activity log
 #   setup.png            the setup page
-#   popup.png            the toolbar popup
+#   popup.png            the toolbar popup (its page in a tab where no
+#                        panel can be opened under Xvfb)
 # A few tool calls are made first through the host's connect command, so
 # the activity log and the popup's recent activity have entries.
 # Needs what test/e2e/run.sh needs (Thunderbird, Docker, xvfb-run, curl,
 # python3, Go, Node) and ImageMagick's import and convert. Everything it
-# starts is torn down on exit.
+# starts is torn down on exit. It uses its own container name and ports
+# (MFT_SHOTS_IMAP_PORT 4143, MFT_SHOTS_SMTP_PORT 4025, MFT_SHOTS_API_PORT
+# 4080), so it can run beside an end-to-end run.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -34,7 +38,11 @@ export MFT_E2E_DIR
 export MFT_E2E_PROFILE=$MFT_E2E_DIR/mft-e2e-profile
 export GOTOOLCHAIN=${GOTOOLCHAIN:-auto}
 export MFT_E2E_THUNDERBIRD=${MFT_E2E_THUNDERBIRD:-thunderbird}
-CONTAINER=mft-greenmail
+CONTAINER=mft-greenmail-shots
+IMAP=${MFT_SHOTS_IMAP_PORT:-4143}
+SMTP=${MFT_SHOTS_SMTP_PORT:-4025}
+API=${MFT_SHOTS_API_PORT:-4080}
+export MFT_E2E_IMAP_PORT=$IMAP MFT_E2E_SMTP_PORT=$SMTP
 IMAGE=greenmail/standalone@sha256:1ef95a966418cd09b7ea91d504d8c0826bbe7a2f6e679a75c601a831587c1626
 
 log() { printf '[screenshots] %s\n' "$*" >&2; }
@@ -61,7 +69,7 @@ teardown() {
 }
 
 if docker inspect "$CONTAINER" >/dev/null 2>&1; then
-  echo "screenshots.sh: a container named $CONTAINER already exists (an end-to-end run?); remove it first" >&2
+  echo "screenshots.sh: a container named $CONTAINER already exists (an earlier run?); remove it first" >&2
   exit 1
 fi
 if "$e2e/tb.sh" running; then
@@ -75,12 +83,12 @@ trap teardown EXIT INT TERM
 log "starting GreenMail"
 started_greenmail=1
 docker run -d --name "$CONTAINER" \
-  -p 127.0.0.1:3143:3143 -p 127.0.0.1:3025:3025 -p 127.0.0.1:3080:8080 \
+  -p "127.0.0.1:$IMAP:3143" -p "127.0.0.1:$SMTP:3025" -p "127.0.0.1:$API:8080" \
   -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.users=test:test@localhost,other:other@localhost -Dgreenmail.hostname=0.0.0.0' \
   -e JAVA_OPTS=-Xmx512m "$IMAGE" >/dev/null
 for i in $(seq 1 120); do
-  curl -s --max-time 2 -u test:test "imap://127.0.0.1:3143/" -X "NOOP" >/dev/null 2>&1 &&
-    curl -s --max-time 2 --fail "http://127.0.0.1:3080/api/service/readiness" >/dev/null 2>&1 && break
+  curl -s --max-time 2 -u test:test "imap://127.0.0.1:$IMAP/" -X "NOOP" >/dev/null 2>&1 &&
+    curl -s --max-time 2 --fail "http://127.0.0.1:$API/api/service/readiness" >/dev/null 2>&1 && break
   [ "$i" = 120 ] && { log "GreenMail did not start"; exit 1; }
   sleep 0.5
 done
@@ -90,15 +98,15 @@ date_now=$(LC_ALL=C date -R)
 n=0
 for f in "$e2e"/fixtures/seed/*.eml; do
   sed -e "s/@DATE@/$date_now/" -e 's/$/\r/' "$f" >"$MFT_E2E_DIR/seed.eml"
-  curl -s --fail -u test:test --upload-file "$MFT_E2E_DIR/seed.eml" "imap://127.0.0.1:3143/INBOX"
+  curl -s --fail -u test:test --upload-file "$MFT_E2E_DIR/seed.eml" "imap://127.0.0.1:$IMAP/INBOX"
   n=$((n + 1))
 done
 rm -f "$MFT_E2E_DIR/seed.eml"
 for folder in Trash Sorted Drafts Sent Archives; do
-  curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "CREATE $folder" >/dev/null
-  curl -s --fail -u test:test "imap://127.0.0.1:3143/" -X "SUBSCRIBE $folder" >/dev/null
+  curl -s --fail -u test:test "imap://127.0.0.1:$IMAP/" -X "CREATE $folder" >/dev/null
+  curl -s --fail -u test:test "imap://127.0.0.1:$IMAP/" -X "SUBSCRIBE $folder" >/dev/null
 done
-curl -s --fail -u test:test "imap://127.0.0.1:3143/INBOX" -X 'STORE 1:* -FLAGS (\Seen)' >/dev/null
+curl -s --fail -u test:test "imap://127.0.0.1:$IMAP/INBOX" -X 'STORE 1:* -FLAGS (\Seen)' >/dev/null
 
 log "building the host and the add-on"
 (cd "$repo/host" && go build -o "$MFT_E2E_DIR/bin/mcp-for-thunderbird" ./cmd/mcp-for-thunderbird)
@@ -140,6 +148,15 @@ export DISPLAY=$display XAUTHORITY=$auth
 
 mkdir -p "$out"
 
+# The mail window fills the screen, so the shots have no empty band.
+"$e2e/tb.sh" marionette - <<'JS' >/dev/null
+const resolve = arguments[arguments.length - 1];
+const win = Services.wm.getMostRecentWindow("mail:3pane");
+win.moveTo(0, 0);
+win.resizeTo(1600, 1000);
+resolve("ok");
+JS
+
 # A few calls through connect, as a reviewer would make them, so the log
 # has entries. connect reads the throwaway home's connection file, and
 # stops when its input closes, so the pipe stays open for the replies.
@@ -170,17 +187,58 @@ const resolve = arguments[arguments.length - 1];
 JS
 }
 
-# popup opens the add-on's toolbar popup by clicking its unified toolbar
-# button; it returns "missing" when the button is not in the toolbar.
+# popup opens the add-on's toolbar popup and prints "ok" once a panel is
+# open, else what went wrong. The e2e profile's unified toolbar has no
+# add-on button, so the button is first added to the mail toolbar's items
+# (Thunderbird's own customisation state, default items kept) and clicked;
+# failing that, the add-on's action API is asked to open the popup.
 popup() {
   "$e2e/tb.sh" marionette - <<'JS'
 const resolve = arguments[arguments.length - 1];
 (async () => {
+  const id = "mcp-for-thunderbird@wadejbeckett.github.io";
   const win = Services.wm.getMostRecentWindow("mail:3pane");
-  const button = win.document.querySelector('[extension="mcp-for-thunderbird@wadejbeckett.github.io"]');
-  if (!button) return "missing";
-  button.click();
-  return "ok";
+  const doc = win.document;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const isOpen = () => [...doc.querySelectorAll("panel")].some((p) => p.state === "open" || p.state === "showing");
+  const button = () => doc.querySelector('[item-id="ext-' + id + '"]') || doc.querySelector('[extension="' + id + '"]');
+  const errors = [];
+  if (!button()) {
+    try {
+      const { getState, storeState } = ChromeUtils.importESModule("resource:///modules/CustomizationState.mjs");
+      const { getDefaultItemIdsFor } = ChromeUtils.importESModule("resource:///modules/CustomizableItems.sys.mjs");
+      const state = getState();
+      const items = Array.isArray(state.mail) && state.mail.length ? state.mail : getDefaultItemIdsFor("mail");
+      if (!items.includes("ext-" + id)) {
+        state.mail = [...items, "ext-" + id];
+        storeState(state);
+        await sleep(1500);
+      }
+    } catch (e) {
+      errors.push("toolbar: " + e);
+    }
+  }
+  if (button()) {
+    button().click();
+    await sleep(1500);
+    if (isOpen()) return "ok";
+    errors.push("the click opened no panel");
+  } else {
+    errors.push("no toolbar button");
+  }
+  try {
+    const { ExtensionParent } = ChromeUtils.importESModule("resource://gre/modules/ExtensionParent.sys.mjs");
+    const ext = WebExtensionPolicy.getByID(id).extension;
+    const ctx = [...ext.views].find((v) => v.viewType === "background");
+    const api = await ExtensionParent.apiManager.asyncGetAPI("browserAction", ext, "addon_parent");
+    await api.getAPI(ctx).action.openPopup();
+    await sleep(1500);
+    if (isOpen()) return "ok";
+    errors.push("openPopup opened no panel");
+  } catch (e) {
+    errors.push("openPopup: " + e);
+  }
+  return "error: " + errors.join("; ");
 })().then(resolve, (e) => resolve("error: " + e));
 JS
 }
@@ -199,10 +257,19 @@ shot "$out/options.png"
 # The fragment scrolls the page to the excluded folders when it loads.
 open "ui/options.html#excluded"
 shot "$out/options-folders.png"
+open "ui/options.html#log"
+shot "$out/options-log.png"
 open "ui/setup.html"
 shot "$out/setup.png"
-case "$(popup)" in
+# marionette prints the script's result as JSON, so a string comes quoted.
+popped=$(popup | tr -d '"')
+case "$popped" in
   ok) shot "$out/popup.png" ;;
-  *) log "the toolbar button was not found; popup.png not taken" ;;
+  *)
+    # The popup's page in a tab shows the same content.
+    log "the popup could not be opened ($popped); popup.png shows its page in a tab"
+    open "ui/popup.html"
+    shot "$out/popup.png"
+    ;;
 esac
 log "done: $out"

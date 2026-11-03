@@ -139,9 +139,10 @@ PNG, taken from a throwaway profile that holds only test mail (never a real mail
 | File | Caption |
 |---|---|
 | `packaging/atn/screenshots/options.png` | The options page: the accounts AI apps may use, what they may do, sending and the attachment folder. |
-| `packaging/atn/screenshots/options-folders.png` | Further down the options page: excluded folders, pause, connection details and the activity log. |
+| `packaging/atn/screenshots/options-folders.png` | Further down the options page: excluded folders, pause, the setup page and the connection details. |
+| `packaging/atn/screenshots/options-log.png` | The end of the options page: the activity log of recent requests. |
 | `packaging/atn/screenshots/setup.png` | The setup page that opens on first install. |
-| `packaging/atn/screenshots/popup.png` | The toolbar button's menu: connection state, pause and recent activity. |
+| `packaging/atn/screenshots/popup.png` | The toolbar button's popup, shown as its own page: connection state, pause and recent activity. |
 
 ## After the listing is live
 
