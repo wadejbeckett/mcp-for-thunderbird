@@ -72,10 +72,10 @@ func composeProps() m {
 
 var tools = []Tool{
 	{Name: "mail_accounts", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Lists the mail accounts the user has enabled, with their ids and identities.",
+		Description: "Lists the mail accounts the user has enabled: id, name, type, address (the default identity's), default (true for Thunderbird's default account) and identities, every sender identity of the account (id, email, name, label), the default one first with default: true.",
 		Input:       schema(nil, m{})},
 	{Name: "mail_folders", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Lists folders of an account with unread and total counts, leaving out folders the user has excluded.",
+		Description: "Lists folders of an account, leaving out folders the user has excluded. Each folder has unread, total and new (messages that arrived since the folder was last looked at) counts, quota (the server's limits for the folder: type STORAGE in bytes or MESSAGE in messages, with limit, used and unused; empty when the server reports none), lastUsed (when the user last opened it, or null), favorite and specialUse. The counts, quota and lastUsed are null for a folder Thunderbird did not answer for in time, and a note then says so.",
 		Input:       schema(nil, m{"account": account()})},
 	{Name: "mail_search", Group: "read", ReadOnly: true, Idempotent: true,
 		Description: "Finds messages and returns headers only (id, from, subject, date, flags, tags) and never returns message text; use mail_read for text. Text matching is case-sensitive in Thunderbird, and results come newest first and may be truncated, with a note on how to narrow the search. hasAttachments is null when it could not be checked in time. text finds words in a message body only for mail whose body Thunderbird has stored offline (the account's Synchronization & Storage settings); other messages can still be found by from, to and subject.",
@@ -89,19 +89,20 @@ var tools = []Tool{
 			"limit":          m{"type": "integer", "minimum": 1, "maximum": 200, "default": 25, "description": "Maximum results."},
 		})},
 	{Name: "mail_read", Group: "read", ReadOnly: true, Idempotent: true,
-		Description: "Returns one message's headers, plain-text body (wrapped as untrusted content) and attachments (name, size, content type and part). The body is the text a reader sees; plainTextDiffers is true when the message's plain-text alternative says something that text does not. Pass an attachment's part to mail_attachment when several attachments share its name.",
+		Description: "Returns one message's headers, plain-text body (wrapped as untrusted content) and attachments (name, size, content type, part and type). The body is the text a reader sees; plainTextDiffers is true when the message's plain-text alternative says something that text does not. An attachment's type is normal when the file is in the message; linked or cloudFile when the message only links to it, with the link in link; detached or deleted when the message keeps only a placeholder. mail_attachment fetches normal attachments only. At most 200 attachments are listed; attachmentsTruncated is true when there are more. Pass an attachment's part to mail_attachment when several attachments share its name or it has none. With headers set to true, allHeaders gives every header of the message except Bcc (at most 200 values; allHeadersTruncated when more were left out).",
 		Input: schema([]string{"id"}, m{
 			"account": account(), "id": str("Message id from mail_search."),
 			"max_chars": m{"type": "integer", "minimum": 1, "maximum": 50000, "default": 8000, "description": "Maximum body characters."},
+			"headers":   boolean("true to also return every header of the message, such as List-Unsubscribe, Message-ID and Received, in allHeaders."),
 		})},
 	{Name: "mail_thread", Group: "read", ReadOnly: true, Idempotent: true,
 		Description: "Returns the messages in the conversation of one message as pointers (id, from, subject, date, flags, tags) only, never message text; use mail_read for text. It may be marked truncated if Thunderbird was slow.",
 		Input:       schema([]string{"id"}, m{"account": account(), "id": str("Message id from mail_search.")})},
 	{Name: "mail_attachment", Group: "read",
-		Description: "Returns a text attachment's text inline (wrapped as untrusted content; nothing is saved), or saves any other attachment to the user's attachment folder and returns its path. Attachments over 50 MiB are refused.",
-		Input: schema([]string{"id", "name"}, m{
-			"account": account(), "id": str("Message id."), "name": str("Attachment file name."),
-			"part": str("Attachment part from mail_read; picks that attachment when several share the name."),
+		Description: "Returns a text attachment's text inline (wrapped as untrusted content; nothing is saved), or saves any other attachment to the user's attachment folder and returns its path. Give the attachment's name, its part from mail_read, or both. Attachments over 50 MiB are refused, and so are attachments that are not in the message (mail_read's type other than normal), since the message holds only a placeholder for them.",
+		Input: schema([]string{"id"}, m{
+			"account": account(), "id": str("Message id."), "name": str("Attachment file name; may be left out when part is given."),
+			"part": str("Attachment part from mail_read; picks that attachment when several share the name, and fetches one that has no name."),
 		})},
 	{Name: "mail_filter_suggest", Group: "read", ReadOnly: true, Idempotent: true,
 		Description: "Returns step-by-step instructions for making a message filter with these conditions and actions in Thunderbird's Message Filters window; it changes nothing.",

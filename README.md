@@ -74,6 +74,7 @@ An AI app can send the body as HTML instead, with `html` set to true, when it ne
 - **Text search needs mail stored on your computer.** Searching the text of messages finds only messages whose full text Thunderbird has downloaded. For IMAP accounts, turn on "Keep messages for this account on this computer" in the account's Synchronization & Storage settings.
 - **Text search is case-sensitive**, because Thunderbird's search is. Results come newest first, and a long search stops after about 10 seconds and returns what it found, with a note on how to narrow it.
 - **"Has attachments" can be unknown** in search results when there was no time left to check it.
+- **Attachments that are not in the message cannot be saved.** A FileLink attachment, or one the message only links to, is listed with its link; one that was detached or deleted in Thunderbird is listed as such. The message holds only a placeholder for these, so the add-on refuses to save it.
 - **One time budget per request.** A request that changes many messages at once (marking, tagging, moving) reports which messages were done and which failed if Thunderbird is slow.
 - **Reply and forward drafts** are saved to Drafts with their threading kept. When you send one, Thunderbird files the sent copy according to the account's own settings; this has not been tested on every account type.
 - **Direct sending accepts only simple addresses**: letters, digits and `. _ + -` before the `@`, and a plain domain. Write a draft for any other address. [SECURITY.md](SECURITY.md) explains why.

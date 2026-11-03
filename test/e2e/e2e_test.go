@@ -457,6 +457,173 @@ func TestE2ENullOptionals(t *testing.T) {
 	}
 }
 
+// TestE2EAccountsAndFolders checks what mail_accounts and mail_folders
+// take from Thunderbird: every identity, the default account
+// (accounts.getDefault, make-profile.sh sets account1), and each folder's
+// new count, quota, last-used date and favourite (folders.getFolderInfo).
+func TestE2EAccountsAndFolders(t *testing.T) {
+	cs := httpSession(t)
+	var accounts struct {
+		Accounts []struct {
+			ID         string `json:"id"`
+			Address    string `json:"address"`
+			Default    bool   `json:"default"`
+			Identities []struct {
+				ID, Email, Name string
+				Default         bool
+			} `json:"identities"`
+		} `json:"accounts"`
+	}
+	callOK(t, cs, "mail_accounts", map[string]any{}, &accounts)
+	byID := map[string]int{}
+	for i, a := range accounts.Accounts {
+		byID[a.ID] = i
+	}
+	a1, a3 := accounts.Accounts[byID["account1"]], accounts.Accounts[byID["account3"]]
+	if !a1.Default || a3.Default {
+		t.Fatalf("default account: account1 %v, account3 %v, want true, false", a1.Default, a3.Default)
+	}
+	if len(a1.Identities) != 1 || a1.Identities[0].ID != "id1" || a1.Identities[0].Email != "test@localhost" ||
+		a1.Identities[0].Name != "Test User" || !a1.Identities[0].Default {
+		t.Fatalf("account1 identities = %+v", a1.Identities)
+	}
+	if len(a3.Identities) != 1 || a3.Identities[0].Email != "other@localhost" {
+		t.Fatalf("account3 identities = %+v", a3.Identities)
+	}
+
+	var folders struct {
+		Folders []map[string]json.RawMessage `json:"folders"`
+		Note    string                       `json:"note"`
+	}
+	callOK(t, cs, "mail_folders", map[string]any{"account": "account1"}, &folders)
+	if folders.Note != "" {
+		t.Fatalf("mail_folders note: %s", folders.Note)
+	}
+	seen := false
+	for _, f := range folders.Folders {
+		var path string
+		json.Unmarshal(f["path"], &path)
+		for _, k := range []string{"new", "quota", "lastUsed", "favorite"} {
+			if _, ok := f[k]; !ok {
+				t.Fatalf("folder %s lacks %q: %v", path, k, f)
+			}
+		}
+		var n *int
+		var quota []map[string]any
+		var fav bool
+		if json.Unmarshal(f["new"], &n) != nil || n == nil || json.Unmarshal(f["quota"], &quota) != nil || quota == nil ||
+			json.Unmarshal(f["favorite"], &fav) != nil {
+			t.Fatalf("folder %s: new %s, quota %s, favorite %s", path, f["new"], f["quota"], f["favorite"])
+		}
+		if string(f["lastUsed"]) != "null" {
+			var when string
+			if json.Unmarshal(f["lastUsed"], &when) != nil {
+				t.Fatalf("folder %s lastUsed %s", path, f["lastUsed"])
+			}
+			if _, err := time.Parse(time.RFC3339, when); err != nil {
+				t.Fatalf("folder %s lastUsed %q: %v", path, when, err)
+			}
+		}
+		seen = true
+	}
+	if !seen {
+		t.Fatal("mail_folders listed no folders")
+	}
+}
+
+// TestE2EAttachmentKinds reads the seeded message with one attachment of
+// each kind (fixtures/seed/attachment-kinds.eml): a windows-1252 text,
+// one with no file name, a FileLink, a linked file and a deleted one. The
+// type comes from the part's own headers, which Thunderbird gives from
+// 140; 153 also names the FileLink by its real name.
+func TestE2EAttachmentKinds(t *testing.T) {
+	cs := httpSession(t)
+	res, _ := searchUntil(t, cs, map[string]any{"subject": "Attachment kinds"}, "Attachment kinds")
+	id := find(res, "Attachment kinds").ID
+
+	type attachment struct {
+		Name, ContentType, Part, Type string
+		Link                          *string
+	}
+	var read struct {
+		Attachments []attachment        `json:"attachments"`
+		AllHeaders  map[string][]string `json:"allHeaders"`
+	}
+	text, isErr := call(t, cs, "mail_read", map[string]any{"id": id, "headers": true})
+	if isErr {
+		t.Fatalf("mail_read: %s", text)
+	}
+	if err := json.Unmarshal([]byte(text), &read); err != nil {
+		t.Fatal(err)
+	}
+	if got := read.AllHeaders["x-seed-check"]; len(got) != 1 || got[0] != "kinds" {
+		t.Fatalf("allHeaders x-seed-check = %v in %v", got, read.AllHeaders)
+	}
+	if got := read.AllHeaders["message-id"]; len(got) != 1 || got[0] != "<attachment-kinds@seed.test>" {
+		t.Fatalf("allHeaders message-id = %v", got)
+	}
+	if _, ok := read.AllHeaders["bcc"]; ok || strings.Contains(text, "secret-bcc") {
+		t.Fatalf("mail_read returned the Bcc header: %v", read.AllHeaders["bcc"])
+	}
+
+	current := backgroundSave(os.Getenv("MFT_E2E_TB_VERSION"))
+	byName := map[string]attachment{}
+	nameless := attachment{}
+	for _, a := range read.Attachments {
+		if a.Name == "" {
+			nameless = a
+		}
+		byName[a.Name] = a
+	}
+	// On 153 the FileLink is listed under its real name.
+	cloud := "big.zip"
+	if !current {
+		cloud = "big.zip.html"
+	}
+	want := map[string]string{"menu.txt": "normal", "plan.odt": "linked", cloud: "cloudFile", "Deleted: old.doc": "deleted"}
+	links := map[string]string{"plan.odt": "https://files.example.test/plan.odt", cloud: "https://cloud.example.test/f/big.zip"}
+	for name, typ := range want {
+		a, ok := byName[name]
+		if !ok {
+			t.Fatalf("no attachment %q in %+v", name, read.Attachments)
+		}
+		if a.Type != typ {
+			t.Errorf("%s: type %q, want %q", name, a.Type, typ)
+		}
+		if l, ok := links[name]; ok && (a.Link == nil || *a.Link != l) {
+			t.Errorf("%s: link %v, want %q", name, a.Link, l)
+		} else if !ok && a.Link != nil {
+			t.Errorf("%s: link %q, want none", name, *a.Link)
+		}
+	}
+	if nameless.Part == "" || nameless.Type != "normal" {
+		t.Fatalf("no nameless attachment in %+v", read.Attachments)
+	}
+
+	// The text is decoded in the charset of the attachment's own header.
+	var menu struct{ Text string }
+	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "name": "menu.txt"}, &menu)
+	if inner, ok := unwrap(menu.Text); !ok || strings.TrimSpace(inner) != "Menu: café 5€" {
+		t.Fatalf("menu.txt = %q", menu.Text)
+	}
+
+	// A part alone fetches the attachment with no name.
+	var saved struct{ Saved string }
+	callOK(t, cs, "mail_attachment", map[string]any{"id": id, "part": nameless.Part}, &saved)
+	data, err := os.ReadFile(saved.Saved)
+	if err != nil || string(data) != "nameless-bytes" {
+		t.Fatalf("nameless attachment saved as %q: %v %q", saved.Saved, err, data)
+	}
+
+	// Placeholders are refused.
+	for _, name := range []string{"Deleted: old.doc", "plan.odt", cloud} {
+		text, isErr := call(t, cs, "mail_attachment", map[string]any{"id": id, "name": name, "part": byName[name].Part})
+		if !isErr || !strings.HasPrefix(text, "refused:") {
+			t.Errorf("mail_attachment %s: %v %s", name, isErr, text)
+		}
+	}
+}
+
 // TestE2EConnectStdio is the Claude Code check done by a go-sdk client:
 // connect mode over stdio, asking for today's unread mail.
 func TestE2EConnectStdio(t *testing.T) {

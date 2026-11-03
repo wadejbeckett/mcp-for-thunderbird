@@ -1,0 +1,56 @@
+From: Acme Files <files@acme.test>
+To: Test User <test@localhost>
+Bcc: secret-bcc@localhost
+Subject: Attachment kinds
+Date: @DATE@
+Message-ID: <attachment-kinds@seed.test>
+X-Seed-Check: kinds
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mft-kinds-boundary"
+
+--mft-kinds-boundary
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+One attachment of each kind.
+
+--mft-kinds-boundary
+Content-Type: text/plain; charset=windows-1252; name="menu.txt"
+Content-Disposition: attachment; filename="menu.txt"
+Content-Transfer-Encoding: base64
+
+TWVudTogY2Fm6SA1gAo=
+
+--mft-kinds-boundary
+Content-Type: application/octet-stream
+Content-Disposition: attachment
+Content-Transfer-Encoding: base64
+
+bmFtZWxlc3MtYnl0ZXM=
+
+--mft-kinds-boundary
+Content-Type: text/html; charset=utf-8; name="big.zip.html"
+Content-Disposition: attachment; filename="big.zip.html"
+X-Mozilla-Cloud-Part: cloudFile; url=https://cloud.example.test/f/big.zip; name="big.zip"
+Content-Transfer-Encoding: 7bit
+
+<p>big.zip is stored online.</p>
+
+--mft-kinds-boundary
+Content-Type: application/vnd.oasis.opendocument.text; name="plan.odt"
+Content-Disposition: attachment; filename="plan.odt"
+X-Mozilla-External-Attachment-URL: https://files.example.test/plan.odt
+Content-Transfer-Encoding: 7bit
+
+placeholder
+
+--mft-kinds-boundary
+Content-Type: text/x-moz-deleted; name="Deleted: old.doc"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: inline; filename="Deleted: old.doc"
+X-Mozilla-Altered: AttachmentDeleted; date="Mon Nov 02 10:00:00 2026"
+
+You deleted an attachment from this message. The original MIME headers for the attachment were:
+Content-Type: application/msword; name="old.doc"
+
+--mft-kinds-boundary--
