@@ -2847,7 +2847,9 @@ func TestE2EComposeIdentity(t *testing.T) {
 // (other@localhost). A reply window goes out from that identity, as
 // Thunderbird picks it. account3 has no Drafts folder and Local Folders is
 // not enabled, so a reply draft is refused rather than saved in account1's
-// Drafts on the same server.
+// Drafts on the same server. Naming account account3 with its identity is
+// no move of mail and is not refused for that; naming account1 writes the
+// reply from account1's identity into account1's Drafts.
 func TestE2EComposeOtherAccount(t *testing.T) {
 	cs := httpSession(t)
 	orig := addonSettings(t, nil)
@@ -2876,19 +2878,43 @@ func TestE2EComposeOtherAccount(t *testing.T) {
 	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id2" || !strings.Contains(w.To, "sender@example.org") {
 		t.Fatalf("reply window: identity %q to %q, want id2 to the sender", w.Identity, w.To)
 	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "account": "account3", "from": "other@localhost", "body": "Named account3."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id2" {
+		t.Fatalf("reply window with account account3: identity %q, want id2", w.Identity)
+	}
+	callOK(t, cs, "mail_compose", map[string]any{"kind": "reply", "id": o.ID, "account": "account1", "body": "Named account1."}, &opened)
+	if w := readComposeIdentity(t, "Re: "+subj); w.Identity != "id1" {
+		t.Fatalf("reply window with account account1: identity %q, want id1", w.Identity)
+	}
 
 	if version := os.Getenv("MFT_E2E_TB_VERSION"); !backgroundSave(version) {
-		t.Logf("Thunderbird %s: no mail_draft, compose window checked only", version)
+		t.Logf("Thunderbird %s: no mail_draft, compose windows checked only", version)
 		return
 	}
 	text, isErr := call(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "body": "Must not reach account1's Drafts."})
 	if !isErr || !strings.Contains(text, "no Drafts folder of its own") {
 		t.Fatalf("reply draft from account3's identity: %v %s, want refused for no Drafts folder", isErr, text)
 	}
+	text, isErr = call(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "account": "account3", "from": "other@localhost", "body": "Must not reach account1's Drafts."})
+	if !isErr || !strings.Contains(text, "no Drafts folder of its own") {
+		t.Fatalf("reply draft with account account3: %v %s, want refused for no Drafts folder", isErr, text)
+	}
 	for _, at := range greenmailFind(t, "Re: "+subj) {
 		t.Fatalf("a reply draft was saved in %s", at)
 	}
-	t.Logf("reply window from id2; reply draft refused: %s", text)
+	var d struct {
+		DraftID *string `json:"draftId"`
+	}
+	callOK(t, cs, "mail_draft", map[string]any{"kind": "reply", "id": o.ID, "account": "account1", "body": "From account1."}, &d)
+	if d.DraftID == nil {
+		t.Fatal("reply draft with account account1: no draft id")
+	}
+	_, mid := draftMessageID(t, *d.DraftID)
+	imapWait(t, "draft", "Drafts", mid, func(found bool, _ string) bool { return found })
+	if h := imapHeader(t, "Drafts", mid); !strings.Contains(h, "X-Identity-Key: id1") {
+		t.Fatalf("reply draft with account account1 is not from id1:\n%s", h)
+	}
+	t.Logf("reply windows from id2 and, with account account1, id1; drafts from account3 refused: %s", text)
 }
 
 // TestE2EForwardPlaceholder delivers a message whose attachment is a

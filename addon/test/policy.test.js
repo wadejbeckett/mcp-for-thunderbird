@@ -97,6 +97,18 @@ test("an account that differs from an id's account is refused", () => {
   check("mail_move", { account: "a1", ids: [encodeId("a1", "INBOX", "x@y")], folder: "Archive" }, s());
 });
 
+test("a reply or forward may name another account to write from than the id's", () => {
+  const on = s({ groups: { ...DEFAULTS.groups, compose: true } });
+  const id = encodeId("a1", "INBOX", "x@y");
+  for (const tool of ["mail_draft", "mail_compose"]) {
+    check(tool, { kind: "reply", id, account: "a2" }, on);
+    // both accounts must still be enabled, and the id's folder allowed
+    assert.throws(() => check(tool, { kind: "reply", id, account: "off" }, on), { code: "not_enabled" });
+    assert.throws(() => check(tool, { kind: "reply", id: encodeId("off", "INBOX", "x@y"), account: "a2" }, on), { code: "not_enabled" });
+    assert.throws(() => check(tool, { kind: "forward", id: encodeId("a1", "Private", "x@y"), account: "a2" }, on), { code: "excluded" });
+  }
+});
+
 test("a target folder is checked against the ids' account even with no account given", () => {
   assert.throws(() => check("mail_move", { ids: [encodeId("a1", "INBOX", "x@y")], folder: "Private/Sub" }, s()), { code: "excluded" });
   check("mail_move", { ids: [encodeId("a2", "INBOX", "x@y")], folder: "Private" }, s());

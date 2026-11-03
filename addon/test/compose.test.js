@@ -1298,6 +1298,38 @@ test("from may name an identity of another enabled account for a reply or forwar
   assert.equal(mock.calls.compose.find(([f]) => f === "beginForward")[1][2].identityId, "id2");
 });
 
+test("account names the account a reply or forward is written from and saved in", async () => {
+  await save({ accounts: { a1: true, a2: true } });
+  // with from: another account than the original's is no move of mail
+  const o = original();
+  let r = await call("mail_draft", { kind: "reply", id: o.id, account: "a2", from: "me@home.test", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(0).headers["x-identity-key"], "id2");
+  assert.equal(mock.calls.import[0].folderId, "a2:/Drafts");
+  r = await call("mail_compose", { kind: "forward", id: o.id, account: "a2", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(mock.calls.compose.find(([f]) => f === "beginForward")[1][2].identityId, "id2");
+  // from must be one of that account's identities
+  r = await call("mail_draft", { kind: "reply", id: o.id, account: "a2", from: "me@allowed.com", body: "x" });
+  assert.equal(r.error.code, "invalid_argument");
+  assert.equal(r.error.message, "from is not an identity of this account: me@allowed.com");
+
+  // without from: addressed to a2's identity, but account a1 is named, so
+  // a1 writes it, from its default identity, into a1's Drafts
+  const home = original({ headerMessageId: "home@seed.test", recipients: ["Me <me@home.test>"], ccList: [] });
+  r = await call("mail_draft", { kind: "reply", id: home.id, account: "a1", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(1).headers["x-identity-key"], "id1");
+  assert.equal(mock.calls.import[1].folderId, "a1:/Drafts");
+  // the named account's identity the original was addressed to comes first
+  const alias = original({ headerMessageId: "alias@seed.test", recipients: ["me@home.test"], ccList: ["alias@allowed.com"] });
+  r = await call("mail_draft", { kind: "reply", id: alias.id, account: "a1", body: "x" });
+  assert.equal(drafted(2).headers["x-identity-key"], "id9");
+  r = await call("mail_compose", { kind: "reply", id: home.id, account: "a1", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(mock.calls.compose.filter(([f]) => f === "beginReply").at(-1)[1][2].identityId, "id1");
+});
+
 const LOCAL_ORIGINAL = [
   { id: "lf", name: "Local Folders", type: "local", identities: [], folders: ["Drafts", "Archive"], specialUse: { Drafts: ["drafts"] } },
   ...ACCOUNTS,
@@ -1342,7 +1374,7 @@ test("an identity address two enabled accounts share is refused unless the accou
   const o = original();
   r = await call("mail_draft", { kind: "reply", id: o.id, from: "shared@other.test", body: "x" });
   assert.equal(r.error.code, "invalid_argument");
-  assert.equal(r.error.message, "Several enabled accounts have the identity shared@other.test. Name the identity by its id.");
+  assert.equal(r.error.message, "Several enabled accounts have the identity shared@other.test. Name the account to write from, or the identity by its id.");
   assert.equal(mock.calls.import.length + mock.calls.compose.length, 0);
 
   // with the account named, or the identity by its id, it is settled
@@ -1351,11 +1383,14 @@ test("an identity address two enabled accounts share is refused unless the accou
   r = await call("mail_draft", { kind: "reply", id: o.id, from: "id8", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(drafted(1).headers["x-identity-key"], "id8");
+  r = await call("mail_draft", { kind: "reply", id: o.id, account: "a4", from: "shared@other.test", body: "x" });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(drafted(2).headers["x-identity-key"], "id8");
   // a reply from the account that has it uses that account's
   const h = mock.addMessage("a2", "INBOX", { headerMessageId: "home-1@seed.test", author: "Bob <bob@example.test>", recipients: ["carol@example.test"], subject: "Home" });
   r = await call("mail_draft", { kind: "reply", id: encodeId("a2", "INBOX", h.headerMessageId), from: "shared@other.test", body: "x" });
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(drafted(2).headers["x-identity-key"], "id7");
+  assert.equal(drafted(3).headers["x-identity-key"], "id7");
 });
 
 // ---- the text goes into the window ----

@@ -341,7 +341,7 @@ func TestComposeIdentityKindsAndForward(t *testing.T) {
 	}
 	for _, n := range []string{"mail_draft", "mail_compose"} {
 		d, _ := props(t, n)["from"]["description"].(string)
-		for _, want := range []string{"addressed to", "for mail you sent, from the identity that sent it", "any enabled account"} {
+		for _, want := range []string{"addressed to", "for mail you sent, from the identity that sent it", "any enabled account", "With account, a reply or forward is written from that account, which need not be the original's"} {
 			if !strings.Contains(d, want) {
 				t.Errorf("%s from description must mention %q: %s", n, want, d)
 			}

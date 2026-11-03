@@ -59,6 +59,12 @@ export function enabledAccountIds(s) {
 
 const CROSS_ACCOUNT = "Moving mail between accounts is not allowed.";
 
+// WRITES_FROM holds the tools whose `account` is the account to write
+// from: a reply or forward may be written from another enabled account
+// than the original's (compose.js, writer), so for them `account` need
+// not be the id's account. Nothing moves; both accounts are still checked.
+const WRITES_FROM = new Set(["mail_draft", "mail_compose"]);
+
 // NO_ACCOUNT holds the tools that take no account, with why. An account
 // sent to one of them (an older client may still send one) is refused
 // before it is checked, so the answer is not "enable this account".
@@ -69,7 +75,8 @@ const NO_ACCOUNT = {
 
 // check refuses a call the settings do not allow. Order: paused, tool
 // group, an account the tool does not take, argument types, account, the
-// ids, then the folder. Policy owns the
+// ids (an id in another account than `account` is refused, except for a
+// reply or forward, WRITES_FROM), then the folder. Policy owns the
 // account and folder checks; handlers repeat assertFolderAllowed for every
 // message they reach.
 export function check(tool, args, s) {
@@ -101,7 +108,7 @@ export function check(tool, args, s) {
     const { accountId, folderPath } = decodeId(id);
     assertAccountEnabled(accountId, s);
     assertFolderAllowed(accountId, folderPath, s);
-    if (has("account") && accountId !== args.account) fail("refused", CROSS_ACCOUNT);
+    if (has("account") && accountId !== args.account && !WRITES_FROM.has(tool)) fail("refused", CROSS_ACCOUNT);
     idAccounts.add(accountId);
   }
 

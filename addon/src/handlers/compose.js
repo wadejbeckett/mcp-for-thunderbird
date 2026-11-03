@@ -15,8 +15,8 @@
 //
 // Every tool writes from one identity of an enabled account: the one
 // `from` names (an identity id or address), else for a reply or forward
-// the one the original was addressed to, in any enabled account (writer),
-// else the account's default identity. kind reply_list answers the list in the original's
+// the one the original was addressed to, in any enabled account or in the
+// one `account` names (writer), else the account's default identity. kind reply_list answers the list in the original's
 // List-Post header; forward_as attachment forwards the whole original as
 // an attached message.
 //
@@ -360,7 +360,10 @@ const ownAddresses = (accounts) => new Set(accounts.flatMap((a) => identitiesIn(
 // whose address is in the original's To or Cc, else, for mail the user
 // sent, the identity that sent it, looked for first in the original's
 // account and then in every enabled account; else the original account's
-// default identity. `own` holds every enabled account's identities.
+// default identity. With `account` (policy has checked it is enabled), the
+// identity is looked for in that account only, ending with its default
+// identity, and `from` must be one of its identities. `own` holds every
+// enabled account's identities.
 async function writer(run, args, s, h, from) {
   if (!h) {
     const accountId = await accountFor(run, args, s, from);
@@ -372,23 +375,41 @@ async function writer(run, args, s, h, from) {
     return { accountId, identity, own: ownAddresses([a]) };
   }
   const accounts = await enabledAccounts(run, s);
+  const own = ownAddresses(accounts);
+  if (args.account !== undefined) {
+    const a = accounts.find((x) => x.id === args.account);
+    const ids = identitiesIn(a);
+    if (ids.length === 0) fail("refused", "This account has no identity to write from.");
+    if (from === undefined) return { accountId: a.id, identity: (await addressedIn(run, [a], h))?.identity || ids[0], own };
+    const identity = named(ids, from);
+    if (!identity) fail("invalid_argument", `from is not an identity of this account: ${from}`);
+    return { accountId: a.id, identity, own };
+  }
   const home = accounts.find((a) => a.id === h.folder.accountId);
   const order = home ? [home, ...accounts.filter((a) => a !== home)] : accounts;
-  const own = ownAddresses(accounts);
   if (from !== undefined) {
-    const a = home && named(identitiesIn(home), from) ? home : accountOf(accounts, from, "Name the identity by its id.");
+    const a = home && named(identitiesIn(home), from) ? home : accountOf(accounts, from, "Name the account to write from, or the identity by its id.");
     return { accountId: a.id, identity: named(identitiesIn(a), from), own };
   }
-  const list = (v) => (Array.isArray(v) ? v : []);
-  for (const entries of [[...list(h.recipients), ...list(h.ccList)], [h.author]]) {
-    for (const a of order) {
-      const identity = await addressedTo(run, identitiesIn(a), entries);
-      if (identity) return { accountId: a.id, identity, own };
-    }
-  }
+  const hit = await addressedIn(run, order, h);
+  if (hit) return { ...hit, own };
   const ids = identitiesIn(home);
   if (ids.length === 0) fail("refused", "This account has no identity to write from. Name an identity of another enabled account with from.");
   return { accountId: home.id, identity: ids[0], own };
+}
+
+// addressedIn returns the account and identity, among the accounts in
+// their order, the original was addressed to: in its To or Cc, else, for
+// mail the user sent, as its author.
+async function addressedIn(run, accounts, h) {
+  const list = (v) => (Array.isArray(v) ? v : []);
+  for (const entries of [[...list(h.recipients), ...list(h.ccList)], [h.author]]) {
+    for (const a of accounts) {
+      const identity = await addressedTo(run, identitiesIn(a), entries);
+      if (identity) return { accountId: a.id, identity };
+    }
+  }
+  return undefined;
 }
 
 const isDrafts = (f) => f && realFolder(f, f.accountId) && Array.isArray(f.specialUse) && f.specialUse.includes("drafts");
