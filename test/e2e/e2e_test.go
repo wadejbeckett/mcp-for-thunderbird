@@ -1269,7 +1269,16 @@ func TestE2EArchive(t *testing.T) {
 
 	// Archiving it again: Thunderbird leaves a message that is already in
 	// its archive folder where it is, with no event. It is done, and its id
-	// does not change.
+	// does not change. First the folder settles: on IMAP the message is in
+	// Thunderbird's list of Archives only once the folder is synchronised
+	// with the server, which on a slow runner takes tens of seconds, and
+	// until then the add-on cannot see it (SECURITY.md, Known limits).
+	// mail_search reads that list, so a hit means the folder has settled.
+	settleStart := time.Now()
+	searchUntil(t, cs, map[string]any{"account": "account1", "folder": "/Archives"}, subj)
+	if took := time.Since(settleStart); took > time.Second {
+		t.Logf("Archives settled after %v", took.Round(time.Millisecond))
+	}
 	o = organised{}
 	callOK(t, cs, "mail_archive", map[string]any{"ids": []string{archived}}, &o)
 	o.only(t, "mail_archive again", archived)
