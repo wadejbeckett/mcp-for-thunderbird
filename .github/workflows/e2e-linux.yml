@@ -86,4 +86,16 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
           MFT_E2E_THUNDERBIRD: ${{ steps.tb.outputs.path }}
+          # The work directory is kept, so that Thunderbird's output (the
+          # add-on's console, tb.out) can be uploaded when a test fails.
+          MFT_E2E_DIR: ${{ runner.temp }}/mft-e2e-work
+          MFT_E2E_KEEP: "1"
         run: test/e2e/run.sh -v
+      - name: Thunderbird's output, for a failed run
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-thunderbird-${{ matrix.version }}
+          path: ${{ runner.temp }}/mft-e2e-work/tb.out
+          if-no-files-found: ignore
+          retention-days: 7

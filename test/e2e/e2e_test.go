@@ -1258,6 +1258,15 @@ func TestE2EArchive(t *testing.T) {
 		if !isErr && json.Unmarshal([]byte(text), &r) == nil && r.Headers.Subject == subj {
 			break
 		}
+		if i == 20 {
+			// Five seconds without the message: Thunderbird has not yet
+			// synchronised Archives with the server, as a user would make it
+			// do by opening the folder. Do that for it (SECURITY.md, Known
+			// limits).
+			var updated string
+			marionette(t, updateArchivesScript, &updated)
+			t.Logf("Archives updated by hand after %v: %s", time.Since(readStart).Round(time.Millisecond), updated)
+		}
 		time.Sleep(250 * time.Millisecond)
 	}
 	if isErr || r.Headers.Subject != subj {
@@ -1298,6 +1307,32 @@ func TestE2EArchive(t *testing.T) {
 		t.Fatal("the archived message left Archives")
 	}
 }
+
+// updateArchivesScript makes Thunderbird synchronise the Archives folder
+// of the test account with the server, as opening the folder would, and
+// returns the folder's message count once the update has run.
+const updateArchivesScript = `
+const resolve = arguments[arguments.length - 1];
+(async () => {
+  const { MailUtils } = ChromeUtils.importESModule("resource:///modules/MailUtils.sys.mjs");
+  const folder = MailUtils.getExistingFolder("imap://test@127.0.0.1/Archives");
+  if (!folder) return "no Archives folder";
+  await new Promise((done) => {
+    const listener = {
+      OnStartRunningUrl() {},
+      OnStopRunningUrl() { done(); },
+    };
+    try {
+      folder.updateFolderWithListener(null, listener);
+    } catch (e) {
+      folder.updateFolder(null);
+      setTimeout(done, 3000);
+    }
+    setTimeout(done, 15000);
+  });
+  return "messages " + folder.getTotalMessages(false);
+})().then(resolve, (e) => resolve("error: " + e));
+`
 
 // archiveEnabledScript turns archiving on or off for identity id1 and
 // returns whether it was on.
