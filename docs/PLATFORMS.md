@@ -1,6 +1,6 @@
 # Platforms
 
-MCP for Thunderbird is tested on Linux, Windows and macOS. This page records what has been checked on each, how, and what is still to be checked by hand.
+MCP for Thunderbird is tested on Linux, Windows and macOS in GitHub Actions, and supported on Linux only for the moment: the manual check below has not yet been done on a real PC or Mac, and Windows and macOS become supported when it has. This page records what has been checked on each, how, and what is still to be checked by hand.
 
 ## Automated checks (GitHub Actions)
 
@@ -64,7 +64,7 @@ These results are from 20 October 2026, at commit `688d076` on `v1`: `test` run 
 
 ## Manual check (maintainer)
 
-The steps below are left for the maintainer, on Windows 11 and on macOS. Use a release candidate: the `release-candidate` artifact of a green `platforms` run, or a draft release.
+The steps below are left for the maintainer, on Windows 11 and on macOS, and are deferred for the moment (4 November 2026); until they are done, only Linux is supported. Use a release candidate: the `release-candidate` artifact of a green `platforms` run, or a draft release.
 
 1. Install Thunderbird 153 or later, if it is not installed already. Thunderbird 140 ESR is supported too, but has no `mail_draft` or `mail_send`; the steps below are written for 153 or later.
 2. Install the add-on: in Thunderbird, open Add-ons and Themes, choose "Install Add-on From File…" from the gear menu, and pick `mcp-for-thunderbird-<version>.xpi`. Take a screenshot of the permission prompt.

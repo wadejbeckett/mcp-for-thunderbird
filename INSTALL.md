@@ -9,6 +9,8 @@ Install the host first. When the add-on is installed, it opens a setup page that
 
 You need Thunderbird 140 ESR or later. On Thunderbird 140, AI apps can open a filled-in compose window for you to check and send, but cannot save drafts or send mail without a window; those need Thunderbird 153 or later. To check, open Thunderbird's ≡ menu (top right), choose **Help**, then **About Thunderbird**. If your version is older, update Thunderbird first.
 
+Only Linux is supported for the moment. The Windows and macOS packages are built and tested in CI, but have not yet been checked by hand on a real PC or Mac; their steps are below for anyone who wants to try them, and support for them follows once that check is done.
+
 The steps below take about five minutes.
 
 ## 1. Download

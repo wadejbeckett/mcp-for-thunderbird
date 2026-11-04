@@ -31,7 +31,7 @@ MCP for Thunderbird $version needs a separately installed host program (native m
 
 HOW TO TEST
 
-1. Install the host program for your system from https://github.com/wadejbeckett/mcp-for-thunderbird/releases/tag/v$version. Linux: the .deb, or unpack the .tar.gz anywhere. macOS: the .pkg (Gatekeeper warns, since the host is not code-signed yet: System Settings, Privacy & Security, Open Anyway). Windows: the -setup.exe (SmartScreen warns for the same reason: More info, Run anyway). SHA-256 of each file, from the release's SHA256SUMS:
+1. Install the host program for your system from https://github.com/wadejbeckett/mcp-for-thunderbird/releases/tag/v$version. Linux is the supported system for the moment: the .deb, or unpack the .tar.gz anywhere. The macOS .pkg and the Windows -setup.exe pass the same install and end-to-end checks in CI but have not been checked by hand yet; both warn about an unknown publisher, since the host is not code-signed (macOS: System Settings, Privacy & Security, Open Anyway; Windows: More info, Run anyway). SHA-256 of each file, from the release's SHA256SUMS:
 $packages
 
 2. Register the host with the mail app: run "mcp-for-thunderbird setup --native-only" as your user. (The macOS package and the Windows installer run it for you.) It writes only the native-messaging manifest. Without --native-only, setup also adds the host to AI apps it finds on the computer, which the review does not need.
