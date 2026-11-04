@@ -131,10 +131,10 @@ The end-to-end tests start a real Thunderbird. Run them so they can never touch 
 - **Logs never contain message text, subjects or addresses**, in the host or the add-on.
 - **Safe defaults stay safe.** With default settings, no change may let an AI app send mail or delete anything for good.
 - **Tests first.** Write the failing test, see it fail for the expected reason, then make it pass. Keep test output free of stray warnings.
-- **The licence header.** Every source file starts with the MPL-2.0 header used in the existing files. Files derived from thunderbird-cli keep their credit line (see [NOTICE](NOTICE)).
+- **The licence header.** Every source file starts with the GPL-3.0-or-later header used in the existing files. Files derived from thunderbird-cli keep their credit line (see [NOTICE](NOTICE)).
 - **The product name is "MCP for Thunderbird"**, in code, interface text and documents.
 - **Documents are for a reader who has only the page.** Introduce each point where it is made, in plain English.
 
 ## Licence of contributions
 
-MCP for Thunderbird is licensed under the Mozilla Public License 2.0 ([LICENSE](LICENSE)). By submitting a contribution, you agree that it is licensed under the MPL-2.0 too, and you confirm that you have the right to submit it under that licence.
+MCP for Thunderbird is licensed under the GNU General Public License, version 3 or (at your option) any later version ([LICENSE](LICENSE)). By submitting a contribution, you agree that it is licensed under the GPL-3.0-or-later too, and you confirm that you have the right to submit it under that licence.

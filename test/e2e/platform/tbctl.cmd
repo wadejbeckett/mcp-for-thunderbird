@@ -1,7 +1,10 @@
 @echo off
-rem This Source Code Form is subject to the terms of the Mozilla Public
-rem License, v. 2.0. If a copy of the MPL was not distributed with this
-rem file, You can obtain one at https://mozilla.org/MPL/2.0/.
+rem Copyright (C) 2026 Wade J. Beckett
+rem This file is part of MCP for Thunderbird, free software: you can redistribute
+rem it and/or modify it under the terms of the GNU General Public License as
+rem published by the Free Software Foundation, either version 3 of the License, or
+rem (at your option) any later version. It comes WITHOUT ANY WARRANTY; see LICENSE.
+rem SPDX-License-Identifier: GPL-3.0-or-later
 rem
 rem tb.sh for Windows: what the e2e tests run as MFT_E2E_TB.
 if "%MFT_E2E_PYTHON%"=="" set MFT_E2E_PYTHON=python

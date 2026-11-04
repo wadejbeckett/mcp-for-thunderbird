@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-/* This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+/* Copyright (C) 2026 Wade J. Beckett
+ * This file is part of MCP for Thunderbird, free software: you can redistribute
+ * it and/or modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version. It comes WITHOUT ANY WARRANTY; see LICENSE.
+ * SPDX-License-Identifier: GPL-3.0-or-later */
 
 // build-xpi zips addon/ (minus tests, node_modules and the npm package
 // files), plus the repository's LICENSE and NOTICE, into
@@ -76,7 +79,7 @@ const opts = parseArgs(process.argv.slice(2));
 const manifest = JSON.parse(readFileSync(join(addon, "manifest.json"), "utf8"));
 const version = opts.version ?? manifest.version;
 const files = walk(addon).map((p) => ({ name: relative(addon, p).split(sep).join("/"), data: readFileSync(p) }));
-// The MPL-2.0 text and the notice for the MIT-licensed code derived from
+// The GPL text and the notice for the MIT-licensed code derived from
 // thunderbird-cli travel with the add-on.
 for (const name of ["LICENSE", "NOTICE"]) files.push({ name, data: readFileSync(join(root, name)) });
 if (opts.version !== null) {

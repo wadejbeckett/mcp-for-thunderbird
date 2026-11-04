@@ -1,6 +1,9 @@
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this
-# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+# Copyright (C) 2026 Wade J. Beckett
+# This file is part of MCP for Thunderbird, free software: you can redistribute
+# it and/or modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version. It comes WITHOUT ANY WARRANTY; see LICENSE.
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 name: test
 
@@ -32,11 +35,11 @@ jobs:
           fi
       - name: The e2e harness work directory is new and private (test/e2e/run.sh)
         run: bash test/e2e/workdir-selftest.sh
-      - name: Every source file carries the MPL-2.0 header (CONTRIBUTING.md)
+      - name: Every source file carries the GPL-3.0-or-later header (CONTRIBUTING.md)
         run: |
-          missing=$(git ls-files -- '*.js' '*.mjs' '*.go' '*.sh' '*.css' '*.html' '*.py' '*.yml' '*.yaml' '*.iss' ':!addon/test/fixtures' ':!test/e2e/fixtures' | xargs grep -L 'mozilla.org/MPL/2.0' || true)
+          missing=$(git ls-files -- '*.js' '*.mjs' '*.go' '*.sh' '*.css' '*.html' '*.py' '*.yml' '*.yaml' '*.iss' ':!addon/test/fixtures' ':!test/e2e/fixtures' | xargs grep -L 'SPDX-License-Identifier: GPL-3.0-or-later' || true)
           if [ -n "$missing" ]; then
-            echo "$missing"; echo "add the MPL-2.0 header to these files"; exit 1
+            echo "$missing"; echo "add the GPL-3.0-or-later header to these files"; exit 1
           fi
 
   addon:

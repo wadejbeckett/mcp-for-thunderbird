@@ -15,7 +15,7 @@
     "url": "https://github.com/wadejbeckett/mcp-for-thunderbird"
   },
   "homepage": "https://github.com/wadejbeckett/mcp-for-thunderbird",
-  "license": "MPL-2.0",
+  "license": "GPL-3.0-or-later",
   "keywords": ["thunderbird", "email", "mail"],
   "server": {
     "type": "binary",

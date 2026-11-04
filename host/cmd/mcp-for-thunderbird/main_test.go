@@ -1,6 +1,9 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Copyright (C) 2026 Wade J. Beckett
+// This file is part of MCP for Thunderbird, free software: you can redistribute
+// it and/or modify it under the terms of the GNU General Public License as
+// published by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version. It comes WITHOUT ANY WARRANTY; see LICENSE.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 package main
 

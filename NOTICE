@@ -1,6 +1,7 @@
 MCP for Thunderbird
 Copyright (c) 2026 Wade J. Beckett and contributors
-Licensed under the Mozilla Public License, v. 2.0 (see LICENSE).
+Licensed under the GNU General Public License, version 3 or (at your
+option) any later version (see LICENSE).
 The Go libraries linked into the host program and their licences are
 listed in THIRD_PARTY_LICENSES, which ships with every host package.
 

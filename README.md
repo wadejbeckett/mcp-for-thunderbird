@@ -111,7 +111,7 @@ You can also help by reporting bugs, sending fixes or starring the repository.
 
 ## Licence and credits
 
-MCP for Thunderbird is published by Wade J. Beckett ([wadejbeckett](https://github.com/wadejbeckett) on GitHub) under the Mozilla Public License 2.0 ([LICENSE](LICENSE)).
+MCP for Thunderbird is published by Wade J. Beckett ([wadejbeckett](https://github.com/wadejbeckett) on GitHub) under the GNU General Public License, version 3 or (at your option) any later version ([LICENSE](LICENSE)).
 
 Parts of the add-on and the threat model in [SECURITY.md](SECURITY.md) are adapted from [thunderbird-cli](https://github.com/vitalio-sh/thunderbird-cli) by Vitalii Ionov, used under the MIT License. [NOTICE](NOTICE) lists the files and keeps that licence. The host links Go libraries under the Apache-2.0, MIT and BSD licences; [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES) carries their notices and ships inside every host package.
 

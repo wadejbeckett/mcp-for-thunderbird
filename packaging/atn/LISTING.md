@@ -79,7 +79,7 @@ REQUIREMENTS
 
 Thunderbird 140 ESR or later on Linux; the host program; and an AI app that supports MCP. Windows and macOS are not supported yet: their packages are built and tested in CI, but have not been checked by hand on a real PC or Mac. On 140 ESR the two tools that save a draft or send without a window are not offered; they are offered from version 153 on, and the compose window works on every supported version.
 
-MCP for Thunderbird is free software under the Mozilla Public License 2.0, with its source at https://github.com/wadejbeckett/mcp-for-thunderbird. It is not made by, endorsed by or affiliated with Mozilla or MZLA Technologies.
+MCP for Thunderbird is free software under the GNU General Public License, version 3 or later, with its source at https://github.com/wadejbeckett/mcp-for-thunderbird. It is not made by, endorsed by or affiliated with Mozilla or MZLA Technologies.
 ```
 
 ## Categories
@@ -98,7 +98,7 @@ mcp, ai, assistant, claude, cursor, codex, automation
 
 ## Licence
 
-Mozilla Public License, version 2.0 (offered in the form's list).
+GNU General Public License, version 3.0 (offered in the form's list; the code is licensed version 3 or later).
 
 ## Privacy policy
 
